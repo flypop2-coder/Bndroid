@@ -1,5 +1,7 @@
 # Bndroid OS
 
+[中文](README.zh-CN.md) | English
+
 Bndroid OS is an experimental Rust-first operating system project that explores
 Android application compatibility without becoming a Linux distribution.
 
@@ -35,8 +37,10 @@ milestone log that used to live on this page is preserved in
 
 ## Documents
 
+- [README.zh-CN.md](README.zh-CN.md): Chinese project overview.
 - [WHITEPAPER.md](WHITEPAPER.md): short project whitepaper and technical
   positioning.
+- [WHITEPAPER.zh-CN.md](WHITEPAPER.zh-CN.md): Chinese whitepaper translation.
 - [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md): implementation status
   notes.
 - [PROJECT_MILESTONES.md](PROJECT_MILESTONES.md): long-form AndroidBox and OS

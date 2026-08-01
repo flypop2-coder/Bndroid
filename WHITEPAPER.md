@@ -1,5 +1,7 @@
 # Bndroid OS Whitepaper
 
+[中文](WHITEPAPER.zh-CN.md) | English
+
 ## Summary
 
 Bndroid OS is a research operating system for exploring Android-compatible user
