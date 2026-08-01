@@ -1,0 +1,63 @@
+[package]
+name = "bndr-abi"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = []
+mobile-ui-runtime = []
+androidbox-apk-install0 = ["mobile-ui-runtime"]
+androidbox-el0-runtime0 = ["androidbox-apk-install0"]
+androidbox-interactive0 = ["androidbox-el0-runtime0"]
+androidbox-process0 = ["androidbox-interactive0"]
+androidbox-restart0 = ["androidbox-process0"]
+androidbox-scene-rpc2 = ["androidbox-restart0"]
+androidbox-multiaction3 = ["androidbox-scene-rpc2"]
+androidbox-apk-envelope4 = ["androidbox-multiaction3"]
+androidbox-runtime-uninstall1 = ["androidbox-apk-envelope4"]
+androidbox-runtime-install2 = ["androidbox-runtime-uninstall1"]
+androidbox-manifest-catalog3 = ["androidbox-runtime-install2"]
+androidbox-multipackage4 = ["androidbox-manifest-catalog3"]
+androidbox-icon-resources5 = ["androidbox-multipackage4"]
+androidbox-density-icons7 = ["androidbox-icon-resources5"]
+androidbox-dex-methods8 = ["androidbox-density-icons7"]
+androidbox-dex-instance9 = ["androidbox-dex-methods8"]
+androidbox-activity-fields10 = ["androidbox-dex-instance9"]
+androidbox-activity-state11 = ["androidbox-activity-fields10"]
+androidbox-string-text12 = ["androidbox-activity-state11"]
+androidbox-string-builder13 = ["androidbox-string-text12"]
+androidbox-layout-row14 = ["androidbox-string-builder13"]
+androidbox-layout-weight15 = ["androidbox-layout-row14"]
+androidbox-layout-spacing16 = ["androidbox-layout-weight15"]
+androidbox-layout-directional17 = ["androidbox-layout-spacing16"]
+androidbox-layout-size18 = ["androidbox-layout-directional17"]
+androidbox-layout-mixed19 = ["androidbox-layout-size18"]
+app-data-runtime = []
+storage-server-runtime = []
+storage-server-shutdown-orchestration-runtime = ["storage-server-runtime"]
+resident-platform-shutdown-runtime = ["storage-server-shutdown-orchestration-runtime"]
+unified-product-runtime = ["resident-platform-shutdown-runtime"]
+unified-product-liveness-runtime = ["unified-product-runtime"]
+unified-product-multiservice-liveness-runtime = ["unified-product-liveness-runtime"]
+unified-product-psci-shutdown-runtime = ["unified-product-multiservice-liveness-runtime"]
+unified-product-continuous-supervision-runtime = ["unified-product-psci-shutdown-runtime"]
+unified-product-manifest-supervision-runtime = ["unified-product-continuous-supervision-runtime"]
+unified-product-event-supervision-runtime = ["unified-product-manifest-supervision-runtime"]
+unified-product-verified-manifest-runtime = ["unified-product-event-supervision-runtime"]
+unified-product-persistent-rollback-runtime = ["unified-product-verified-manifest-runtime"]
+unified-product-key-rotation-runtime = ["unified-product-persistent-rollback-runtime"]
+unified-product-maintenance-authorization-runtime = ["unified-product-key-rotation-runtime"]
+unified-product-maintenance-execution-runtime = [
+    "unified-product-maintenance-authorization-runtime",
+]
+unified-product-maintenance-step-runtime = [
+    "unified-product-maintenance-execution-runtime",
+]
+unified-product-maintenance-plan-runtime = [
+    "unified-product-maintenance-step-runtime",
+]
+unified-product-signed-maintenance-plan-runtime = [
+    "unified-product-maintenance-plan-runtime",
+]
+
+[dependencies]

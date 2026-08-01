@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Component catalog</string>
+    <string name="catalog_title">Android components</string>
+    <string name="components_label">Show components</string>
+    <string name="permissions_label">Show permissions</string>
+    <string name="status_components">Components: 6 discovered</string>
+    <string name="status_initial">Catalog ready</string>
+    <string name="status_permissions">Permissions: declared only</string>
+</resources>

@@ -1,0 +1,16 @@
+[package]
+name = "bndr-input"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = []
+mobile-ui-runtime = ["bndr-abi/mobile-ui-runtime", "bndr-ui/mobile-ui-runtime"]
+
+[dependencies]
+bndr-abi = { path = "../bndr-abi" }
+bndr-ui = { path = "../bndr-ui" }

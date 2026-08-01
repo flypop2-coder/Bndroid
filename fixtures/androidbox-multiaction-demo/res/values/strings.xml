@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Multi-action Android app</string>
+    <string name="approve_label">Approve</string>
+    <string name="reject_label">Reject</string>
+    <string name="status_approved">Decision: approved</string>
+    <string name="status_initial">Decision: pending</string>
+    <string name="status_rejected">Decision: rejected</string>
+    <string name="title_text">Review request</string>
+</resources>

@@ -1,0 +1,38 @@
+[package]
+name = "bndr-ui"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = []
+mobile-ui-runtime = []
+mobile-system-chrome0 = ["mobile-ui-runtime"]
+androidbox-apk-install0 = ["mobile-ui-runtime"]
+androidbox-el0-runtime0 = ["androidbox-apk-install0"]
+androidbox-interactive0 = ["androidbox-el0-runtime0", "mobile-system-chrome0"]
+androidbox-process0 = ["androidbox-interactive0"]
+androidbox-restart0 = ["androidbox-process0"]
+androidbox-scene-rpc2 = ["androidbox-restart0"]
+androidbox-multiaction3 = ["androidbox-scene-rpc2"]
+androidbox-apk-envelope4 = ["androidbox-multiaction3"]
+androidbox-runtime-uninstall1 = ["androidbox-apk-envelope4"]
+androidbox-runtime-install2 = ["androidbox-runtime-uninstall1"]
+androidbox-manifest-catalog3 = ["androidbox-runtime-install2"]
+androidbox-multipackage4 = ["androidbox-manifest-catalog3"]
+androidbox-icon-resources5 = ["androidbox-multipackage4"]
+androidbox-density-icons7 = ["androidbox-icon-resources5"]
+androidbox-dex-methods8 = ["androidbox-density-icons7"]
+androidbox-dex-instance9 = ["androidbox-dex-methods8"]
+androidbox-activity-fields10 = ["androidbox-dex-instance9"]
+androidbox-activity-state11 = ["androidbox-activity-fields10"]
+androidbox-string-text12 = ["androidbox-activity-state11"]
+androidbox-string-builder13 = ["androidbox-string-text12"]
+androidbox-layout-row14 = ["androidbox-string-builder13"]
+androidbox-layout-weight15 = ["androidbox-layout-row14"]
+androidbox-layout-spacing16 = ["androidbox-layout-weight15"]
+androidbox-layout-directional17 = ["androidbox-layout-spacing16"]
+androidbox-layout-size18 = ["androidbox-layout-directional17"]
+androidbox-layout-mixed19 = ["androidbox-layout-size18"]

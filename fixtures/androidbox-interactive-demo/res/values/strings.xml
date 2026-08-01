@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="activity_initial">Ready for a real APK click</string>
+    <string name="app_name">Interactive Android app</string>
+    <string name="button_label">Update text</string>
+    <string name="clicked_message">Button callback executed</string>
+</resources>

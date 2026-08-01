@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+WORKSPACE_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+
+export BNDROID_MULTIPACKAGE_GATE_ABI=64
+export BNDROID_MULTIPACKAGE_GATE_FEATURES=androidbox-layout-row14
+export BNDROID_MULTIPACKAGE_GATE_ARTIFACT_ROOT="${BNDROID_LAYOUT_ROW_GATE_ARTIFACT_ROOT:-"$WORKSPACE_ROOT/target/layout-row14"}"
+export BNDROID_MULTIPACKAGE_GATE_TARGET_ROOT="${BNDROID_LAYOUT_ROW_GATE_TARGET_ROOT:-"$WORKSPACE_ROOT/target/androidbox-layout-row14-build"}"
+export BNDROID_ANDROID_ICON_RESOURCES=2
+export BNDROID_ANDROID_DEX_METHODS=6
+export BNDROID_ANDROID_LAYOUT_ROWS=1
+
+exec "$SCRIPT_DIR/check-androidbox-multipackage4.sh" "$@"

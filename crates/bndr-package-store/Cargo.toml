@@ -1,0 +1,15 @@
+[package]
+name = "bndr-package-store"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = []
+multi-package-store1 = []
+
+[dependencies]
+bndr-sm = { path = "../bndr-sm" }

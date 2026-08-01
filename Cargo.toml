@@ -1,0 +1,36 @@
+[workspace]
+members = [
+    "kernel",
+    "crates/bndr-abi",
+    "crates/bndr-input",
+    "crates/bndr-elf",
+    "crates/bndr-sm",
+    "crates/bndr-storage",
+    "crates/bndr-ui",
+    "crates/bndr-compositor",
+    "crates/bndr-appdata",
+    "crates/bndr-androidbox",
+    "crates/bndr-package-store",
+    "user/init",
+]
+resolver = "2"
+
+[profile.dev]
+panic = "abort"
+
+[profile.dev.package.bndroid-init]
+opt-level = "s"
+codegen-units = 1
+
+# The allocation-free AppData core returns bounded snapshot values through
+# several generic layers. Optimizing this dependency in debug kernels avoids
+# debug-only stack-copy expansion on the 128 KiB monitor stack while retaining
+# kernel debug assertions and symbols.
+[profile.dev.package.bndr-appdata]
+opt-level = "s"
+codegen-units = 1
+
+[profile.release]
+panic = "abort"
+lto = true
+codegen-units = 1

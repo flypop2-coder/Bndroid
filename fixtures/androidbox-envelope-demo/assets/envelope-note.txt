@@ -1,0 +1,4 @@
+AndroidBox APK Envelope-4 fixture note.
+This asset is deliberately not interpreted by the bounded Activity runtime.
+Its DEFLATE payload and ZIP data descriptor prove that unrelated APK entries
+can coexist with the admitted Manifest, resources, layout, and DEX envelope.

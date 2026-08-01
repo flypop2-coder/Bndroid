@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Profile Android app</string>
+    <string name="button_label">Verify profile</string>
+    <string name="status_after">Profile status: verified</string>
+    <string name="status_initial">Profile status: pending</string>
+    <string name="title_text">Account profile</string>
+</resources>

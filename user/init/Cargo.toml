@@ -1,0 +1,348 @@
+[package]
+name = "bndroid-init"
+version = "0.1.0"
+edition = "2024"
+build = "build.rs"
+publish = false
+
+[[bin]]
+name = "bndroid-init"
+path = "src/bin/bndroid-init.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "bndroid-service-manager"
+path = "src/bin/bndroid-service-manager.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "bndroid-echo-provider"
+path = "src/bin/bndroid-echo-provider.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "bndroid-echo-client"
+path = "src/bin/bndroid-echo-client.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "bndroid-surface-server"
+path = "src/bin/bndroid-surface-server.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "bndroid-input-server"
+path = "src/bin/bndroid-input-server.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "bndroid-launcher"
+path = "src/bin/bndroid-launcher.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "bndroid-app"
+path = "src/bin/bndroid-app.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "bndroid-android-app"
+path = "src/bin/bndroid-android-app.rs"
+test = false
+bench = false
+required-features = ["androidbox-process0"]
+
+[[bin]]
+name = "bndroid-storage-server"
+path = "src/bin/bndroid-storage-server.rs"
+test = false
+bench = false
+required-features = ["storage-server-runtime"]
+
+[lib]
+name = "bndroid_init"
+path = "src/lib.rs"
+test = false
+bench = false
+
+[dependencies]
+bndr-abi = { path = "../../crates/bndr-abi" }
+bndr-androidbox = { path = "../../crates/bndr-androidbox", optional = true }
+bndr-appdata = { path = "../../crates/bndr-appdata", optional = true }
+bndr-compositor = { path = "../../crates/bndr-compositor" }
+bndr-input = { path = "../../crates/bndr-input" }
+bndr-sm = { path = "../../crates/bndr-sm" }
+bndr-storage = { path = "../../crates/bndr-storage", optional = true }
+bndr-ui = { path = "../../crates/bndr-ui" }
+
+[features]
+default = []
+app-lifecycle-runtime = []
+app-crash-recovery-runtime = ["app-lifecycle-runtime"]
+mapped-graphics-runtime = ["app-lifecycle-runtime"]
+graphics-owner-death-runtime = ["mapped-graphics-runtime"]
+graphics-surface-restart-runtime = ["graphics-owner-death-runtime"]
+graphics-producer-orphan-runtime = ["graphics-owner-death-runtime"]
+graphics-frame-clock-runtime = ["mapped-graphics-runtime"]
+graphics-swapchain-runtime = ["graphics-frame-clock-runtime"]
+multi-window-runtime = ["graphics-frame-clock-runtime"]
+persistent-window-runtime = ["multi-window-runtime"]
+text-input-runtime = ["persistent-window-runtime"]
+soft-keyboard-runtime = ["text-input-runtime"]
+input-server-runtime = ["soft-keyboard-runtime"]
+input-server-surface-restart-runtime = ["input-server-runtime"]
+input-server-restart-runtime = ["input-server-runtime"]
+service-supervisor-runtime = ["input-server-restart-runtime"]
+service-dependency-runtime = ["input-server-runtime"]
+post-recovery-interaction-runtime = ["service-dependency-runtime"]
+post-recovery-focus-runtime = ["post-recovery-interaction-runtime"]
+post-recovery-focus-roundtrip-runtime = ["post-recovery-focus-runtime"]
+post-recovery-lifecycle-focus-runtime = ["post-recovery-focus-roundtrip-runtime"]
+app-data-runtime = [
+    "post-recovery-lifecycle-focus-runtime",
+    "bndr-abi/app-data-runtime",
+]
+app-data-async-recovery-runtime = ["app-data-runtime"]
+storage-server-runtime = [
+    "bndr-abi/storage-server-runtime",
+    "dep:bndr-appdata",
+    "dep:bndr-storage",
+]
+storage-server-recovery-runtime = ["storage-server-runtime"]
+storage-server-repeated-recovery-runtime = ["storage-server-recovery-runtime"]
+storage-server-async-recovery-runtime = ["storage-server-repeated-recovery-runtime"]
+storage-server-fault-policy-runtime = ["storage-server-async-recovery-runtime"]
+storage-server-owner-liveness-runtime = ["storage-server-fault-policy-runtime"]
+storage-server-terminal-quarantine-runtime = ["storage-server-owner-liveness-runtime"]
+storage-server-shutdown-orchestration-runtime = [
+    "storage-server-terminal-quarantine-runtime",
+    "bndr-abi/storage-server-shutdown-orchestration-runtime",
+]
+resident-platform-shutdown-runtime = [
+    "storage-server-shutdown-orchestration-runtime",
+    "input-server-runtime",
+    "bndr-abi/resident-platform-shutdown-runtime",
+]
+unified-product-runtime = [
+    "resident-platform-shutdown-runtime",
+    "bndr-abi/unified-product-runtime",
+]
+unified-product-liveness-runtime = [
+    "unified-product-runtime",
+    "bndr-abi/unified-product-liveness-runtime",
+]
+unified-product-multiservice-liveness-runtime = [
+    "unified-product-liveness-runtime",
+    "bndr-abi/unified-product-multiservice-liveness-runtime",
+]
+unified-product-psci-shutdown-runtime = [
+    "unified-product-multiservice-liveness-runtime",
+    "bndr-abi/unified-product-psci-shutdown-runtime",
+]
+unified-product-continuous-supervision-runtime = [
+    "unified-product-psci-shutdown-runtime",
+    "bndr-abi/unified-product-continuous-supervision-runtime",
+]
+unified-product-manifest-supervision-runtime = [
+    "unified-product-continuous-supervision-runtime",
+    "bndr-abi/unified-product-manifest-supervision-runtime",
+]
+unified-product-event-supervision-runtime = [
+    "unified-product-manifest-supervision-runtime",
+    "bndr-abi/unified-product-event-supervision-runtime",
+]
+unified-product-verified-manifest-runtime = [
+    "unified-product-event-supervision-runtime",
+    "bndr-abi/unified-product-verified-manifest-runtime",
+]
+unified-product-persistent-rollback-runtime = [
+    "unified-product-verified-manifest-runtime",
+    "bndr-abi/unified-product-persistent-rollback-runtime",
+]
+unified-product-key-rotation-runtime = [
+    "unified-product-persistent-rollback-runtime",
+    "bndr-abi/unified-product-key-rotation-runtime",
+]
+unified-product-maintenance-authorization-runtime = [
+    "unified-product-key-rotation-runtime",
+    "bndr-abi/unified-product-maintenance-authorization-runtime",
+]
+unified-product-maintenance-execution-runtime = [
+    "unified-product-maintenance-authorization-runtime",
+    "bndr-abi/unified-product-maintenance-execution-runtime",
+]
+unified-product-maintenance-step-runtime = [
+    "unified-product-maintenance-execution-runtime",
+    "bndr-abi/unified-product-maintenance-step-runtime",
+]
+unified-product-maintenance-plan-runtime = [
+    "unified-product-maintenance-step-runtime",
+    "bndr-abi/unified-product-maintenance-plan-runtime",
+]
+unified-product-signed-maintenance-plan-runtime = [
+    "unified-product-maintenance-plan-runtime",
+    "bndr-abi/unified-product-signed-maintenance-plan-runtime",
+]
+mobile-ui-runtime = [
+    "bndr-abi/mobile-ui-runtime",
+    "bndr-compositor/mobile-ui-runtime",
+    "bndr-input/mobile-ui-runtime",
+    "bndr-ui/mobile-ui-runtime",
+]
+androidbox-dex0 = [
+    "mobile-ui-runtime",
+    "dep:bndr-androidbox",
+]
+androidbox-apk-install0 = [
+    "androidbox-dex0",
+    "bndr-abi/androidbox-apk-install0",
+]
+androidbox-el0-runtime0 = [
+    "androidbox-apk-install0",
+    "bndr-abi/androidbox-el0-runtime0",
+    "bndr-ui/androidbox-el0-runtime0",
+]
+androidbox-interactive0 = [
+    "androidbox-el0-runtime0",
+    "bndr-abi/androidbox-interactive0",
+    "bndr-ui/androidbox-interactive0",
+]
+androidbox-process0 = [
+    "androidbox-interactive0",
+    "bndr-abi/androidbox-process0",
+    "bndr-ui/androidbox-process0",
+]
+androidbox-restart0 = [
+    "androidbox-process0",
+    "bndr-abi/androidbox-restart0",
+    "bndr-ui/androidbox-restart0",
+]
+androidbox-scene-rpc2 = [
+    "androidbox-restart0",
+    "bndr-abi/androidbox-scene-rpc2",
+    "bndr-ui/androidbox-scene-rpc2",
+]
+androidbox-multiaction3 = [
+    "androidbox-scene-rpc2",
+    "bndr-abi/androidbox-multiaction3",
+    "bndr-androidbox/androidbox-multiaction3",
+    "bndr-ui/androidbox-multiaction3",
+]
+androidbox-apk-envelope4 = [
+    "androidbox-multiaction3",
+    "bndr-abi/androidbox-apk-envelope4",
+    "bndr-androidbox/androidbox-apk-envelope4",
+    "bndr-ui/androidbox-apk-envelope4",
+]
+androidbox-runtime-uninstall1 = [
+    "androidbox-apk-envelope4",
+    "bndr-abi/androidbox-runtime-uninstall1",
+    "bndr-ui/androidbox-runtime-uninstall1",
+]
+androidbox-runtime-install2 = [
+    "androidbox-runtime-uninstall1",
+    "bndr-abi/androidbox-runtime-install2",
+    "bndr-ui/androidbox-runtime-install2",
+]
+androidbox-manifest-catalog3 = [
+    "androidbox-runtime-install2",
+    "bndr-abi/androidbox-manifest-catalog3",
+    "bndr-androidbox/androidbox-manifest-catalog3",
+    "bndr-ui/androidbox-manifest-catalog3",
+]
+androidbox-multipackage4 = [
+    "androidbox-manifest-catalog3",
+    "bndr-abi/androidbox-multipackage4",
+    "bndr-ui/androidbox-multipackage4",
+]
+androidbox-icon-resources5 = [
+    "androidbox-multipackage4",
+    "bndr-abi/androidbox-icon-resources5",
+    "bndr-ui/androidbox-icon-resources5",
+]
+androidbox-density-icons7 = [
+    "androidbox-icon-resources5",
+    "bndr-abi/androidbox-density-icons7",
+    "bndr-ui/androidbox-density-icons7",
+]
+androidbox-dex-methods8 = [
+    "androidbox-density-icons7",
+    "bndr-abi/androidbox-dex-methods8",
+    "bndr-androidbox/androidbox-dex-methods8",
+    "bndr-ui/androidbox-dex-methods8",
+]
+androidbox-dex-instance9 = [
+    "androidbox-dex-methods8",
+    "bndr-abi/androidbox-dex-instance9",
+    "bndr-androidbox/androidbox-dex-instance9",
+    "bndr-ui/androidbox-dex-instance9",
+]
+androidbox-activity-fields10 = [
+    "androidbox-dex-instance9",
+    "bndr-abi/androidbox-activity-fields10",
+    "bndr-androidbox/androidbox-activity-fields10",
+    "bndr-ui/androidbox-activity-fields10",
+]
+androidbox-activity-state11 = [
+    "androidbox-activity-fields10",
+    "bndr-abi/androidbox-activity-state11",
+    "bndr-androidbox/androidbox-activity-state11",
+    "bndr-ui/androidbox-activity-state11",
+]
+androidbox-string-text12 = [
+    "androidbox-activity-state11",
+    "bndr-abi/androidbox-string-text12",
+    "bndr-androidbox/androidbox-string-text12",
+    "bndr-ui/androidbox-string-text12",
+]
+androidbox-string-builder13 = [
+    "androidbox-string-text12",
+    "bndr-abi/androidbox-string-builder13",
+    "bndr-androidbox/androidbox-string-builder13",
+    "bndr-ui/androidbox-string-builder13",
+]
+androidbox-layout-row14 = [
+    "androidbox-string-builder13",
+    "bndr-abi/androidbox-layout-row14",
+    "bndr-androidbox/androidbox-layout-row14",
+    "bndr-ui/androidbox-layout-row14",
+]
+androidbox-layout-weight15 = [
+    "androidbox-layout-row14",
+    "bndr-abi/androidbox-layout-weight15",
+    "bndr-androidbox/androidbox-layout-weight15",
+    "bndr-ui/androidbox-layout-weight15",
+]
+androidbox-layout-spacing16 = [
+    "androidbox-layout-weight15",
+    "bndr-abi/androidbox-layout-spacing16",
+    "bndr-androidbox/androidbox-layout-spacing16",
+    "bndr-ui/androidbox-layout-spacing16",
+]
+androidbox-layout-directional17 = [
+    "androidbox-layout-spacing16",
+    "bndr-abi/androidbox-layout-directional17",
+    "bndr-androidbox/androidbox-layout-directional17",
+    "bndr-ui/androidbox-layout-directional17",
+]
+androidbox-layout-size18 = [
+    "androidbox-layout-directional17",
+    "bndr-abi/androidbox-layout-size18",
+    "bndr-androidbox/androidbox-layout-size18",
+    "bndr-ui/androidbox-layout-size18",
+]
+androidbox-layout-mixed19 = [
+    "androidbox-layout-size18",
+    "bndr-abi/androidbox-layout-mixed19",
+    "bndr-androidbox/androidbox-layout-mixed19",
+    "bndr-ui/androidbox-layout-mixed19",
+]
+ui-stale-present-evidence = []

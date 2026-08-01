@@ -1,0 +1,20 @@
+.DS_Store
+target/
+*.log
+
+# Rust/build artifacts
+**/target/
+
+# Python/script caches
+__pycache__/
+*.py[cod]
+
+# OS/editor noise
+.idea/
+.vscode/
+*.swp
+
+# Local environment and generated evidence
+.env
+.env.*
+*.tmp

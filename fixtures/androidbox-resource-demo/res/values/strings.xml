@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="activity_message">AndroidBox resource-backed view</string>
+    <string name="app_name">AndroidBox Resources-1 Demo</string>
+</resources>

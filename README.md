@@ -1,0 +1,6271 @@
+# Bndroid OS
+
+Bndroid OS is an experimental Android-compatible operating system project. Its
+long-term goal is to replace Android as a user-facing mobile system while
+remaining able to run Android applications. The system is intentionally not a
+Linux distribution: the kernel, service model, storage, UI, and AndroidBox
+runtime are being built as a Rust-first stack with explicit capability,
+supervision, and recovery boundaries.
+
+AndroidBox is the compatibility layer in this repository. It focuses on
+verifiable APK ingestion, resource parsing, DEX interpretation, Activity/UI
+projection, lifecycle supervision, and deterministic evidence-driven tests. The
+current codebase is still a research system, not a drop-in Android production
+replacement.
+
+## License
+
+Source code is licensed under the Apache License, Version 2.0. The bundled
+Bndroid Sans Raster font data remains under the SIL Open Font License 1.1; see
+[`licenses/OFL-1.1-Bndroid-Sans-Raster.txt`](licenses/OFL-1.1-Bndroid-Sans-Raster.txt).
+
+> 项目的权威未来路线与精炼架构见 [`TODO.md`](TODO.md)。本文件负责使用入口和
+> 已完成里程碑摘要；详细历史蓝图不再作为并行待办，避免重复模块和冲突优先级。
+
+## AndroidBox Layout Size-18（完成的 opt-in ABI 68 门禁）
+
+`androidbox-layout-size18` 是 ABI67 Layout Directional-17 的 opt-in child。
+两份真实 SDK/AAPT2/D8 APK 现在可从二进制 XML 传入正整数
+`layout_width=Ndp` 与 `layout_height=Ndp`；严格解析器、独立 AndroidApp
+worker、`BNDAPC14` v14/v5 24-byte descriptor、可信 scene model、
+720×1600 光栅和点击命中使用同一尺寸。
+
+fixture 使用 title `width=240dp`、row `height=120dp`、两个 Button
+`height=64/56dp`。最终 physical Button rectangle 为
+`84/618/270/128` 与 `374/626/270/112`，中间点 `(360,682)` 不命中。
+
+```text
+terminal=ANDROIDBOX_LAYOUT_SIZE18_QEMU_OK
+evidence=target/layout-size18/coexist.SF5cRf
+abi=68
+real_sdk_packages=2
+rpc_protocol=BNDAPC14
+rpc_protocol_version=14
+descriptor_version=5
+descriptor_bytes=24
+exact_size_range_dp=1-255
+fixture_exact_sizes_dp=240/120/64/56
+source_free_recovery=1
+source_free_writes=0
+qemu_starts=3
+qemu_network=disabled
+aosp_downloaded=0
+```
+
+Host tests 为 AndroidBox `112/112`、ABI `59/59`、UI `269/269`、kernel
+`377/377`；fmt、shell syntax 与五组 Clippy 通过。ABI67 与 ABI66 父门以最终
+源码分别重新通过于 `target/layout-directional17/coexist.xi7Dnb` 和
+`target/layout-spacing16/coexist.v9KMXK`。没有下载 AOSP，也没有操作持续运行的
+ABI48 预览。当前阶段不需要 AOSP；完整 ART/Framework 或 Android runtime/
+container 必须先单独评估并取得明确授权。完整契约见
+`ANDROIDBOX_LAYOUT_SIZE_18.md`。
+
+## AndroidBox Layout Directional-17（完成的 opt-in ABI 67 门禁）
+
+`androidbox-layout-directional17` 是 ABI66 Layout Spacing-16 的 opt-in child。
+两份真实 SDK/AAPT2/D8 APK 现在从二进制 XML 分别传入
+`paddingLeft/Top/Right/Bottom` 与
+`layout_marginLeft/Top/Right/Bottom`；严格解析器、独立 AndroidApp worker、
+`BNDAPC13` v13/v4 24-byte descriptor、可信 scene model、720×1600 光栅与
+点击命中使用同一组逐边 dp 语义。
+
+fixture 的 row padding 为 `6/4/2/8dp`，两个 Button margin 分别为
+`2/1/4/3dp` 与 `6/5/2/1dp`。最终 physical rectangle 为
+`84/650/270/168` 与 `374/658/270/164`，证明 top/bottom 和 left/right 没有被
+折叠成 uniform 值。
+
+```text
+terminal=ANDROIDBOX_LAYOUT_DIRECTIONAL17_QEMU_OK
+evidence=target/layout-directional17/coexist.3bHWU6
+abi=67
+real_sdk_packages=2
+rpc_protocol=BNDAPC13
+rpc_protocol_version=13
+descriptor_version=4
+descriptor_bytes=24
+row_padding_ltrb_dp=6/4/2/8
+button_margins_ltrb_dp=2/1/4/3+6/5/2/1
+source_free_recovery=1
+source_free_writes=0
+qemu_starts=3
+qemu_network=disabled
+aosp_downloaded=0
+```
+
+Host tests 为 AndroidBox `111/111`、ABI `59/59`、UI `268/268`、kernel
+`377/377`；fmt、shell syntax 与五组 AArch64 Clippy 通过。共享解析结构触发的
+保护页验证促使交互式 AndroidBox EL0 栈统一为 80 KiB，但保护页、W^X、权限、
+句柄与设备授权均未放宽。ABI66 父门以最终源码重新通过于
+`target/layout-spacing16/coexist.Mb4eRn`。没有下载 AOSP，也没有改动持续运行的
+ABI48 预览。当前阶段不需要 AOSP；完整 ART/Framework 或 Android runtime/
+container 必须先单独评估并取得明确授权。完整契约见
+`ANDROIDBOX_LAYOUT_DIRECTIONAL_17.md`。
+
+## AndroidBox Layout Spacing-16（完成的 opt-in ABI 66 门禁）
+
+`androidbox-layout-spacing16` 是 ABI65 Layout Weight-15 的 opt-in child。两份
+真实 SDK/AAPT2/D8 APK 现在从二进制 XML 传入 uniform
+`android:padding="4dp"` 与 `android:layout_margin="2dp"`；解析器、独立
+AndroidApp worker、`BNDAPC12` v12/v3 descriptor、可信 scene model、
+720×1600 光栅和点击命中使用同一组有界 dp 语义。
+
+只接受 `0..=16dp`：非零 padding 只属于 `LinearLayout`，非零 margin 只属于
+`Button`。最终 physical Button rectangle 为 `80/652/276/176` 与
+`364/652/276/176`，中间 8px gap 不可点击。
+
+```text
+terminal=ANDROIDBOX_LAYOUT_SPACING16_QEMU_OK
+evidence=target/layout-spacing16/coexist.Mb4eRn
+abi=66
+real_sdk_packages=2
+rpc_protocol=BNDAPC12
+rpc_protocol_version=12
+descriptor_version=3
+row_padding_dp=4
+button_margins_dp=2/2
+source_free_recovery=1
+source_free_writes=0
+qemu_starts=3
+qemu_network=disabled
+aosp_downloaded=0
+```
+
+Host tests 为 AndroidBox `111/111`、ABI `59/59`、UI `267/267`、kernel
+`377/377`；fmt、shell syntax 与五组 AArch64 Clippy 通过。ABI65 父门重新通过于
+`target/layout-weight15/coexist.lHJezZ`。没有下载 AOSP，也没有改动持续运行的
+ABI48 预览。当前阶段不需要 AOSP；若以后引入完整 ART/Framework 或 Android
+兼容容器，会先单独评估并请求明确授权。完整契约与当前边界见
+`ANDROIDBOX_LAYOUT_SPACING_16.md`。
+
+## AndroidBox Layout Weight-15（完成的 opt-in ABI 65 门禁）
+
+`androidbox-layout-weight15` 是 ABI64 Layout Row-14 的 opt-in child。两份真实
+SDK/D8 APK 现在从 AAPT2 二进制 XML 传入原生
+`android:layout_width="0dp"` 与 `android:layout_weight="1"`；解析器、
+AndroidApp worker、`BNDAPC11` v11 descriptor、可信 scene model、720×1600
+光栅和点击命中使用同一组权重语义。
+
+真实 fixture 的两个 Button 权重为 `1/1`；另一个 `1/2` host test 得到精确
+physical rectangle `68/640/186/200` 与 `262/640/382/200`，证明渲染器按 APK
+权重而非固定平分。最终隔离门：
+
+```text
+terminal=ANDROIDBOX_LAYOUT_WEIGHT15_QEMU_OK
+evidence=target/layout-weight15/coexist.xC7DAf
+abi=65
+real_sdk_packages=2
+rpc_protocol=BNDAPC11
+rpc_protocol_version=11
+descriptor_version=2
+layout_widths=0dp/0dp
+layout_weights=1/1
+two_activity_launches_same_boot=1
+source_free_recovery=1
+source_free_writes=0
+qemu_starts=3
+qemu_network=disabled
+aosp_downloaded=0
+```
+
+Host tests 为 AndroidBox `110/110`、ABI `59/59`、UI `267/267`、kernel
+`377/377`；fmt、shell syntax 与五组 AArch64 Clippy 通过。ABI64 父门重新通过于
+`target/layout-row14/coexist.Jsu7Eq`。没有下载 AOSP，也没有改动持续运行的
+ABI48 预览。当前仍不是 ART、完整 Framework、任意 APK 兼容或实体手机；完整
+契约见 `ANDROIDBOX_LAYOUT_WEIGHT_15.md`。
+
+## AndroidBox Layout Row-14（完成的 opt-in ABI 64 门禁）
+
+`androidbox-layout-row14` 是 ABI63 String Builder-13 的 opt-in child。两份
+真实 SDK/D8 APK 现在可以从 AAPT2 二进制 XML 解析
+`vertical LinearLayout → title + status + horizontal LinearLayout → two Buttons`，
+并在 720×1600、20:9 的系统界面中并排绘制和点击两个按钮。
+
+`BNDAPC10` v10 传递 canonical horizontal orientation。六节点 scene 的同一
+有界几何同时负责 raster 与 hit test；两个按钮的 physical rectangle 分别为
+`68/640/284/200` 和 `360/640/284/200`。完整
+`Show components / Show permissions` 已在最终 QEMU 截图中核对，无文字裁剪。
+
+```text
+terminal=ANDROIDBOX_LAYOUT_ROW14_QEMU_OK
+evidence=target/layout-row14/coexist.ozW81O
+abi=64
+real_sdk_packages=2
+rpc_protocol=BNDAPC10
+rpc_protocol_version=10
+two_activity_launches_same_boot=1
+source_free_recovery=1
+source_free_writes=0
+qemu_starts=3
+qemu_network=disabled
+aosp_downloaded=0
+```
+
+Host tests 为 AndroidBox `109/109`、ABI `59/59`、UI `265/265`、kernel
+`377/377`。ABI63 父门以当前共享实现重新通过于
+`target/string-builder13/coexist.IsZM9k`。本轮没有下载 AOSP，也没有操作现有
+ABI48 预览。这仍不是 ART、完整 Android Framework、任意 APK 兼容或实体手机；
+完整边界见 `ANDROIDBOX_LAYOUT_ROW_14.md`。
+
+## AndroidBox String Builder-13（完成的 opt-in ABI 63 门禁）
+
+`androidbox-string-builder13` 是 ABI62 String Text-12 的 opt-in child。两个
+真实 SDK/D8 APK 现在可以执行
+`new-instance StringBuilder → <init>(String) → append(int) → toString() →
+move-result-object → TextView.setText(CharSequence)`。Catalog 连续点击显示
+`Review count: 1` 与 `Review count: 2`，整数来自 retained Activity 字段，
+不是预设字符串或 revision 推断。
+
+`BNDAPC09` v9 用 `arg0[54]` 标记动态构造、`arg0[55]` 标记 direct string。
+最终源码通过三启动、全程 `-nic none`、720×1600 QEMU 门禁：
+
+```text
+terminal=ANDROIDBOX_STRING_BUILDER13_QEMU_OK
+evidence=target/string-builder13/coexist.xDu7nN
+abi=63
+real_sdk_packages=2
+rpc_protocol=BNDAPC09
+direct_string_texts_per_transcript=true/true
+dynamic_string_texts_per_transcript=true/true
+activity_field_reads_per_transcript=2/2
+activity_int_state_values_per_transcript=1/2
+status_only_updates=4
+trusted_chrome_unchanged=1
+source_free_recovery=1
+source_free_writes=0
+qemu_starts=3
+qemu_network=disabled
+aosp_downloaded=0
+```
+
+Host tests 为 AndroidBox `109/109`、ABI `59/59`、UI `263/263`、kernel
+`377/377`；fmt、shell syntax 与五组 AArch64 Clippy `-D warnings` 均通过。
+ABI62 父门以当前共享实现重新通过于
+`target/string-text12/coexist.OLePzg`。本轮没有下载 AOSP，也没有改动现有
+ABI48 预览。这仍不是 ART、通用 heap/GC、完整 Framework、任意 APK 兼容或
+真机系统；完整边界见 `ANDROIDBOX_STRING_BUILDER_13.md`。
+
+## AndroidBox String Text-12（完成的 opt-in ABI 62 门禁）
+
+`androidbox-string-text12` 是 ABI61 Activity State-11 的 opt-in child。两个
+真实 SDK/D8 APK 现在可以在连续 callback 中执行
+`iget → const/4 1 → add-int/2addr → iput → iget-object → if-ne →
+const-string → TextView.setText(CharSequence)`。Catalog 的两次点击显示 APK
+自己的 `First review recorded` 与 `Review state advanced again`，并提交状态
+`1 → 2`；不是资源 ID 或 revision 推断。
+
+`BNDAPC08` v8 用 `arg0[55]` 明确标记 direct DEX string。最终源码通过三启动、
+全程 `-nic none`、720×1600 QEMU 门禁：
+
+```text
+terminal=ANDROIDBOX_STRING_TEXT12_QEMU_OK
+evidence=target/string-text12/coexist.OLePzg
+abi=62
+real_sdk_packages=2
+rpc_protocol=BNDAPC08
+direct_string_texts_per_transcript=true/true
+activity_field_reads_per_transcript=2/2
+activity_int_state_values_per_transcript=1/2
+status_only_updates=4
+trusted_chrome_unchanged=1
+source_free_recovery=1
+source_free_writes=0
+qemu_starts=3
+qemu_network=disabled
+aosp_downloaded=0
+```
+
+Host tests 为 AndroidBox `109/109`、ABI `59/59`、UI `263/263`；fmt、shell
+syntax 与五组 AArch64 Clippy `-D warnings` 均通过。ABI61 父门以当前共享实现
+重新通过于 `target/activity-state11/coexist.PHkwhd`。本轮没有下载 AOSP。
+这仍不是 ART、完整 Framework、任意 APK 兼容或真机系统；完整边界与失败修复
+记录见 `ANDROIDBOX_STRING_TEXT_12.md`。
+
+## AndroidBox Activity State-11（完成的 opt-in ABI 61 门禁）
+
+`androidbox-activity-state11` 是 ABI60 Activity Fields-10 的 opt-in child。
+真实 SDK/D8 APK 现在可以在 `onCreate` 把一个私有 `int` Activity 字段初始化
+为 0，并在连续 `onClick` 中实际执行 `iget → add-int/lit8 +1 → iput`。同一
+callback 还会从另一个私有字段 `iget-object` 取回 retained scene 的
+`TextView`。两个点击得到的状态是 `1 → 2`，不是由 revision 推断。
+
+`BNDAPC07` v7 在固定帧的最高字节携带提交后的 int state。worker、ABI decoder、
+App client 与 kernel tracer 独立验证。两个本机 SDK 离线构建的双字段 APK 已
+通过三启动、全程 `-nic none`、720×1600 QEMU 门禁：
+
+```text
+terminal=ANDROIDBOX_ACTIVITY_STATE11_QEMU_OK
+evidence=target/activity-state11/coexist.DD8YfM
+abi=61
+real_sdk_packages=2
+app_defined_calls_per_transcript=1/1
+app_defined_instance_calls_per_transcript=1/1
+activity_field_reads_per_transcript=2/2
+activity_int_state_values_per_transcript=1/2
+status_only_updates=4
+trusted_chrome_unchanged=1
+source_free_recovery=1
+source_free_writes=0
+qemu_starts=3
+qemu_network=disabled
+aosp_downloaded=0
+```
+
+Host tests 为 AndroidBox `109/109`、ABI `59/59`、UI `263/263`、kernel
+`377/377`；fmt、shell syntax、五组 AArch64 Clippy `-D warnings` 与 release
+内核/九用户进程构建均通过。QEMU 首轮发现并保留了一个真实 EL0 栈守卫故障；
+修复通过隔离验证会话缩短 live stack，没有增加栈页或放宽 guard。ABI60 父门
+已以当前源码重新通过于 `target/activity-fields10/coexist.dSivl4`。
+
+本轮没有下载 AOSP。当前仍不是通用字段/对象模型，也不包含对象分配、GC、
+ART/Dalvik、Binder、Bionic、JNI、完整 Android Framework、任意 APK 或真机驱动；
+完整边界和证据见 `ANDROIDBOX_ACTIVITY_STATE_11.md`。
+
+## AndroidBox Activity Fields-10（完成的 opt-in ABI 60 门禁）
+
+`androidbox-activity-fields10` 是 ABI59 DEX Instance-9 的 opt-in child。真实
+SDK/D8 APK 现在可以在 `onCreate` 以 `iput-object` 把布局中的 `TextView` 保存到
+同 Activity 的私有实例字段，并在后续 `onClick` 以 `iget-object` 从同一个
+retained Activity session 读回，再执行既有实例 helper 和
+`TextView.setText(int)`。
+
+`BNDAPC06` v6 在固定帧中新增 field-read provenance，AndroidApp、ABI、App 和
+kernel 均独立校验。两个本机 SDK 离线构建的字段型 APK 已通过三启动、全程
+`-nic none`、720×1600 QEMU 门禁：
+
+```text
+terminal=ANDROIDBOX_ACTIVITY_FIELDS10_QEMU_OK
+evidence=target/activity-fields10/coexist.bPNLji
+abi=60
+real_sdk_packages=2
+app_defined_calls_per_transcript=1/1
+app_defined_instance_calls_per_transcript=1/1
+activity_field_reads_per_transcript=1/1
+status_only_updates=4
+trusted_chrome_unchanged=1
+source_free_recovery=1
+source_free_writes=0
+qemu_starts=3
+qemu_network=disabled
+aosp_downloaded=0
+```
+
+Host tests 为 AndroidBox `109/109`、ABI `59/59`、UI `263/263`；fmt、shell
+syntax、五个 ABI60 AArch64 Clippy `-D warnings` 与 release 内核/九用户进程构建
+均通过。ABI59 父门以当前源码重新通过于
+`target/androidbox-dex-instance9/coexist.9XUTny`。这仍不是通用字段/对象模型，
+也不包含对象分配、GC、ART/Dalvik、Binder、Bionic、JNI、完整 Android
+Framework、任意 APK 或真机驱动；完整边界和证据见
+`ANDROIDBOX_ACTIVITY_FIELDS_10.md`。
+
+## AndroidBox DEX Instance-9（完成的 opt-in ABI 59 门禁）
+
+`androidbox-dex-instance9` 是 ABI58 DEX Methods-8 的 opt-in child。真实 SDK/D8
+APK 的 `onClick(View)` 现在可以通过 `invoke-direct` 把 Activity receiver 和真实
+clicked `View` 引用传给同 Activity 的 `private (View)I` helper；helper 内部实际
+执行 `View.getId()`，返回的资源 ID 再进入既有 `TextView.setText(int)` 路径。
+
+`BNDAPC05` v5 在固定帧的 `Updated.arg0` 高 32 位分别编码 total call count 与
+instance call count，AndroidApp、ABI、App 和 kernel 均独立校验。两个本机 Android
+SDK 离线构建的 APK 已通过三启动、全程 `-nic none`、720×1600 QEMU 门禁：
+
+```text
+terminal=ANDROIDBOX_DEX_INSTANCE9_QEMU_OK
+evidence=target/androidbox-dex-instance9/coexist.9XUTny
+abi=59
+real_sdk_packages=2
+app_defined_method_transcripts=2
+app_defined_calls_per_transcript=1/1
+app_defined_instance_calls_per_transcript=1/1
+status_only_updates=4
+trusted_chrome_unchanged=1
+source_free_recovery=1
+source_free_writes=0
+qemu_starts=3
+qemu_network=disabled
+aosp_downloaded=0
+```
+
+Host tests 为 AndroidBox `109/109`、ABI `59/59`、UI `263/263`；fmt、shell
+syntax、五个 ABI59 AArch64 Clippy `-D warnings` 与 release 内核/九用户进程构建
+均通过。ABI58 父门以当前源码重新通过于
+`target/androidbox-dex-methods8/coexist.RZo1VV`。这仍不包含字段、对象分配、
+ART/Dalvik、Binder、Bionic、JNI、完整 Android Framework、任意 APK 或真机驱动；
+完整边界和证据见 `ANDROIDBOX_DEX_INSTANCE_9.md`。
+
+## AndroidBox DEX Methods-8（完成的 opt-in ABI 58 门禁）
+
+`androidbox-dex-methods8` 是 ABI57 Density Icons-7 的 opt-in child。真实 Android
+SDK/D8 APK 的 `onClick(View)` 现在可以通过一次 `invoke-static` 执行 APK 自己的
+同 Activity `private static (I)I` helper，并把返回的字符串资源 ID 交给已有
+`TextView.setText(int)` 路径。helper 被限制为单次调用、深度 1、8 个寄存器、
+96 code units、完整可达无环 CFG 和固定整数 opcode 子集；对象、字段、数组、
+异常、循环、递归、跨类/动态调用均 fail closed。
+
+隔离进程协议升级为固定大小的 `BNDAPC04` v4，`Updated.arg0` 高 32 位携带
+APK-defined call count，App 与 kernel 都会再次校验。两份本机 Android SDK 离线
+构建的 APK 已通过三启动、全程 `-nic none`、720×1600 QEMU 门禁：
+
+```text
+terminal=ANDROIDBOX_DEX_METHODS8_QEMU_OK
+evidence=target/androidbox-dex-methods8/coexist.RZo1VV
+abi=58
+real_sdk_packages=2
+app_defined_method_transcripts=2
+app_defined_calls_per_transcript=1/1
+status_only_updates=4
+trusted_chrome_unchanged=1
+source_free_recovery=1
+source_free_writes=0
+qemu_starts=3
+qemu_network=disabled
+aosp_downloaded=0
+```
+
+Host tests 为 AndroidBox `108/108`、ABI `59/59`、UI `263/263`；fmt、shell
+syntax、三个核心 crate 的 AArch64 Clippy `-D warnings` 与 release QEMU build
+均通过。ABI58 又以 ABI59 当前源码重新通过于
+`target/androidbox-dex-methods8/coexist.RZo1VV`；ABI57 父门通过于
+`target/androidbox-density-icons7/coexist.Zk3rxj`。这一步仍不是 ART/Dalvik、
+Binder、Bionic、JNI、完整 Android Framework、任意 APK 或真机驱动；完整契约和
+证据见 `ANDROIDBOX_DEX_METHODS_8.md`。
+
+## AndroidBox Density Icons-7（完成的 opt-in ABI 57 门禁）
+
+`androidbox-density-icons7` 是 ABI56 Icon Resources-5 的 opt-in child。它从真实
+SDK APK 的多配置 resource table 中优先选择精确 mdpi 160 dpi PNG，把 48×48
+RGBA8 以 alpha-aware 3×3 box filter 归一化为现有 16×16 系统图标，并在超过
+16 色时执行确定性、有 provenance 的有界量化。没有 mdpi 时仍回退到 ABI56 的唯一
+default 16×16 PNG；xhdpi 等其他配置不会被误选。
+
+syscall 67 的大小仍为 1,152-byte；`BNDAIC01` v2 使用原 reserved bytes 传递
+source width/height/density，并新增 normalized/quantized flags。目录 revision、
+selector、generation、APK digest 和调用权限均未放宽。
+
+本机 SDK 离线生成的两个 APK 同时带
+`res/drawable-mdpi-v4/app_icon.png` 与
+`res/drawable-xhdpi-v4/app_icon.png`，已通过三启动、全程 `-nic none`、
+720×1600 QEMU 门禁：
+
+```text
+terminal=ANDROIDBOX_DENSITY_ICONS7_QEMU_OK
+evidence=target/androidbox-density-icons7/coexist.Zk3rxj
+abi=57
+density_icon_reads=24
+selected_source_density_dpi=160
+selected_source_dimensions=48x48
+apk_launcher_icon_pixels=1
+apk_activity_header_icon_pixels=1
+two_distinct_packages=1
+source_free_recovery=1
+source_free_writes=0
+qemu_starts=3
+qemu_network=disabled
+aosp_downloaded=0
+```
+
+Host tests 为 AndroidBox `107/107`、ABI `59/59`、UI `263/263`；fmt、shell
+syntax、五个 ABI57 AArch64 Clippy `-D warnings` 与 release QEMU build 均通过。
+ABI56 父门以当前源码重新通过于
+`target/androidbox-icon-resources5/coexist.DfLzbv`，历史无图标 fixture 也重新
+证明逐字节不变。本轮没有下载 AOSP 或其他外部源码。当前仍没有 adaptive/vector
+icon、nearest-density 搜索、ART、Binder、Bionic、JNI、完整 Android Framework、
+任意 APK 或真机驱动。完整契约与证据见 `ANDROIDBOX_DENSITY_ICONS_7.md`。
+
+## AndroidBox Activity UI-6（真实应用表面）
+
+已安装 Android Activity 不再显示 `Publisher scene`、`Fresh launch proof`、
+`Scene revision`、RPC 档位和兼容警告卡。前台现在只保留标准返回操作、应用标题、
+已验证 APK 图标和 APK 发布的 `TextView` / `Button` 内容。包名、版本、大小、签名、
+digest、Activity 路径与能力边界仍完整显示在 `Settings → Apps`，没有删除审计信息
+或放宽权限。
+
+当前完整证据：
+
+```text
+UI host tests=263/263
+ABI56=target/androidbox-icon-resources5/coexist.DfLzbv
+ABI55=target/androidbox-multipackage4/coexist.UgqHpr
+ABI50 callbacks=target/androidbox-multiaction3/check.gHhuen
+physical_screen=720x1600
+activity_header_icon_pixels=1
+activity_package_diagnostics_hidden=1
+settings_package_diagnostics_retained=1
+scene_revision_pixels_hidden=1
+callback_outside_publisher_status_pixels=0
+source_free_recovery=1
+qemu_network=disabled
+aosp_downloaded=0
+```
+
+ABI 56 三启动门同时验证两个真实 SDK APK 图标与干净 Activity；ABI 55 父门验证
+没有 PNG icon 时的回退图标路径；ABI 50 父门实际点击两个 Button，并证明状态更新
+之外的 publisher/system 像素为 0。完整设计、散列与边界见
+`ANDROIDBOX_ACTIVITY_UI_6.md`。
+
+## AndroidBox Icon Resources-5（完成的 opt-in ABI 56 门禁）
+
+`androidbox-icon-resources5` 是 ABI55 MultiPackage-4 的 opt-in child。它解析真实
+SDK APK 的 `<application android:icon>`，通过严格的 resource table/ZIP/PNG
+链得到精确 16×16 RGBA8 像素，并用 syscall 67 的 1,152-byte `BNDAIC01` 把图标
+绑定到目录 revision、selector、package generation 与 APK SHA-256。只有 Launcher
+和内建 App/Settings 可读；隔离 AndroidApp worker 被明确拒绝。
+
+Launcher drawer、Settings package card 和 Activity header 现在显示 APK 自带的
+蓝色 `E` 与紫色 `C`。最多 16 色的 palette + 四位索引保持 kernel/EL0 栈预算；
+超限、CRC/尺寸/chunk/透明像素不 canonical 均 fail closed，不做隐式量化。
+
+三启动、全程 `-nic none`、720×1600 QEMU 门禁已通过：
+
+```text
+terminal=ANDROIDBOX_ICON_RESOURCES5_QEMU_OK
+evidence=target/androidbox-icon-resources5/coexist.DfLzbv
+abi=56
+apk_launcher_icon_pixels=1
+apk_activity_header_icon_pixels=1
+icon_read_authority=launcher+settings-only
+two_distinct_packages=1
+distinct_activity_headers=1
+source_free_recovery=1
+source_free_writes=0
+qemu_starts=3
+qemu_network=disabled
+aosp_downloaded=0
+```
+
+Host tests 为 AndroidBox `105/105`、ABI `58/58`、UI `263/263`，fmt、Clippy
+`-D warnings` 与 AArch64 release check 均通过。历史 ABI55 两个 fixture 已证明
+逐字节不变，父 QEMU 门禁也重新通过于
+`target/androidbox-multipackage4/coexist.UgqHpr`；ABI56 还以 ABI57 当前源码重新
+通过于 `target/androidbox-icon-resources5/coexist.DfLzbv`。本轮只使用本机
+Android SDK/JDK，没有下载 AOSP。当前仍没有
+adaptive/vector icon、ART、Binder、Bionic、JNI、完整 Android Framework、任意 APK
+或真机驱动。完整边界和证据见 `ANDROIDBOX_ICON_RESOURCES_5.md`。
+
+本轮的截图审计还发现并修复了跨进程身份错位：Catalog 场景曾显示在 Envelope
+标题、包名和图标下面，因为 App 进程沿用了自己的默认选择，而两个包恰好都是
+generation 1。App 现在从内核当前兼容包快照读取真实启动身份，再用完整包身份匹配
+目录和图标；ABI55/56 门禁都会单独拒绝两个 Activity header 相同的结果。
+
+## AndroidBox MultiPackage-4（完成的 opt-in ABI 55 门禁）
+
+`androidbox-multipackage4` 是 ABI 54 Manifest Catalog-3 的 opt-in child。它把
+持久包存储扩展为固定容量 2 个独立 crash-safe volume，并新增 syscall 66 的
+1,344-byte、authority-free `BNDAPD01` 包目录。Launcher 能显示并选择两个包；
+Settings 能分别显示包状态，并按真实 candidate 关系呈现
+`Install / Update / Reinstall`。没有事务阻塞时，Apps 页的两个 package selector
+可切换真实详情；Launcher 使用不同的 package-derived fallback monogram，不再把
+内部 `R1` 徽标显示给普通用户。
+
+本机现有 Android SDK/JDK 离线构建的 `org.bndroid.envelope` 与
+`org.bndroid.catalog` 已通过完整三启动、全程 `-nic none`、720×1600 QEMU 门禁：
+
+```text
+terminal=ANDROIDBOX_MULTIPACKAGE4_QEMU_OK
+evidence=target/androidbox-multipackage4/coexist.UgqHpr
+abi=55
+capacity=2
+two_distinct_packages=1
+two_launcher_entries=1
+settings_two_package_selector=1
+settings_selection_storage_mutation=0
+two_activity_launches_same_boot=1
+distinct_activity_headers=1
+source_free_recovery=1
+source_free_writes=0
+qemu_starts=3
+qemu_network=disabled
+aosp_downloaded=0
+```
+
+原有单包安装、同 signer 更新、两步确认和无 source 恢复也已在 ABI 55 重新通过，
+证据为 `target/androidbox-multipackage4/check.Qq8u5l/`。UI host tests 为
+`260/260`。
+
+这仍是容量 2 的 Bndroid 包目录与 Resources-1/DEX 有界执行器，不含 ART、Binder、
+Bionic、JNI、Android Framework/system services、通用 PackageManager 或真机驱动，
+也尚未解析 APK 自带 icon resource，不能声称兼容任意 Android App。本轮没有下载
+AOSP；进入 AOSP/ART 级阶段前必须先明确基线、体积、许可和构建成本并取得授权。完整契约、修复与证据见
+`ANDROIDBOX_MULTIPACKAGE_4.md`。
+
+## AndroidBox Manifest Catalog-3（完成的 opt-in ABI 54 门禁）
+
+`androidbox-manifest-catalog3` 是 ABI 53 Runtime Install-2 的 opt-in child。
+它第一次从 Android SDK 生成的 binary Manifest 中建立固定容量组件目录：
+Activity、ActivityAlias、Service、Receiver、Provider 最多 16 项，请求权限最多
+16 项，并保留多 launcher、普通 intent-filter、alias target、exported/enabled、
+provider authority 和 permission declaration 元数据。
+
+真实 fixture `org.bndroid.catalog` 含 6 个组件、2 个 launcher、4 个 intent
+filters 和 2 个 requested permissions。运行时只选择声明顺序中第一个
+enabled/exported launcher；alias 可绑定 target Activity，其余组件保持 inert，
+权限只记录不授予。选中的真实 Java Activity 通过 5-node compiled layout 和两个
+Button callback 在隔离 AndroidApp 中执行。
+
+完整四启动、`-nic none`、720×1600 QEMU 门禁已经通过：
+
+```text
+terminal=ANDROIDBOX_MANIFEST_CATALOG3_QEMU_OK
+evidence=target/androidbox-manifest-catalog3/check.sZFi7h
+abi=54
+install_generation=1
+update_generation=2
+source_free_recovery=1
+source_free_writes=0
+qemu_starts=4
+qemu_network=disabled
+```
+
+Host tests 为 AndroidBox `102/102`、ABI `53/53`、UI `255/255`；父 Envelope-4
+AndroidBox `99/99`，fmt、Clippy `-D warnings` 和 AArch64 kernel/userspace build
+通过。本轮只使用 Mac 已安装 SDK/JDK，没有下载 AOSP。
+
+这仍没有 ART、Binder、Bionic、JNI、Android system services、组件执行、权限授予、
+通用多包 PackageManager 或实体设备支持。完整契约、失败修复与证据见
+`ANDROIDBOX_MANIFEST_CATALOG_3.md`。
+
+## AndroidBox Runtime Install-2（完成的 opt-in ABI 53 门禁）
+
+`androidbox-runtime-install2` 是 ABI 52 Runtime Uninstall-1 的 opt-in child。
+Settings 的 Apps 页现在能读取 kernel 完整接纳、但尚未使用的只读 APK candidate，
+显示 `Install / Update / Reinstall` 操作。第一次点击只显示确认框且磁盘不变；
+第二次确认才由内建 App 通过 syscall 65 提交精确 candidate identity，IRQ-enabled
+kernel monitor 随后执行 crash-safe package-store 事务。
+
+本机 Android SDK/JDK 离线构建了同一 signer 的真实 v1/v2 APK：
+
+```text
+package=org.bndroid.envelope
+v1=versionCode 1, 12646 bytes, sha256 a65584441a524698bcae4810e558bc6b947eb81275fa5f0f5df914304647e3c5
+v2=versionCode 2, 12644 bytes, sha256 5578268c3f1ecf2649d0abb0a9c8c07f254c9636c8e9e8c4ed41525414386ff6
+signer=e7412e1cc0ffbd21000ece5176d00837ce276e42e6b52bed99cb5e62857b77bf
+```
+
+syscall 64 的 640-byte `BNDICS01` candidate 和 syscall 65 的 256-byte
+`BNDIRQ01/BNDIRT01` transaction 都不包含路径、storage/block handle、APK 地址或
+任意 source authority。成功安装后 Settings 和 Launcher 同启动刷新 live catalog，
+随后无 source 重启可从 durable store 零写入恢复并再次启动隔离 AndroidApp。
+
+ABI/UI/包存储 host tests 分别为 `53/53`、`255/255`、`43/43`；父 ABI 52 的
+ABI/UI tests 仍为 `51/51`、`253/253`，fmt 和 ABI 53 四组件 Clippy
+`-D warnings` 已通过。四启动、全程 `-nic none` 的 720×1600 QEMU 门禁已经通过，
+证据位于 `target/androidbox-runtime-install2/check.XFneWQ/`：
+
+```text
+terminal=ANDROIDBOX_RUNTIME_INSTALL2_QEMU_OK
+first_tap_mutation=0
+install_generation=1
+update_generation=2
+source_free_writes=0
+same_boot_launcher_refresh=1
+isolated_android_app_launch=1
+qemu_starts=4
+qemu_network=disabled
+initial_disk=b2ae6008e4a386911608d603b261751a9942db4c95870cdeaa655854e2e5e801
+installed_disk=bc102fb86c811bac5f0380dfa05d0b6df78d27dc433faf829ca7d5d84c3fbe6b
+updated_disk=f1fd13cec1a0c06c8a2d22172423ab88e89f36cc8b4c1609992d7f9841e8bf38
+final_disk=f1fd13cec1a0c06c8a2d22172423ab88e89f36cc8b4c1609992d7f9841e8bf38
+```
+
+12 张 canonical raster 覆盖安装、确认、完成、同启动 Launcher/Activity、无源恢复
+以及同签名 v2 更新；三次 Activity 启动都完成 5 个真实 layered commits。
+
+这仍只支持严格接纳的单包 `Resources-1 / Envelope-4` 子集，不是 ART、Binder、
+Bionic、Android Framework、通用 PackageManager、任意 APK 或真机系统。本轮没有
+下载 AOSP。完整契约、权限和验证范围见
+`ANDROIDBOX_RUNTIME_INSTALL_2.md`。
+
+## AndroidBox Runtime Uninstall-1（完成的 opt-in ABI 52 门禁）
+
+`androidbox-runtime-uninstall1` 是 ABI 51 APK Envelope-4 的 opt-in child。
+真实的 Settings App 现在能从 live package catalog 打开“Apps”，显示当前 SDK
+APK 的 package/version/size/generation/v2 signature/digest，并通过两次明确点击
+执行卸载。第一次点击只显示确认框；只有第二次确认才提交 ABI 52 syscall 63。
+
+固定 256-byte `BNDURQ01/BNDURT01` exchange 绑定 request sequence、operation ID、
+generation、version、APK length、package、APK SHA-256 和 signer SHA-256。
+只有唯一内建 App image 可以调用；Launcher、AndroidApp worker 和 SurfaceServer
+没有权限。请求不包含路径、block address 或 storage handle，成功也不返回任何
+handle。I/O 只在 IRQ-enabled kernel monitor 中执行，写入 identical dual-registry
+tombstone 后 live catalog 才会原子变为空。
+
+三启动无网络门禁 `scripts/check-androidbox-runtime-uninstall1.sh` 已通过，最终证据
+位于 `target/androidbox-runtime-uninstall1/check.XIPcDQ/`。它证明 generation 1
+安装、第一次点击零 mutation、App PID 第二次确认产生 generation 2 tombstone、
+实时目录消失，以及再次无 source 启动的 removed recovery。卸载 I/O 为
+264 reads / 2 writes / 2 flushes；重启恢复为零 writes/flushes，卸载后与重启后
+磁盘 SHA-256 相同。四张 720×1600 raster 覆盖已安装、确认、卸载完成和重启空目录。
+
+ABI 52 host tests 为 ABI `51/51`、UI `253/253`，kernel/init/ABI/UI Clippy 与
+fmt 通过。父 ABI 51 完整真实 APK QEMU 回归也在
+`target/androidbox-envelope4/check.bTyNM1/` 重新通过。
+
+当前没有 managed package data，所以语义明确为
+`data_disposition=no-managed-package-data logical_apk_reachable=0
+apk_blob_erased=0`。这不是通用 Android PackageManager、ART、Binder、Bionic、
+AOSP 系统或真机；本轮没有下载 AOSP。完整契约与证据见
+`ANDROIDBOX_RUNTIME_UNINSTALL_1.md`。
+
+## AndroidBox APK Envelope-4（完成的 opt-in ABI 51 门禁）
+
+`androidbox-apk-envelope4` 是 ABI 50 MultiActionActivity-3 的 opt-in child。
+它第一次直接接纳本机 Android SDK 产出的常见 ZIP 外壳：二进制 Manifest 与
+compiled layout 为 raw DEFLATE，带 bit-3 data descriptor；`classes.dex` 与
+`resources.arsc` 仍为 STORED。APK 完成构建和 v2-only 签名后没有再被自定义工具
+解压、规范化或重打包。
+
+真实 fixture `org.bndroid.envelope` 为 12,646 bytes，SHA-256 是
+`a65584441a524698bcae4810e558bc6b947eb81275fa5f0f5df914304647e3c5`。
+读取器最多接纳 32 个条目，Manifest/layout 解压输出各限 32 KiB，并严格验证
+local/central tuple、descriptor、输入完整消费、声明 size、CRC 和 local range
+不重叠。无关 DEFLATE asset 只计数，不解压或解释。
+
+43,272-byte 解压工作区位于 AndroidApp-private BSS 并在每次加载前后完整清零。
+本轮实际修复了两次 QEMU 发现的 EL0 栈越界：inflater 状态被移出栈；
+`ActivitySession` 也不再重复保存 cached scene，尺寸从 5,912 降为 3,232 bytes，
+并加入 4 KiB 编译期上限。release 最深已知布局路径保留约 6 KiB 栈余量；
+未优化 debug AndroidApp 不是 ABI 51 支持配置。
+
+离线双启动门禁 `scripts/check-androidbox-envelope4.sh` 已通过，证据位于
+`target/androidbox-envelope4/check.FaIeFG/`。第一次由显式 `fw_cfg` 安装，
+第二次完全没有 APK source，仍完成持久读取复验、5-node scene、Approve/Reject
+两个真实 DEX callback 分支、一次受控 AndroidApp replacement、重新 Open 和再次
+relaunch。两次 QEMU 都恰好一个 `-nic none`，恢复磁盘未变化，RPC errors 和
+unexpected faults 均为 0。
+
+当前源码的 ABI 50/49/48/47 QEMU 回归也分别通过于
+`target/androidbox-multiaction3/check.Upli7z/`、
+`target/androidbox-scene-rpc2/check.dvsBl3/`、
+`target/androidbox-restart0/check.iSFPZG/` 和
+`target/androidbox-process0/check.JMErXz/`。
+
+**这仍不是 ART、Dalvik、Binder、Bionic、JNI、通用 Android、AOSP 系统或真机。**
+本轮没有下载 AOSP。完整容器边界、权限、栈预算、失败证据和 raster/RPC 证据见
+`ANDROIDBOX_APK_ENVELOPE_4.md`。
+
+## AndroidBox MultiActionActivity-3（完成的 opt-in ABI 50 门禁）
+
+`androidbox-multiaction3` 是 ABI 49 Scene-RPC-2 的 opt-in child。ABI 49 的
+单 callback `Button` 与 `BNDAPC02/2` 语义保持不变；ABI 50 使用
+`BNDAPC03` version 3，把有界 callback cardinality 扩展为 1–4。
+
+新 fixture `org.bndroid.multiaction` 由 Mac 已安装的 Android SDK/JDK 完全离线
+构建两次并要求 bytes 相同，只启用 APK-v2 签名。APK 精确为 12,573 bytes，
+SHA-256 为
+`aecf0749e2c063f44945f6154b479714fa8ebead8da26b0ebef005d2737036c6`。
+真实布局包含 2 个 `TextView` 和 2 个 callback `Button`；真实 DEX
+`onClick(View)` 通过 `View.getId()` 与有界 `if-eq`/`if-ne`/`goto` CFG，
+把 status 分别改为 `Decision: approved` 或 `Decision: rejected`。
+
+离线双启动门禁 `scripts/check-androidbox-multiaction3.sh` 已通过，证据位于
+`target/androidbox-multiaction3/check.Upli7z/`。两次 QEMU 都恰好使用一个
+`-nic none`；第二次没有 APK source，完成同槽 generation+1 worker replacement、
+两个独立 Click→Updated RPC 分支、关闭与普通 relaunch。首轮/relaunch 分别为
+25/18 条 RPC，errors 为 0。720×1600 像素证据中，Approve/Reject 只分别改变
+status publisher 的 2,951/3,006 pixels，publisher 外变化均为 0；初始与
+relaunch PPM 完全相同。
+
+本轮还用当前源码重新通过了父档位的完整无网络门禁：ABI 49 位于
+`target/androidbox-scene-rpc2/check.dvsBl3/`，ABI 48 位于
+`target/androidbox-restart0/check.iSFPZG/`，ABI 47 位于
+`target/androidbox-process0/check.JMErXz/`。三个门禁都只管理各自新建的
+QEMU PID；电脑中原有预览进程未被触碰。
+
+手机时钟也已改为在下一分钟边界有限等待后重读 PL031，并只在可见 minute 变化时
+递增 revision、向 Launcher/App 广播。当前短时 QEMU 门禁只记录 initial
+revision 1，并不声称已捕获真实 minute-rollover pixel diff。
+
+**这不是 ART、Dalvik、Binder、Bionic、JNI、通用 Android、AOSP 系统或真机。**
+本轮没有下载 AOSP。完整协议、权限、双分支 raster/RPC 证据和负面边界见
+`ANDROIDBOX_MULTIACTION_3.md`；ABI 49 的历史说明继续保留在
+`ANDROIDBOX_SCENE_RPC_2.md`。
+
+## AndroidBox Scene-RPC-2（完成的 opt-in ABI 49 门禁）
+
+`androidbox-scene-rpc2` 是 ABI 48 Restart-0 的 opt-in child，并使用
+`BNDAPC02` version 2；ABI 47/48 的 `BNDAPC01` wire 保持不变。它已把第二个真实
+Java APK `org.bndroid.profile` 的完整 5 节点编译布局从独立 AndroidApp EL0
+worker 传到受信 App EL0 renderer：root/nested vertical `LinearLayout`、title 与
+status 两个独立 `TextView`、一个 callback `Button`。协议最多 8 节点、每段文本
+最多 96 bytes、descriptor 固定 16 bytes，parent preorder、View ID、callback
+cardinality、ASCII 与 revision 全部 fail closed。
+
+固定 720×1600、20:9 UI 会通用排列 publisher leaves，scene active 时只命中动态
+callback Button；非 callback Button 不可点击。真实 APK 回调把
+`Profile status: pending` 改为 `Profile status: verified`，title 与 Button
+保持不变。Settings/Apps 也已有固定 header、裁剪 viewport、8px finger-follow、
+严格边界与 scroll-aware hit test。
+
+独立门禁为 `scripts/check-androidbox-scene-rpc2.sh`。最新成功证据位于
+`target/androidbox-scene-rpc2/check.IkELmU/`：两次 QEMU 都为 `-nic none`，
+第一次从本地 SDK 确定性构建并安装 12,569-byte APK，第二次不提供 APK source，
+仍能恢复、运行、点击、完成一次同槽 generation+1 worker replacement，并通过
+request 9–15 再次启动。初始与 relaunch raster SHA-256 均为
+`58d79e9aba1b5061108afa2bf0b24f996309a6b4918f0561128823c6c627eef2`；
+点击改变 status 区 3,526 pixels，其他 publisher pixels 为 0 变化。ABI 48 与
+ABI 47 门禁也已分别在 `target/androidbox-restart0/check.CssUbk/` 和
+`target/androidbox-process0/check.TuITxg/` 重新通过。
+
+这仍不是一般 Android：`art=0 binder=0 bionic=0 jni=0 native_lib=0
+general_android_compatibility=0 real_phone=0`。本里程碑没有下载 AOSP。完整协议、
+权限、像素与负面边界见 `ANDROIDBOX_SCENE_RPC_2.md`。
+
+## AndroidBox Restart-0 (completed opt-in ABI 48 gate)
+
+`androidbox-restart0` is an opt-in ABI 48 child of `androidbox-process0`;
+ABI 47 and all earlier profiles remain unchanged. It adds one deliberately
+bounded AndroidApp recovery: after a completed `Open(1)`, App requests one
+controlled old-worker EL0 guard-page data abort, observes `PEER_CLOSED`, and
+accepts only Init's authenticated same-slot generation+1 replacement endpoint.
+The new worker must emit `Ready(0)`, re-claim and re-verify the same installed
+APK, complete a fresh `Open(1)`, and receive App's authenticated `Rebound`
+before the recovery closes. The reaper now also binds that authorization to
+the scheduler's real fault reason, ESR/FAR, ELR and SP plus the terminated
+generation's actual code/stack bounds; a merely faulted matching PID is not
+enough.
+
+The package grant remains least-authority. Kernel retains one same-VMO escrow
+only for the authorized fault, rejects ordinary grant publication while
+recovery owns it, and reissues it only when the replacement's canonical Open
+is authenticated against the old/new PID generations, compatible session,
+package generation, current durable metadata, APK digest, and signer digest.
+Init, Launcher, and App still receive no APK bytes; AndroidApp still has no
+Surface, graphics, input, or storage handle. If a replacement dies after
+reissue but before claim, both the ordinary grant and restart proof are
+revoked, so later publication cannot remain permanently `Busy`.
+
+The first full recovery probe exposed a real `GraphicsBufferWrite`
+`OutOfMemory`: a 63,360-byte mobile batch used a fallible contiguous heap
+`Vec` after process replacement. The mobile syscall path now uses one guarded
+fixed scratch buffer, retains 4,160-byte bounded user-copy chunks, and calls
+`GraphicsBuffer::write` only once after the complete copy. Transactionality
+and one-generation-per-syscall semantics are unchanged.
+
+The independent checker is `scripts/check-androidbox-restart0.sh`; its latest
+passing evidence is `target/androidbox-restart0/check.CssUbk/` and its terminal
+record is `ANDROIDBOX_RESTART0_QEMU_OK`. It builds the real signed Mac fixture
+twice, performs one sourced install boot with no permitted fault, then one
+source-free recovery boot with exactly one old-PID fault. Both boots have one
+network-disable argument. The old/new AndroidApp PIDs are
+`4294967305/8589934601`, proving same slot and generation+1. The transcript
+contains one fault reap, endpoint rebind, same-VMO image reissue, replacement
+claim and reopened Activity. `ANDROID_APP_RESTART_OK` is withheld until five
+replacement-App layered presents have actually committed. App then produces
+two Button frames, completes `Open/Click/Close`, enters Overview, and launches
+the same APK again through the still-live replacement worker. That ordinary
+second lifecycle uses request IDs 4/5, a third one-shot image claim, five more
+Activity frames, and finishes with `completed_rounds=2`,
+`post_complete_messages=7`, and zero errors.
+
+The in-kernel restart monitor has a 1,000-tick deadline for every intermediate
+phase and continues timing the final reopen/first-frame phase until the success
+marker is emitted. This avoids relying on the outer shell timeout for runtime
+progress.
+
+The Button changes 4138 content pixels (4020 in the label region), while the
+top 64 and bottom 88 trusted-chrome rows remain byte-identical. The
+source-free package disk is also byte-identical before and after recovery.
+The ABI 47 Process-0 two-boot gate was rerun successfully at
+`target/androidbox-process0/check.TuITxg/`. The initial and ordinary-relaunch
+720x1600 rasters are byte-identical at SHA-256
+`9ea7c996652114b3544a11a1c52f72ff9a9213383f7c00cf033515d862e8c0fa`.
+
+This is one controlled worker recovery for the pinned
+InteractiveActivity-1/Resources-1 subset. It is not ART, Binder, Bionic, JNI,
+arbitrary APK support, a general supervisor, general crash recovery, or a
+real-phone result. Full details and the exact negative claims are in
+`ANDROIDBOX_RESTART_0.md`.
+
+## AndroidBox Process-0 (completed opt-in ABI 47 gate)
+
+`androidbox-process0` is an opt-in ABI 47 child of
+`androidbox-interactive0`; ABI 45 and ABI 46 remain unchanged historical
+profiles. It adds a separately linked `AndroidApp` EL0 image (image ID 10).
+The immutable APK, bounded interpreter, and retained compatible-Activity
+session now live in that process. The existing App EL0 image (image ID 7)
+remains the trusted Surface/input/raster host.
+
+Init creates one private App↔AndroidApp Channel. In steady state AndroidApp
+has exactly that one handle with `READ|WRITE|WAIT`: no duplicate, transfer,
+Surface, graphics, input, or storage authority. App and AndroidApp have
+different ELF bytes, PID, ASID, and translation-table root. During an Open,
+only AndroidApp may consume the one-shot syscall-61 package grant; the
+temporary immutable VMO is `READ`-only and cannot be duplicated, transferred,
+mapped, written, executed, or waited on. Launcher and App receive package
+metadata but no APK bytes.
+
+The two processes use canonical fixed-size `BNDAPC01` messages. Kernel-stamped
+sender PID authenticates the direction, while monotonically increasing request
+IDs bind session, package generation, view ID, and revision. The completed
+first lifecycle is exactly `Ready(0) → Open(1) → Opened + 3 text chunks →
+Click(2) → Updated + 1 text chunk → Close(3) → Closed`, with one outstanding
+request and queue capacity 8. AndroidApp never receives raw touch or becomes a
+graphics producer.
+
+The completed offline checker is `scripts/check-androidbox-process0.sh`. Its
+retained evidence is `target/androidbox-process0/check.TuITxg/`, and its
+terminal record is `ANDROIDBOX_PROCESS0_QEMU_OK`. It performs two QEMU boots
+with exactly one `-nic none` each: an explicit `fw_cfg` install followed by a
+source-free recovery from the same 16 MiB package disk. The checked APK is
+12566 bytes, SHA-256
+`0b6c7617a6d0491d3ac81ea65eb04f651ad4afe1472eab987a9c36e4280c81ee`,
+with signer-certificate SHA-256
+`e7412e1cc0ffbd21000ece5176d00837ce276e42e6b52bed99cb5e62857b77bf`.
+
+The recovery boot proves distinct App/AndroidApp ELF hashes
+`d133b012ff4939eeee783aec05a2c501895425be10b95276d6925a587fec8184` and
+`478eb4e647e7c1fd4a0e7d49dad6d771e1b0144e97079174a1cc96fa97e3d9b0`,
+distinct PID/ASID/root identities, the complete authenticated RPC transcript,
+and seven App-owned layered commits. The callback changes 4138 content pixels
+(4020 in the label region); the before/after PPM hashes are
+`69e6e61e005c2762c6cf4f53168b8929783df402075d53d3ecdebc448efd8209`
+and
+`941bac90d2e38de106420c8c1ed2797dd0670e2b1e83fb8114c3d90fed8f1baf`.
+SurfaceServer's top 64 and bottom 88 rows remain byte-identical, and the
+recovery disk remains byte-identical at SHA-256
+`5fbe4cc046c03cab6ed4b1135a65b763bd0b0577c3caef7f56b1c42bc2f5b813`.
+
+ABI 47 changes process ownership, not compatibility admission. It still
+executes only the pinned InteractiveActivity-1 subset. The marker
+`standalone_android_process=1` means a distinct Bndroid process/address space;
+it does not mean a general Android runtime. AndroidApp crash restart,
+peer-close recovery, rebind, background execution, and complete staged-spawn
+rollback are not claimed.
+
+```text
+bounded_dedicated_android_app_process=1 independent_android_app_process=1
+trusted_ui_host=app-el0 android_app_graphics=0 android_app_input=0
+art=0 dalvik=0 activitythread=0 binder=0 bionic=0 jni=0 native_lib=0
+permissions=0 package_manager_api=0 network=0 general_apk=0
+general_android_compatibility=0 crash_recovery=0 emulator_only=1 real_phone=0
+```
+
+## AndroidBox InteractiveActivity-1 (completed opt-in ABI 46 gate)
+
+`androidbox-interactive0` is an opt-in ABI 46 child of
+`androidbox-el0-runtime0`. It keeps the ABI 45 parent unchanged and extends
+the bounded AndroidBox path with one real, locally built Android Activity that
+has visible, state-changing input. The deterministic offline Mac artifact is
+`fixtures/androidbox-interactive-demo/androidbox-interactive-demo.apk`: it is
+exactly 12566 bytes with SHA-256
+`0b6c7617a6d0491d3ac81ea65eb04f651ad4afe1472eab987a9c36e4280c81ee`.
+Its compiled layout is a standard vertical `LinearLayout` containing one
+`TextView` and one `Button`. The Activity implements
+`View.OnClickListener`, registers itself with `setOnClickListener`, and its
+real `onClick(View)` performs `findViewById`, `check-cast`, and
+`TextView.setText(int)`.
+
+After App EL0 claims the immutable APK through syscall 61, it retains the
+bounded `ActivitySession` for the foreground compatible session instead of
+discarding the interpreter result after the first frame. A press and release
+on the installed Activity's `Update text` Button dispatches the retained
+callback in App EL0 and advances the displayed TextView from
+`Ready for a real APK click` to `Button callback executed`. This is a
+fixed-capacity interpreter and retained scene, not a Java VM or an Android
+Framework object graph.
+
+ABI 46 also separates application content from system-owned chrome on the
+exact 720x1600 preview surface. SurfaceServer exclusively produces the top
+64-pixel status region and bottom 88-pixel navigation region; Launcher or App
+produces only the 720x1448 content viewport at `(0,64)`.
+`SurfacePresentBufferLayers` syscall 62 validates the two independent,
+nonzero buffer generations and both complete source buffers before committing
+one atomic layered frame. Client pixels outside the content viewport are
+ignored, and SurfaceServer captures system-chrome input before it can reach
+App.
+
+The first QEMU launch exposed a real engineering failure: the previous 32 KiB
+EL0 stack reached its lower unmapped guard while the retained APK/session
+state was being created. ABI 46 now maps a 64 KiB user stack with an unmapped
+guard page at each end. This change is feature-scoped; ABI 45 and its retained
+contract are unchanged.
+
+The completed automated checker is
+`scripts/check-androidbox-interactive0.sh`; its retained evidence is
+`target/androidbox-interactive0/check.4sMhMR/` and its terminal record is
+`ANDROIDBOX_INTERACTIVE0_QEMU_OK`. It performs exactly two offline QEMU boots:
+an install boot with the APK supplied through explicit `fw_cfg`, followed by
+a source-free recovery boot over the same package disk. Networking is disabled
+for both boots.
+
+The ABI 46 topology contains exactly three graphics-buffer identities and six
+handles. The identities belong to SurfaceServer, Launcher, and App, and each
+identity has exactly one producer handle and one server handle. Across the
+gate, App completes 13 layered commits and Launcher completes 16. The real
+Button path consumes three tablet samples and produces two callback frames.
+It changes 4138 content pixels, of which 4020 belong to the text-label region,
+while the top 64 and bottom 88 chrome regions remain byte-for-byte identical.
+
+The initial and Home→Overview→relaunch Activity PPMs are byte-identical, both
+with SHA-256
+`69e6e61e005c2762c6cf4f53168b8929783df402075d53d3ecdebc448efd8209`;
+the clicked Activity PPM has SHA-256
+`941bac90d2e38de106420c8c1ed2797dd0670e2b1e83fb8114c3d90fed8f1baf`.
+Top, Home, and bottom-corner negative input sequences each report
+`samples_to_app=0`; the corner sequence leaves the package-image claim count
+unchanged and the raster identical. The complete recovery disk remains
+unchanged at SHA-256
+`5fbe4cc046c03cab6ed4b1135a65b763bd0b0577c3caef7f56b1c42bc2f5b813`.
+The gate finishes with networking disabled and no panic or user fault.
+
+The completed host suites contain 243 `bndr-ui` tests, 82
+`bndr-androidbox` tests, 13 init runtime tests, and 377 kernel tests.
+
+The compatibility boundary remains explicit:
+
+```text
+art=0 binder=0 bionic=0 jni=0 network=0 general_apk=0
+real_phone=0 general_android_compatibility=0
+runtime_host=existing-app-el0 independent_android_app_process=0
+```
+
+This completed bounded ABI 46 milestone is therefore neither a real phone nor
+general Android APK compatibility. Its retained session deliberately remains
+inside App EL0. The separate ABI 47 child above implements and evidences the
+next process boundary without retroactively changing this ABI 46 contract.
+
+## AndroidBox EL0Runtime-0 (opt-in ABI 45 child profile)
+
+`androidbox-el0-runtime0` is an opt-in child of
+`androidbox-apk-install0`. It advances only that child to ABI 45; the existing
+Install-0/Update-0/Uninstall-0 parent remains ABI 44 with its original syscall
+59/60 and `BUE1` v6 contract. The child retains `BUC1` v8, advances server
+events to `BUE1` v7 so SurfaceServer can publish authenticated
+`active_client=App, app=None` compatible focus, and adds syscall 61
+`AndroidPackageImageClaim`.
+
+The ABI 45 foreground path deliberately separates identity selection from APK
+execution:
+
+1. Launcher selects a generation-bound compatible identity and submits syscall
+   60 with its nonzero compatible-session ID. The IRQ-enabled package monitor
+   freshly recovers and reads the durable blob, rechecks the existing bounded
+   admission profile, and creates one immutable VMO grant for the resident App
+   process.
+2. Launcher receives only the canonical metadata response. It receives no APK
+   byte, VMO handle, package-store handle, storage authority, or Activity
+   raster, and it does not execute or draw the compatible Activity.
+3. After SurfaceServer publishes the accepted Foreground SystemUI epoch and
+   `App/None` focus, App submits one exact canonical 128-byte `BNDACM01` claim
+   through syscall 61. A successful one-shot claim returns a handle with
+   exactly `READ`; duplicate, transfer, mapping, write, execute, wait, and
+   storage authority are absent.
+4. App reads the immutable VMO through bounded `VmoRead` calls, rechecks APK
+   SHA-256, APK-v2 signer, Manifest identity, and the Resources-1 lifecycle,
+   executes the admitted constructor/`onCreate` subset, wipes its private APK
+   copy, and submits the resulting 720x1600 Activity pixels from the App
+   graphics buffer.
+
+The kernel monitor still runs the existing bounded AndroidBox interpreter as
+part of admission/profile validation before publishing the VMO. This milestone
+moves foreground execution verification and user-visible Activity raster
+ownership to App EL0; it does not yet move every APK parser/interpreter step
+out of EL1.
+
+The offline Mac-built artifact is still exactly
+`fixtures/androidbox-mac-demo/androidbox-mac-demo.apk` (12566 bytes,
+`org.bndroid.macdemo`, SHA-256
+`a604d16298e939d728aa805a636bb119c906bc1b9c224949da445954a4f8363e`).
+The completed offline child gate
+`scripts/check-androidbox-el0-runtime0.sh` is retained in
+`target/androidbox-el0-runtime0/check.R6tuKT/`. Its terminal
+`ANDROIDBOX_EL0_RUNTIME0_QEMU_OK` record proves ABI 45, two Launcher
+collections with
+`apk_bytes_exposed_to_launcher=0 authority_granted=app-read-only-vmo`, two App
+claims with `rights=READ`, App-owned Activity presents, Launcher-owned
+Home/Overview, Back clearing the recent, a byte-identical package-disk hash
+before and after, and no panic. Its two Activity PPMs are byte-identical with
+SHA-256
+`e1a68c2627692d3f1eb31042cdaaaefa0c3f6be43ef44226bcbe2540a31d9c84`.
+The existing `ANDROIDBOX_LOCAL_APK_QEMU_OK` gate documented below remains the
+separate ABI 44 parent gate.
+
+EL0Runtime-0 is not ART, Dalvik, ActivityThread, Android Framework, Binder,
+Bionic, JNI, native-library loading, Android permission/service compatibility,
+or general APK compatibility. Resources-1 is still only a static pure-data
+subset: one exported `MAIN`/`LAUNCHER` Activity, one admitted
+constructor→`onCreate` shape, one compiled root `TextView`, and one
+default-configuration string resource. There is no arbitrary View inflation,
+qualifier/alias handling, multi-package runtime, Android networking, physical
+phone port, or real-device result.
+
+## AndroidBox APK Install-0, Update-0, and Uninstall-0 (opt-in)
+
+The isolated `androidbox-apk-install0` profile now completes a deliberately
+bounded, signature-checked APK installation path on local QEMU. The original
+fixed-fixture gate admits the repository-owned, APK-v2-only, single-signer
+Resources-1 fixture
+`fixtures/androidbox-resource-demo/androidbox-resource-demo.apk`
+(`org.bndroid.demo`, version 2, 12566 bytes). Its APK SHA-256 is
+`2cf96bb6a0de3bba9b981539014c29d2c0adcc17cc9738b24f69cf3046ce4ac7`;
+the signer-certificate SHA-256 is
+`e7412e1cc0ffbd21000ece5176d00837ce276e42e6b52bed99cb5e62857b77bf`.
+The checked-in fixture key is public test material for reproducibility, not a
+production key, publisher-trust, provisioning, or HSM claim.
+
+The same profile now also completes the bounded Update-0 path for the explicit
+`fixtures/androidbox-resource-update-demo/androidbox-resource-update-demo.apk`
+fixture. It preserves package `org.bndroid.demo`, launcher Activity, and the
+exact signer-certificate digest above while strictly increasing `versionCode`
+from 2 to 3. The 12566-byte v3 APK has SHA-256
+`3860fcd80eed1a4b284514316bc35169dda60bb1522e85abdea5aa33b8355708`.
+This is one evidenced v2-to-v3 pair, not an admission claim for arbitrary
+updates.
+
+The storage and kernel boot path now also implement a bounded Uninstall-0
+protocol. Its only authority is an explicit 256-byte `BNDUNS01` request exposed
+by a trusted offline host as read-only
+`opt/bndroid/package-uninstall` `fw_cfg` input before EL0 starts. The request
+is bound to the current package, generation, version, APK length and digest,
+and signer digest. Removal publishes two logically identical same-generation
+tombstones so loss or corruption of one registry cannot revive the old
+package. APK blob bytes are not erased, but are logically unreachable; this
+profile has no managed per-package mutable data to delete. The package-store
+protocol has 43 host tests and a completed 12-boot QEMU lifecycle gate in
+`target/androidbox-apk-uninstall0/check.gWbx8U`. It proves
+generation `1→2→removed 3→reinstalled 4`, byte-identical tombstones, uninstall
+I/O `520/2/2`, zero-write replay and removed recovery, bounded reinstall, and
+five disk-stable negative boots; its terminal marker is
+`ANDROIDBOX_APK_UNINSTALL0_QEMU_OK`.
+
+A separate generic offline gate now installs a new APK built locally on the
+Mac: `fixtures/androidbox-mac-demo/androidbox-mac-demo.apk`. It is 12566 bytes,
+has SHA-256
+`a604d16298e939d728aa805a636bb119c906bc1b9c224949da445954a4f8363e`,
+package `org.bndroid.macdemo`, title `Mac-built Android app`, and TextView
+`Hello from a Mac-built APK`. It is v2-only with one test signer. The two-boot
+gate installs with `reads=1032 writes=130 flushes=3`, then recovers with
+`reads=389 writes=0 flushes=0` and identical durable Activity evidence. On the
+source-free boot, the QEMU touch path launches the installed icon, returns
+Home while retaining one identity-only recent, opens an Overview card that
+contains no Activity pixels, and activates that card only after a second fresh
+durable verification. Generation-bound request sequences 1 and 2 each recover
+and read the durable blob, reverify it, and execute the Activity subset with
+`reads=389 writes=0 flushes=0`; Back then finishes the compatible session and
+clears the recent identity. The whole-disk SHA-256 remains unchanged, and a
+tap on the resulting empty Overview is semantically and raster-inert. Its
+retained directory is `target/androidbox-local-apk/check.4rO29p` and its
+terminal marker is `ANDROIDBOX_LOCAL_APK_QEMU_OK`.
+Its DEX contains the exact Manifest-selected
+`Lorg/bndroid/macdemo/MainActivity;` but no
+`Lorg/bndroid/demo/Main;`, `boot()`, or `onTap()` probe. The Activity component
+therefore drives admission independently of the historical repository
+diagnostics. On both install and source-free recovery, the gate reports the
+strict two-instruction public no-argument constructor before the
+four-instruction `onCreate`. This proves the bounded ActivityLifecycle-1 /
+Resources-1 component path and its read-only durable relaunch, not arbitrary
+APK or ART compatibility.
+Separate 720x1600 Cocoa-window PNGs under
+`target/androidbox-mac-demo-live-final/screenshots/` show Settings,
+installed-app details, All apps, and a Mac APK compatibility view. The
+current ABI-44 source-free instance is left running as
+`Bndroid Mac APK Session Final`; its post-syscall-60 frame is
+`target/androidbox-mac-session-preview-v2/mac-built-apk-session.png`.
+The
+automated relaunch frames are instead the two exact 720x1600 PPMs under
+`target/androidbox-local-apk/check.4rO29p/`; both show
+`Hello from a Mac-built APK` and have SHA-256
+`e1a68c2627692d3f1eb31042cdaaaefa0c3f6be43ef44226bcbe2540a31d9c84`.
+The compatible and empty Overview frames have SHA-256
+`ff4012ba8d990bb6defc2944fc44021679ce5da72835d456a5446589f610e500`
+and
+`19363d900d0a489676b1ca24ada784a167609a626fd899a3b263d3ccd3bcef44`.
+Neither image set is physical-display, real-phone, or general Android-runtime
+evidence.
+
+`CompatibleActivitySession-0` is now the bounded System UI contract around
+that relaunch. `BUC1` v8 reserves one boot-local
+`{session_id, package_generation}` identity before syscall 60; `BUE1` v6
+returns an explicit `accepted`, `conflict`, or `capture-busy` completion.
+Only an exact successful verification may commit the reservation. Failure
+aborts it. Reserve begins only from a known released input state; pending
+samples are quarantined, commit/abort drains at most 64 queued samples, and a
+pressed tail or drain limit keeps consuming through the matching release.
+Home retains identity without background execution, Overview stores
+no Activity raster/thumbnail/live preview, a recent activation reverifies, and
+Back finishes the identity. `BUP1` v2 additionally binds every mobile buffer
+present to the exact nonzero System UI revision, so SurfaceServer cancels a
+queued stale Activity raster before scanout or frame-counter advancement.
+
+Install-0 verifies the APK before mutation, commits it through a crash-safe
+double-registry/double-blob, stateful package store, rereads and reverifies the
+durable bytes, and launches the bounded Resources-1 Activity result. Settings now has
+an Apps page backed by a read-only kernel snapshot, and All apps exposes the
+installed identity only when that snapshot reports a committed generation.
+The parent `androidbox-apk-install0` profile uses ABI 44. Syscall 59 is the
+boot-catalog read and returns the
+canonical 640-byte `BNDAPS01` wire. Launcher-only syscall 60 accepts a
+canonical 640-byte `BNDARQ01` request bound to a monotonic sequence and the
+exact generation, version, length, Resources-1 profile, APK/signer digests,
+package, and Activity. Submission uses `ShouldWait` plus byte-identical retry;
+an IRQ-enabled service freshly performs package-store `recover` and
+`read_blob`, then rechecks APK SHA-256, APK v2 signer, Manifest, Resources-1,
+the two-instruction constructor, and the four-instruction `onCreate`. Success
+returns a fresh `BNDAPS01`. In this ABI 44 parent profile, EL0 receives no APK
+bytes, package-store handle, or mutation authority. The ABI 45 child instead
+grants only App the one-shot read-only VMO described above; Launcher still
+receives no APK bytes or handle.
+
+The automated Install-0 local-QEMU gate proves one valid install, two
+source-free zero-write recoveries, and rejection of a tampered APK with no
+disk change. The successful disk change is confined to `BNDROID_PACKAGES` LBA
+`16384..16895`. Run the package lifecycle and local-APK gates offline with:
+
+```bash
+./scripts/check-androidbox-apk-install0.sh \
+  --apk "$PWD/fixtures/androidbox-resource-demo/androidbox-resource-demo.apk"
+
+./scripts/check-androidbox-apk-update0.sh \
+  --base-apk "$PWD/fixtures/androidbox-resource-demo/androidbox-resource-demo.apk" \
+  --update-apk "$PWD/fixtures/androidbox-resource-update-demo/androidbox-resource-update-demo.apk"
+
+./scripts/check-androidbox-apk-uninstall0.sh \
+  --base-apk "$PWD/fixtures/androidbox-resource-demo/androidbox-resource-demo.apk" \
+  --update-apk "$PWD/fixtures/androidbox-resource-update-demo/androidbox-resource-update-demo.apk"
+
+./scripts/check-androidbox-local-apk.sh \
+  --apk "$PWD/fixtures/androidbox-mac-demo/androidbox-mac-demo.apk"
+```
+
+The Update-0 gate installs v2 as generation 1/slot 0, then atomically switches
+to v3 as generation 2/slot 1 with package I/O
+`reads=905 writes=129 flushes=2`. The exact v3 source replay is
+`reads=904 writes=0 flushes=0`; a later source-free recovery is
+`reads=645 writes=0 flushes=0`. The durable Activity changes from
+`AndroidBox resource-backed view` to `AndroidBox updated resource view`.
+Rollback to the old v2 source and a content-tampered v3 source are both
+rejected with zero disk change, and successful mutation remains confined to
+the package-partition LBA range above.
+
+The Uninstall-0 gate completes 12 boots. Removal changes exactly 404 bytes,
+only in registry LBAs `16385` and `16386`, and leaves both APK blobs unchanged.
+Exact uninstall replay is `reads=6 writes=0 flushes=0`; source-free removed
+recovery is `reads=3 writes=0 flushes=0`; reinstall is
+`reads=521 writes=129 flushes=2`, followed by a stable
+`reads=389 writes=0 flushes=0` Activity recovery. Wrong target, stale
+generation, bad CRC, conflicting APK/request, and rollback inputs all leave
+their complete disks unchanged.
+
+Neither profile is arbitrary APK support or general Android compatibility.
+Both have no
+ART, ActivityThread, Binder, Bionic, JNI, native-library, permission, network,
+multi-package, runtime install/update/uninstall UI, or general
+Installer/PackageManager UI/API support. Uninstall-0 is boot-time only and
+does not add a mutation syscall. The ABI 44 parent executes relaunch in the EL1
+pure-data Resources-1 model and lets Launcher display the bounded result. The
+ABI 45 child moves foreground re-verification/execution and Activity pixels to
+the resident App EL0 process through the read-only VMO claim; this still is not
+ART or a general standalone Android application runtime. The
+43 package-store host tests provide deterministic
+in-memory write/torn-write/flush fault injection; neither those tests nor the
+QEMU gate are a physical phone or physical-power-loss result. The exact
+contract and retained evidence are documented in
+`ANDROIDBOX_APK_INSTALL_0.md`, `ANDROIDBOX_APK_UPDATE_0.md`, and
+`ANDROIDBOX_APK_UNINSTALL_0.md`; the locally built APK contract is
+`ANDROIDBOX_LOCAL_APK.md`. Older kernels do not understand the removal
+tombstone and are not downgrade-safe for an Uninstall-0 disk.
+
+The completed `CompatibleActivitySession-0` is still not permission to infer
+background execution, a standalone Android process, ART/ActivityThread, or
+general Android lifecycle compatibility. It is a capacity-one, boot-local,
+identity-only System UI session around the existing Resources-1 proof.
+
+## Opt-in mobile UI preview
+
+The repository now has an isolated `mobile-ui-runtime` profile for local QEMU
+visual development. It renders an exact 720x1600 guest scanout from a 360x800
+design grid at an exact 2x scale. This is a common 20:9 phone-shaped layout,
+not a physical-display specification. Every local-preview raster has a
+64-physical-pixel corner-radius mask; “physical pixel” here means one pixel in
+the 720x1600 output, not a hardware panel, millimetre dimension, or DPI claim.
+Masked corner points cannot start a touch contact. The old outer demo bezel is
+gone: the wallpaper, status area, app content, dock, and one system gesture
+area own the full guest display.
+
+Startup now presents a local visual Lock surface with a large clock/date, one
+fixed boot-local `System UI` notification, and an upward gesture into the real
+Home surface underneath. The reveal follows contact in exact
+16-output-pixel steps; it
+activates after 24 output pixels and commits only at 240 output pixels, with a
+192-output-pixel horizontal-drift limit and a bounded 720-output-pixel reveal.
+System Home, Back, hidden app targets, and direct drawer actions cannot bypass
+Lock. Quick Settings can open over it, but System Home only closes that shade
+and returns to the same Lock frame. This is navigation-only visual state: it
+does not implement or claim authentication, a PIN, biometrics, credential
+storage, data protection, or a hardware-backed lock.
+
+The Lock notification is a protected surface: tapping it cannot navigate or
+unlock. In the settled shade, its whole card follows a horizontal drag after a
+24-output-pixel activation slop, quantized in exact 8-output-pixel steps.
+Release at 159 pixels restores the original card byte-for-byte; release at 160
+pixels dismisses it in either direction. Dismissal is shared across Launcher
+and App for the current SurfaceServer session, while a new QEMU boot creates
+the same fixed notice again. This is not a general notification service: there
+is no application Post API, arbitrary text, push, background delivery,
+arrival time, unread count, persistence, sound, vibration, or wake behavior.
+
+Home is a sparse wallpaper surface with a non-interactive Today card and a
+balanced four-app dock; the old weather placeholder, engineering dashboard,
+and fake search affordance have been removed.
+An upward swipe on Home reveals an All apps drawer whose position follows the
+injected contact in exact 16-output-pixel steps. Release crosses one fixed
+240-output-pixel displacement threshold; this is not a timer-, vsync-, or
+velocity-based gesture. The drawer contains five routes that actually exist
+in this preview: Phone, Messages, Calculator, Settings, and AndroidBox. Phone has a
+session-local keypad and backspace for a bounded number buffer of at most 16
+characters; its call control remains visibly disabled without engineering
+labels above the keypad. Messages now presents a genuine empty inbox. Its two
+local, read-only help/status routes live in a separate `Preview information`
+group rather than masquerading as conversations. It has no search, composer,
+sending, receiving, or messaging backend. Calculator is a Launcher-owned,
+session-local fixed-point utility with six fractional digits, four checked
+operations, sign, percent, decimal, backspace, clear, and explicit
+divide-by-zero/overflow recovery. Its value survives local Home/Back
+round-trips inside the current Launcher session. It does not add a
+`ShellAppId`, separate app process, persistence, or product-ABI claim.
+
+In the base `mobile-ui-runtime` profile without Install-0, AndroidBox remains a
+deliberately restricted DEX-0 + Activity-0 regression plus Resources-1
+milestone, not general Android compatibility. That base profile's Launcher
+embeds the repository-owned, reproducibly built, unsigned
+`androidbox-resource-demo.apk` as read-only bytes. The allocation-free core
+strictly validates its four stored entries: binary `AndroidManifest.xml`,
+`resources.arsc`, compiled binary `res/layout/activity_main.xml`, and
+`classes.dex`. It resolves the unique exported `MAIN`/`LAUNCHER` component
+`org.bndroid.demo.MainActivity`, resolves the manifest label through
+`@string/app_name`, and executes its real
+`onCreate(Landroid/os/Bundle;)V` code item.
+
+Resources-1 admits one exact lifecycle shape: a public no-argument Activity
+constructor containing only
+`invoke-direct Activity.<init>()V; return-void`, followed by
+`Activity.onCreate` and `setContentView(0x7f020000)`. The strict
+default-configuration resource-table parser resolves that layout entry,
+requires one root `TextView` as the binary XML's sole element, follows its
+`android:text` reference `0x7f030000`, and renders the resolved string
+`AndroidBox resource-backed view`. This is a pure-data interpreter, not a real
+ART Activity object. The earlier inline-text
+`androidbox-demo.apk` Activity-0 path remains a regression fixture, including
+its seven-instruction Activity/TextView shim.
+
+The fixed DEX entry points also remain real in the resource fixture: opening
+the page first runs `Lorg/bndroid/demo/Main;->boot()I`, returning `20260729` in
+two instructions; pressing `Run onTap` runs `onTap(I)I`, returning `20260736`
+in two instructions and advancing the audited tap count from zero to one.
+Bytecode receives no Bndroid handle or syscall authority. In that base profile
+the APK remains unsigned and embedded, not installed. Install-0/Update-0/
+Uninstall-0 is the separate signed single-package lifecycle path described
+above. The installed Mac component fixture no longer contains or requires
+these diagnostic entry points. In that installed profile, an icon press keeps
+the exact generation through release, displays a bounded pending/failure state
+without old Activity text, and navigates only after syscall 60 returns a fresh
+snapshot matching the boot catalog. In the ABI 44 parent, execution still
+occurs in the kernel's EL1 pure-data model and Launcher presents that bounded
+result. In the ABI 45 child, the existing App EL0 process claims and executes
+the immutable image and presents the Activity pixels; Launcher handles only
+identity and metadata. Neither is an ART-backed or general Android application
+process. Neither profile has a general
+installer/updater/uninstaller, production signer policy,
+`ActivityThread`, ART/Dalvik,
+general Android Framework,
+ResourceManager, resource qualifiers or aliases, nested or arbitrary
+View/layout inflation, Binder, Bionic, JNI, native library, permission/service bridge,
+storage/network bridge, or compatibility with arbitrary APKs.
+
+The UI now uses one monochrome canonical icon vocabulary on a 24-unit
+coordinate space, with `Status16`, `List20`, and `App26` rendering roles.
+Icons use 4x4 supersampling to produce grayscale edge coverage. Selected amber
+surfaces use dark icon ink with a checked contrast ratio of at least 3:1.
+System-bar cleanup replaces the oversized demonstration pill with a small
+centered circular preview safe area, removes the non-semantic lower-left dot,
+preserves the right-side safe margin, and represents battery state as unknown
+rather than inventing a charge value. The circle is layout geometry only; it
+does not claim a camera, sensor, cutout, or physical panel.
+
+Settings uses consumer-facing groups, denser phone-style cards, and Body-role
+primary text, with diagnostic facts and prototype boundaries confined to
+About. It has no decorative overflow control for actions that do not exist
+and provides UI-session-shared dark/light theme, blue/violet accent, read-only
+offline connection state, five-stop software dimming, and About. The dimming
+slider exposes exact 100/80/60/40/20-percent final-surface levels and is also
+available in Quick Settings. It changes the rendered RGB values of the entire
+surface, including app content and system chrome; 100 percent is pixel-exact
+to the undimmed renderer. It is session-local software composition, not a
+physical backlight, panel-brightness, power-saving, or persistence interface.
+Quick Settings uses the same card density and Body text. Before dismissal, its
+notification area shows the fixed `System UI / Local preview` notice without a
+timestamp or application sender. Tapping it from Settings closes the shade and
+opens the existing About page; on other unlocked pages it only toggles a
+bounded inline limits disclosure. After dismissal, the area honestly says
+`No notifications`. A fully opened shade covers through the navigation-top
+boundary at output row 1548.
+About has a consumer-facing layout while still reporting Local QEMU, no
+hardware, no network, and the non-physical preview boundary. Its
+`360 GRID @ 2X` label is deliberate design-grid terminology, not an Android DP
+claim. Network surfaces say `Network` and `Disabled`; this describes the local
+preview boundary and does not claim an implemented airplane mode.
+
+The SurfaceServer serializes theme, accent, five bounded software-dimming
+actions, and the one-way boot-notification dismissal. It owns the canonical
+notification `visible + revision` state and broadcasts each accepted state to
+both Launcher and App. The client-control protocol is `BUC1` version 8. The
+base and ABI 44 parent use `BUE1` version 6; the ABI 45 EL0Runtime-0 child uses
+`BUE1` version 7 to encode compatible `App/None` focus. Both canonical wires
+remain 64 bytes. The base `mobile-ui-runtime` kernel ABI remains v24; the
+separately matched package-lifecycle parent is ABI 44 and uses syscall 59 for
+the read-only boot catalog plus Launcher-only syscall 60 for generation-bound,
+read-only durable relaunch. Its EL0Runtime-0 child additionally uses syscall 61
+for the App-only read VMO claim.
+Neither dimming nor notification dismissal added a syscall or capability.
+
+SurfaceServer also owns bottom system navigation and Overview. A contact must
+start in the protected navigation region; 24 output pixels activates feedback,
+8-output-pixel quantization follows the finger, 240 upward pixels commits
+Overview, and 480 returns Home. Overview stores at most one session-local
+identity: either a `ShellAppId` derived from an accepted focused App present
+or a boot-local compatible-Activity identity committed after fresh package
+verification. It never reads Activity/App pixels and has no thumbnail,
+screenshot, snapshot, live preview, task history, background execution, task
+termination, or persistence. Launcher-local Calculator and the base
+AndroidBox demo never become recent identities; the installed compatible
+entry may become identity-only recent and must reverify on activation. This
+remains a bounded identity sheet rather than a complete recent-tasks manager.
+
+Interactive targets render immediate pressed feedback on contact
+down. Dragging away from
+the captured target latches cancellation until release, so moving back does
+not re-arm it; release either commits the still-valid target or completes the
+cancelled contact without an action. The explicit controller-cancel API also
+ignores re-entry until release, but that statement currently has unit-level API
+evidence only: the full-surface runtime accepts input within the 720x1600
+surface, so its out-of-surface cancellation branch is not reachable through
+the current QEMU input route. It is not claimed as part of the QEMU gate.
+
+In-app left-edge Back starts only on otherwise blank surface positions with
+`x < 48`; any public interactive target has priority over the edge candidate.
+A rightward displacement of 24 output pixels activates it, the visible reveal
+is quantized in exact 8-output-pixel steps, and release commits Back at 144
+output pixels. More than 192 output pixels of vertical drift, entry into the
+system navigation region, or leaving the visible surface cancels the gesture.
+These are displacement rules, not timer-, velocity-, animation-timing-, or
+vsync-based behavior. System Home has pressed feedback and drag-out
+cancellation, and can close an already settled shade. A top-edge swipe opens
+the phone-style Quick Settings/notification shade; its reveal follows the
+injected contact during a drag and settles open or closed on release. Theme
+and accent tiles plus the five-stop software-dimming slider update the same UI
+session, while networking remains explicitly unavailable.
+
+The mobile profile now takes exactly one read-only boot snapshot from QEMU
+`virt`'s emulated PL031 clock. Only the generation-qualified SurfaceServer may
+invoke syscall 58; Launcher and App receive the same Unix-second value through
+the canonical 64-byte UI event protocol and convert it with a bounded Gregorian
+formatter. Lock, Home, Quick Settings, and the status bar therefore agree.
+The deterministic gate fixes QEMU's clock to `2026-07-29 09:41`, while the
+interactive launcher asks QEMU for host-local wall time at startup. An invalid
+or absent snapshot renders `--:--` and `Time unavailable`, never a build date
+or demonstration date. This is a boot snapshot only, not minute-by-minute
+refresh, timezone/DST policy, secure time, anti-rollback time, NTP, a physical
+or battery-backed RTC, or real-device evidence.
+
+Opening and closing Phone, Messages, Settings, and the Launcher-local
+Calculator/AndroidBox pages now use a versioned software app-sheet transition. Each edge emits
+four fixed, vertically shifted intermediate frames and then converges to the
+same exact stable page as the non-transition renderer. The status bar, rounded
+display mask, and system gesture area stay anchored while the app sheet moves.
+Input accepted during those intermediate presents is quarantined instead of
+entering the normal 16-slot deferred-input FIFO. The target client remains
+suppressed only when the last quarantined sample is still pressed; a release
+seen during the transition clears the fence, and a transition with no
+overlapping contact leaves the destination page's first new tap usable. This
+prevents one contact from arming a control on the destination page without
+discarding a later contact. The sequence is frame-stepped and
+unpaced (`timer_pacing=0`, `fps_claim=0`, `hardware_vsync_claim=0`); it is not
+evidence of an animation duration, refresh rate, hardware VSync, or measured
+smoothness.
+
+Text uses six semantic levels: Label, Caption, Body, Title, Headline, and
+Display. `Bndroid Sans Raster` is an offline-generated, 4-bit grayscale
+coverage atlas derived from OFL-licensed Fira Sans. Its 126,023-byte atlas is
+bounded by a 128 KiB compile-time limit; runtime rendering only reads the
+embedded data and performs no font parsing or allocation. It provides real
+upper/lowercase forms, proportional advances, and grayscale antialiasing for a
+bounded ASCII repertoire. Each unknown scalar produces one `?` fallback. This
+does not claim Unicode shaping, a general font stack, or locale support.
+
+Run the current offline UI and AndroidBox gates with:
+
+```bash
+./scripts/check-mobile-ui-runtime.sh
+./scripts/check-androidbox-dex0.sh
+./scripts/check-androidbox-apk-install0.sh \
+  --apk "$PWD/fixtures/androidbox-resource-demo/androidbox-resource-demo.apk"
+./scripts/check-androidbox-apk-update0.sh \
+  --base-apk "$PWD/fixtures/androidbox-resource-demo/androidbox-resource-demo.apk" \
+  --update-apk "$PWD/fixtures/androidbox-resource-update-demo/androidbox-resource-update-demo.apk"
+./scripts/check-androidbox-apk-uninstall0.sh \
+  --base-apk "$PWD/fixtures/androidbox-resource-demo/androidbox-resource-demo.apk" \
+  --update-apk "$PWD/fixtures/androidbox-resource-update-demo/androidbox-resource-update-demo.apk"
+./scripts/check-androidbox-local-apk.sh \
+  --apk "$PWD/fixtures/androidbox-mac-demo/androidbox-mac-demo.apk"
+```
+
+For an interactive local window, run `./scripts/run-mobile-ui.sh`.
+
+The mobile gate boots QEMU with networking disabled and a fixed emulated
+PL031 base, captures real ramfb frames, and verifies that bottom navigation
+cannot unlock the visual Lock surface. It then proves an empty Overview,
+the 480-pixel Home path, an accepted present from the built-in Phone page, a distinct finger-follow
+Overview frame, a stable Phone identity card, authenticated recent-card
+activation, and return to Home. The current run has 25 contiguous full
+720x1600 commits, 40 contiguous inputs, 19 system-UI revisions, two
+Launcher system-UI requests, and five focus generations. The complete PPM
+SHA-256 values are
+`c7098bbf9e6ed372d6490c1950f0acce753ff4418b1e2432daca33d4ae686953`
+for empty Overview and
+`1ebb5b116b7dcb2a93ea3247b51c4b044c9d5317115f90d0e8adc8d20e5c730e`
+for Phone identity Overview. Curated logs, PPMs, and PNGs are in
+`target/mobile-ui/evidence-720x1600-overview-v7-20260729`.
+
+The AndroidBox Resources-1 gate performs a normal feature-matched
+kernel/userspace build, then uses the same QEMU touch path to unlock, open All
+apps, enter AndroidBox, and press `Run onTap`. It independently checks the
+exact four-entry STORED ZIP shape, uses `aapt2` for the binary manifest,
+resource table, and layout, and validates APK SHA-256
+`ff5c423f43843f22708e39ee1226bde59bb81121f35a6f9d7875225d62a20574`,
+`resources.arsc` CRC-32 `0x9f67c7b4`, binary-layout CRC-32 `0x36ce95c4`,
+layout ID `0x7f020000`, and string ID `0x7f030000`. Request 1 reports `boot`,
+result `20260729`, two instructions, and tap count zero. The separately
+sequenced Activity report binds MainActivity method 7 at code offset `0x2c8`,
+four executed instructions, and the 31-byte resource-backed TextView. A
+following historical BUC1-v7 resource audit requires all five facts: table parsed, layout
+entry resolved, binary XML parsed, TextView verified, and string reference
+resolved. Request 2 reports `tap`, result `20260736`, two instructions, and tap
+count one. Both screenshots are exact 720x1600 PPMs, with 376 changed pixels
+confined to runtime-owned result/count fields. Curated gate evidence is in
+`target/androidbox-dex0/evidence-resources1-20260729` (the final passing work
+directory is `target/androidbox-dex0/check.JvHUHG`). The earlier curated gate recorded
+218 UI tests, 50 AndroidBox core tests, and 364 AndroidBox-feature kernel
+tests. The current focused host suites pass 235 UI tests and 74 AndroidBox core
+tests; the earlier Activity-0 fixture remains covered.
+
+The base mobile preview profile is deliberately separate from the M80
+product-runtime lineage and uses an isolated ABI-v24 mobile
+input/surface/clock path. Install-0/Update-0/Uninstall-0 shares another matched
+opt-in profile: its parent retains that UI path while selecting ABI 44,
+boot-catalog syscall 59, and Launcher-only durable-relaunch syscall 60. The ABI
+45 child keeps Launcher byte-free but lets App claim one read-only image
+through syscall 61. No profile grants package mutation authority.
+Syscall 58 remains absent from non-mobile profiles, including the M80 product
+profile. To stay inside the existing
+small EL0 address window, userspace uses the bounded copy ABI in batches of at
+most 22 scanlines. One full 720x1600 frame therefore makes exactly 73
+`GraphicsBufferWrite` submissions (72 batches of 22 rows and one final
+16-row batch), down from 1,600 submissions in the former one-row path. This is
+about a 21.9x reduction in submission-call count only: it is not a measured
+wall-clock speedup or frame-rate claim, and the pixels still pass through the
+bounded copy/canonicalization path. This remains suitable for a static local
+preview, not the final high-frame-rate graphics architecture. Theme, accent,
+software dimming, and boot-notification visibility are shared only inside the current SurfaceServer UI
+session and are not persisted; they reset with that server/system and do not
+form a global settings or hardware-display service. A
+fixed 16-entry client-local FIFO retains already-accepted input samples that
+arrive while a frame is being presented and fails closed on overflow. The
+gate exercises a rapid two-action queued burst with five ordered UI frames and
+observed queue high-water of at least two, but does not claim capacity
+saturation or overflow testing. Page-transition presents use the separate
+quarantine/release-boundary policy described above and do not consume this
+FIFO.
+Calculator uses checked, bounded fixed-point arithmetic and is local to the
+current Launcher session; it is not persisted and is not a separate
+application service. The Phone buffer is volatile and local to the UI session,
+and its disabled call control provides no telephony, audio, or network capability. The empty
+Messages inbox and its two preview-information details are fixed local
+content, not conversations backed by search, composition, transport, receipt,
+or storage services. Finger-follow edge-Back, shade, drawer, and page-sheet
+evidence is a bounded set of quantized or fixed transient frames, not an FPS,
+vsync, animation-timing, or velocity claim. Status-bar time is the
+SurfaceServer-distributed QEMU PL031 boot snapshot described above; it is not
+a ticking clock, secure time, or a physical-RTC claim. The 720x1600 geometry is only the exact guest
+scanout and a common 20:9 ratio; the 64-output-pixel rounded mask is likewise
+only a local-preview shape. Neither is a claim about physical dimensions,
+DPI, refresh rate, a device panel, or real touch calibration. This is a local
+UI prototype with `secure_time_claim=0`, `physical_rtc_claim=0`,
+`battery_backed_claim=0`, `physical_backlight_claim=0`,
+`hardware_brightness_claim=0`, and `real_phone_claim=0`, not a claim of networking,
+audio, camera, power management, real hardware, a flashable image, or a
+daily-usable phone. Hardware and real-device work still require a user-selected
+target and separate explicit authorization.
+
+## Current baseline: ABI-v41 / M80
+
+As of 2026-07-28, the current milestone is
+`unified-product-maintenance-plan-runtime`. M80 is a matched child of M79 and
+adds no syscall: ABI v41 still exposes syscalls 0--57 and keeps raw 58
+unknown. The M77 `BNDRMAU1` authorization audit, M78 `BNDRMEX1` aggregate
+completion, and M79 `BNDRMST1` fixed-step journal remain at `BNDROID_DATA`
+relative sectors 5/6, 7/8, and 9/10. M80 adds an independent 424-byte,
+two-slot `BNDRMPL1` plan ledger at relative sectors 11 and 12.
+
+The three fixed resident operations each use an exact plan ID,
+operation-instance ID, idempotency key, deterministic effect digest, and
+previous SHA-256 chain. The ordinary path records nine durable transitions:
+`PREPARED -> APPLYING -> CONFIRMED` for rotation 1, rotation 2, and resident
+drain. Only `PREPARED -> COMPENSATED` is permitted for cancellation, and only
+before apply. Every mutation uses inactive-slot write, flush, full readback,
+and revalidation.
+
+Before EL0 starts, the kernel preflights the audit, execution, step, and plan
+slot pairs before any authorization mutation. Restart from APPLYING is
+explicitly classified: an absent exact step effect is result-unknown and is
+reconciled through the bounded idempotent effect; an already durable exact
+effect is observed-unconfirmed and advances confirmation without duplicating
+the step. The terminal plan head is re-read and its chain is bound into the
+M78 aggregate completion.
+
+The focused release matrix proved normal completion; host stops after durable
+PREPARED, APPLYING, and underlying-effect boundaries followed by recovery;
+pre-apply cancellation to COMPENSATED; corrupt-newest-plan fallback and
+repair; and convergence of five independent terminal disks. The normal plan
+ID is
+`8e5d4822f651f504ca58825bdac408ccf86bb5b2d52ac58ca9a44433796fbfca`;
+the terminal plan chain is
+`1dfb9859db551fe7621e274a518edc937c67feccc23275c35e9e99d098f58ed4`.
+
+```text
+UNIFIED_PRODUCT_MAINTENANCE_PLAN_REBOOT_OK base_plan_slots=0 normal_transitions=9 prepared_cut=1 applying_cut=2 effect_cut=2 compensated_cut=2 corruption_fallback_generation=1 terminal_converged_disks=5 terminal_plan_chain_bound=1 external_effect_exactly_once_claim=0 hardware_powercut_claim=0 emulator_only=1 real_phone_claim=0
+```
+
+The focused log
+`target/m80/unified-product-maintenance-plan-runtime.log` has 3,609 lines,
+752,631 bytes, and SHA-256
+`f711ad753cc21cf05abec301d664026058a2f9be4b1f786ac032eca98be2f729`.
+Normal, effect-recovery, and corruption-recovery screenshots all retain
+SHA-256
+`1d466ebb9c519c31f9c2f7a86c742efb36d2493e0283e2d532b10de549ed1994`.
+
+The complete offline `scripts/test.sh` suite also exited 0. Its preserved log,
+`target/full-test-m80-rerun.log`, has 7,945 lines, 971,891 bytes, and SHA-256
+`a7ef8f08ea5fac5c90ec104d9970228b8c853854edae573b1646bc1ff68081dd`.
+The terminal aggregate records 58 QEMU self-exits, including 50 PSCI
+self-exits; five positive and four host-interrupted M80 boots; one M80
+corruption fallback, result-unknown reconciliation, observed-effect
+reconciliation, and pre-apply compensation; 11 storage-negative cases,
+persistence recovery, and the cooperative storage-IRQ race gate.
+
+M80 stress also exposed and fixed a shutdown proof sampling race. The kernel
+now snapshots shutdown state before governed subsystem evidence and uses that
+same captured generation for the final proof. It can no longer combine a
+fresh `Requested` phase with stale process/handle evidence from the prior
+round; the proof conditions and fail-closed behavior were not relaxed.
+
+This remains a bounded, single-core, QEMU-only research prototype. Host stops
+are not physical power cuts, and bounded idempotent reconciliation is not
+exactly-once for external side effects. The disk is not a trusted monotonic
+backend and supplies no host replay/erase/tamper resistance. There is no
+production HSM/key custody, RPMB/eFuse, BSP, boot chain, PMIC, real
+controller, flashing, or real-device evidence. It is not a real phone and is
+not suitable for daily use. Next local work is a signed, data-driven bounded
+plan plus wider multi-sequence/cancellation/effect-divergence/corruption/soak
+coverage, followed by multi-app persistent storage and package lifecycle.
+Hardware work still requires a user-selected target and separate explicit
+authorization.
+
+Reproduce the focused local gates with:
+
+```bash
+./scripts/check-unified-product-maintenance-plan-static.sh
+BNDROID_PROFILE=release ./scripts/check-unified-product-maintenance-plan-runtime.sh
+```
+
+## Historical baseline: ABI-v40 / M79
+
+At the M79 checkpoint on 2026-07-28, the milestone was
+`unified-product-maintenance-step-runtime`. M79 is a matched child of M78 and
+adds no syscall: ABI v40 still exposes syscalls 0--57 and keeps raw 58
+unknown. The M77 `BNDRMAU1` authorization audit remains in `BNDROID_DATA`
+relative sectors 5 and 6, and the M78 `BNDRMEX1` aggregate-completion ledger
+remains in relative sectors 7 and 8. M79 adds an independent 376-byte,
+two-slot `BNDRMST1` maintenance-step journal in relative sectors 9 and 10.
+
+The journal records a fixed three-step kernel-observed program: the first
+clean StorageServer rotation, the second clean rotation, and resident drain.
+Every entry binds the exact authorization, manifest, key policy, fixture root,
+device identity, deterministic effect digest, previous chain head, sequence,
+base sequence, entry count, and ordinal. The invariant
+`(sequence - base_sequence) * 3 + ordinal` rejects gaps, substituted
+authorizations, early future sequences, and mutation after aggregate
+completion.
+
+Before any EL0 process starts, the kernel preflights the audit, execution, and
+step-slot pairs before mutating the authorization audit. An empty step journal
+is accepted only as a migration from the exact completed M78 sequence-1
+anchor. On restart, already durable lower or equal steps are reconciled
+read-only; the next missing step alone may advance. Immediately before the
+M78 aggregate completion, the kernel re-reads the terminal drain entry and
+binds its chain head into the aggregate runtime digest.
+
+The focused release matrix proved one ordinary M79 completion; host stops
+immediately after durable steps 1, 2, and 3 followed by three successful
+restarts; corrupt-newest-slot fallback and repair; and bad-signature,
+wrong-binding, and completed-replay rejection before EL0 with zero slot
+mutation. The three cut boots observed no later step, terminal read, or
+aggregate completion. Seven already durable step observations were replayed
+without a step-journal write.
+
+```text
+UNIFIED_PRODUCT_MAINTENANCE_STEP_REBOOT_OK format=1 abi=40 migration_anchor=m78-sequence1 positive_self_exits=5 interrupted_boots=3 fail_closed_pre_el0_boots=3 audit_sequence=2 execution_sequence=2 step_sequence=2 step_base_sequence=2 step_entry_count=3 step_slot_generations=3/2 cut_states=step1/step2/step3 cut_host_stop_after_marker=1 terminal_reads=5 aggregate_completions=5 idempotent_step_replays=7 corruption_fallbacks=1 corrupt_newest_valid_slots=1 corrupt_newest_rejected_slots=1 corruption_repaired=1 step_crc_verified=1 step_witness_verified=1 step_effects_verified=3 step_hash_chain_verified=3 terminal_chain_bound_into_aggregate=1 rejected_boot_slot_mutations=0 completed_replay_step_mutations=0 exact_authorization=1 ui_query_calls=217 ui_query_waits=212 ui_query_successes=5 qemu_psci_self_exits=5 host_terminated_boots=6 semihosting_uses=0 qemu_disk_step_journal=1 idempotent_reconciliation_claim=1 external_effect_exactly_once_claim=0 arbitrary_resume_claim=0 trusted_monotonic_backend=0 fixture_root=1 production_key_claim=0 hsm_claim=0 rpmb_claim=0 efuse_claim=0 erase_resistance=0 tamper_resistance=0 host_rollback_resistance=0 hardware_powercut_claim=0 emulator_only=1 real_phone_claim=0
+```
+
+The complete offline suite passed from scratch with exit 0.
+`target/m79-full-suite.log` has 7,124 lines, 885,912 bytes, and SHA-256
+`d4ca8422024a492b19c02aa8ef7f096430c376da99adb95b78806335ec032b27`.
+Its final aggregate includes
+`unified_product_maintenance_step_positive_boots=5
+maintenance_step_interrupted_boots=3
+maintenance_step_fail_closed_pre_el0_boots=3
+maintenance_step_idempotent_replays=7
+maintenance_step_corruption_fallbacks=1
+maintenance_step_terminal_chain_bound=1
+maintenance_step_completed_replay_slot_mutations=0
+qemu_psci_self_exits=40 qemu_self_exits=48`.
+
+This remains a bounded, single-core QEMU research prototype. The cut points
+are host-side QEMU terminations after durable markers, not physical power
+cuts. Read-only restart reconciliation is valid only for this fixed,
+idempotent resident program; it does not provide exactly-once external side
+effects or arbitrary instruction resume. The host-controlled disk provides no
+trusted monotonic, rollback, erase, or tamper resistance. There is no
+production key custody, HSM, RPMB/eFuse, BSP, boot chain, PMIC, controller,
+flashing, or real-device evidence. It is not a real phone and is not suitable
+for daily use. The next local P0 is a durable generic maintenance-plan state
+machine with operation-instance IDs, idempotency keys, explicit
+prepare/apply/confirm/compensate states, and result-unknown cut/corruption
+tests; that still cannot claim exactly-once without a trusted external
+participant. Hardware or device work requires a user-selected target and
+separate explicit authorization.
+
+Reproduce the focused local gates with:
+
+```bash
+./scripts/check-unified-product-maintenance-step-static.sh
+BNDROID_PROFILE=release ./scripts/check-unified-product-maintenance-step-runtime.sh
+```
+
+## Historical baseline: ABI-v39 / M78
+
+At the M78 checkpoint on 2026-07-28, the milestone was
+`unified-product-maintenance-execution-runtime`. M78 is a matched child of M77
+and adds no syscall: ABI v39 still exposes syscalls 0--57 and keeps raw 58
+unknown. The M77 `BNDRMAU1` authorization audit remains in `BNDROID_DATA`
+relative sectors 5 and 6. M78 adds an independent 368-byte `BNDRMEX1`
+execution-completion ledger in relative sectors 7 and 8; both ledgers use two
+CRC/witness-protected slots, exact generations, SHA-256 chains, inactive-slot
+write, flush, full readback, and revalidation.
+
+Admission now reads both durable heads before EL0. A new authorization may
+advance the audit only when its predecessor has a matching execution
+completion. When audit sequence N is exactly one ahead of execution sequence
+N-1, only the byte-exact same signed authorization may resume and the audit
+ledger stays read-only. When both heads already contain N, replay of N is
+rejected before EL0 as `completed-replay`. This closes the durable gap between
+accepting an authorization and recording the bounded operation's completion.
+
+Completion is committed only after the kernel validates the authorization
+binding, four consumed uses, two clean StorageServer rotations, service drain,
+AppData generation, and the runtime/shutdown evidence digest. The commit
+precedes device-health close and the final clean-shutdown seal. It is a
+narrowly bounded interrupted-session recovery rule, not a general instruction
+checkpoint or exactly-once primitive.
+
+The focused release gate proved sequence 1 completion, then admitted sequence
+2 and terminated its host QEMU process after the admission marker but before
+the completion marker. Disk inspection observed `audit2/execution1`. Booting
+the exact same BMA1 resumed without another audit write and completed as
+`audit2/execution2`. Bad signature, wrong binding, and completed replay were
+all rejected before EL0 with zero audit/execution-slot mutation.
+
+```text
+UNIFIED_PRODUCT_MAINTENANCE_EXECUTION_REBOOT_OK format=1 abi=39 signed_authorizations=6 signature_valid=5 signature_rejections=1 binding_rejections=1 completed_replay_rejections=1 positive_self_exits=2 interrupted_boots=1 fail_closed_pre_el0_boots=3 audit_sequence=2 execution_sequence=2 audit_slot_generations=1/2 execution_slot_generations=1/2 audit_crc_verified=2 execution_crc_verified=2 audit_witness_verified=2 execution_witness_verified=2 audit_hash_chain_verified=2 execution_hash_chain_verified=2 interruption_state=audit2/execution1 resume_state=audit2/execution2 audit_unchanged_on_resume=1 execution_unchanged_before_completion=1 completed_replay_slot_mutations=0 rejected_boot_slot_mutations=0 old_slots_preserved=1 exact_binding_resume=1 predecessor_completion_required=1 uses_consumed=4 clean_rotations=4 ui_query_calls=88 ui_query_waits=86 ui_query_successes=2 qemu_psci_self_exits=2 host_terminated_boots=4 semihosting_uses=0 qemu_disk_audit=1 qemu_disk_execution=1 exactly_once_claim=0 arbitrary_resume_claim=0 trusted_monotonic_backend=0 fixture_root=1 production_key_claim=0 hsm_claim=0 rpmb_claim=0 efuse_claim=0 erase_resistance=0 tamper_resistance=0 host_rollback_resistance=0 hardware_powercut_claim=0 emulator_only=1 real_phone_claim=0
+```
+
+The complete offline suite passed from scratch with exit 0.
+`target/m78-full-suite.log` has 6,270 lines, 799,409 bytes, and SHA-256
+`9b5924935782d511994635a0231d76eb77f4d70e6caef7bc831c6b4dfc01f801`.
+Its final aggregate includes
+`unified_product_maintenance_execution_positive_boots=2
+maintenance_execution_interrupted_boots=1
+maintenance_execution_fail_closed_pre_el0_boots=3
+maintenance_execution_completed_replay_slot_mutations=0
+maintenance_execution_exact_binding_resume=1
+maintenance_execution_predecessor_completion_required=1
+qemu_psci_self_exits=30 qemu_self_exits=38`.
+
+This remains a bounded, single-core QEMU research prototype. The interrupted
+boot is a host-side QEMU termination after durable admission, not a physical
+power cut. The disk is host-controlled and provides no trusted monotonic,
+rollback, erase, or tamper resistance. There is no production key custody,
+HSM, RPMB/eFuse, BSP, boot-chain, PMIC, controller, flashing, or real-device
+evidence. It is not a real phone and is not suitable for daily use. The next
+local P0 is a fixed-operation step journal with explicit idempotency rules and
+additional write/flush/readback cut-point and corruption campaigns. Hardware
+or device work still requires a user-selected target and separate explicit
+authorization.
+
+Reproduce the focused local gates with:
+
+```bash
+./scripts/check-unified-product-maintenance-execution-static.sh
+BNDROID_PROFILE=release ./scripts/check-unified-product-maintenance-execution-runtime.sh
+```
+
+## Historical baseline: ABI-v38 / M77
+
+At the M77 checkpoint on 2026-07-28, the milestone was
+`unified-product-maintenance-authorization-runtime`. M77 is a matched child of
+M76 and adds init-only syscall 57 `MaintenanceSessionOpen`; ABI v38 exposes
+syscalls 0--57 and keeps raw 58 unknown. Before any EL0 process starts, the
+kernel verifies a 512-byte BMA1 with a maintenance-specific fixture root. The
+signature is checked before any binding or durable-state mutation. The signed
+request binds the exact product manifest, ordered product-key policy, device
+identity, maintenance policy, operation mask, use limit, authorization id, and
+sequence.
+
+The fixture identities are deliberately explicit and reproducible:
+
+```text
+maintenance_root_sha256=683eafa41277e75ae8cd1332490839a9cab204c8e8b808e2ebdf77f37259b005
+manifest_sha256=5a8ccd0ae601dad43356782ed0cc803fc3fe1232d3f42be981a71d94ca33e988
+product_key_policy_sha256=30676f357683b6c8d2c5d67755e48beb93bdfe8864eccc67c716a1785e935e01
+device_binding_sha256=04ed2c7c657ebe5147d3da7103ea7a7e0d4d9bbe808915898967259e1b04a555
+maintenance_policy_sha256=d51ffa50e8ae40f278b5243f9d86a985b6d2835be59ff4c262d6c6436efe8200
+```
+
+Accepted authorizations are committed before publication to the two
+CRC/witness-protected `BNDRMAU1` audit slots in `BNDROID_DATA` relative sectors
+5 and 6. The transaction requires the exact next sequence, preserves the
+selected old slot, links every accepted record through SHA-256, and completes
+write, flush, full readback, and revalidation before the boot may continue.
+The focused gate committed sequences 1 and 2 with slot generations 1 and 2;
+their chain digests are
+`87c402f7a09f63ffc64f5bfeed9fed182bfcad77f2cfe935cd7179180ca95c91`
+and
+`14f45f4f2a243821a6c84c5afc73f32223d1f9ae2f64a02060effc391b6c119f`.
+
+Only init can open the boot-local maintenance session. Opening it requires the
+prepared authorization and exact zero flags, succeeds once, and gates mutating
+`ServiceSupervisorReport` operations. Calls with bad arguments, the wrong
+state, or no active session fail closed. The UI convergence query remains
+read-only and usable without maintenance authority.
+
+The focused release gate passed six positive QEMU boots (`first`,
+`transition`, `activate`, `repair`, `sequence1`, and `sequence2`) and three
+pre-EL0 negative boots. A bad signature, a validly signed wrong binding, and a
+replayed sequence are all rejected without publishing the manifest; the three
+rejected boots leave both audit slots byte-for-byte unchanged. The repository
+side of the offline split-signing flow only creates canonical 256-byte
+requests or assembles a BMA1 from a detached signature and pinned public key.
+It has no private-key or signing input.
+
+```text
+UNIFIED_PRODUCT_MAINTENANCE_AUTHORIZATION_REBOOT_OK format=1 abi=38 maintenance_sessions=2 signed_authorizations=5 signature_valid=4 signature_rejections=1 binding_rejections=1 replay_rejections=1 sequence1=1 sequence2=2 committed_sequence=2 accepted_count=2 audit_reads=8 audit_writes=2 audit_flushes=2 slots=2 relative_lbas=5/6 slot_generations=1/2 crc_verified=2 witness_verified=2 hash_chain_verified=2 old_slot_preserved=1 exact_sequence=1 rejected_boot_slot_mutations=0 fail_closed_pre_el0_boots=3 manifests_published_after_rejection=0 session_open_calls=6 session_open_successes=2 session_argument_rejections=2 session_state_rejections=2 mutating_report_gate_denials=2 clean_rotations=4 ui_query_calls=88 ui_query_waits=86 ui_query_successes=2 qemu_psci_self_exits=2 semihosting_uses=0 qemu_disk_audit=1 trusted_monotonic_backend=0 fixture_root=1 production_key_claim=0 hsm_claim=0 rpmb_claim=0 efuse_claim=0 erase_resistance=0 tamper_resistance=0 hardware_powercut_claim=0 emulator_only=1 real_phone_claim=0
+```
+
+The complete offline suite passed from scratch with exit 0.
+`target/m77-full-suite.log` has 5,520 lines, 721,693 bytes, and SHA-256
+`f9203c32fc02a0a7958c87481a98b0235a1a070559e10c334cb443761f75354d`.
+Its final aggregate includes
+`unified_product_maintenance_authorization_boots=6
+maintenance_authorization_fail_closed_pre_el0_boots=3
+maintenance_authorization_audit_writes=2
+maintenance_authorization_audit_flushes=2
+maintenance_authorization_report_gate_denials=2 qemu_psci_self_exits=24
+qemu_self_exits=32`.
+
+This remains a bounded, single-core QEMU research prototype. The maintenance
+root is a fixture and the audit backend is a host-controlled QEMU disk:
+`trusted_monotonic_backend=0 production_key_claim=0 hsm_claim=0 rpmb_claim=0
+efuse_claim=0 erase_resistance=0 tamper_resistance=0
+hardware_powercut_claim=0 emulator_only=1 real_phone_claim=0`. It is not a
+real phone, is not flashable, and is not suitable for daily use. The next
+in-scope P0 is a threat model and production-custody interface, signed
+root/update/recovery authorization, more transaction cut-point and corruption
+campaigns, repeated authorization/rotation, cancellation races, and longer
+soak. BSP, boot-chain, PMIC, RPMB/eFuse, real-controller, flashing, or device
+work requires a user-selected target and separate explicit authorization.
+
+Reproduce the focused local gates with:
+
+```bash
+./scripts/check-unified-product-maintenance-authorization-static.sh
+BNDROID_PROFILE=release ./scripts/check-unified-product-maintenance-authorization-runtime.sh
+```
+
+## Historical baseline: ABI-v37 / M76
+
+At the M76 checkpoint on 2026-07-28, the milestone was
+`unified-product-key-rotation-runtime`. M76 strictly extends the matched M75
+kernel/userspace closure without adding a syscall: ABI v37 still exposes only
+syscalls 0--56, and raw 57 remains unknown. The pre-EL0 verifier now uses an
+ordered three-anchor fixture keyring with key ids/epochs 2/2, 3/3, and 4/4.
+Its canonical policy digest is
+`30676f357683b6c8d2c5d67755e48beb93bdfe8864eccc67c716a1785e935e01`.
+
+The same two reserved `BNDROID_DATA` sectors 3 and 4 now carry a 96-byte
+`BNDRKEY1` state inside the existing CRC/FNV-protected `DataRecord`. The state
+binds the rollback floor, active key epoch/id, active trust-anchor SHA-256, and
+the ordered keyring-policy SHA-256. Signature verification happens before any
+policy mutation; the selected anchor must also be authorized by the persisted
+epoch, so a correctly signed manifest from a retired key fails closed.
+
+The focused release gate passed a staged five-boot upgrade on one disk:
+historical M75 key 2/floor 3 seed, key 3 generation/floor 4 transition, key 4
+generation/floor 5 activation, key 4 redundancy repair, and a key 4 read-only
+steady boot. The final two slots are generations 3/4. Across the M76 policy
+boots the gate records 14 reads, three writes, and three flushes; every
+accepted boot retains two clean StorageServer rotations, the exact UI, and a
+PSCI QEMU self-exit. A corrupted key-4 signature and a valid key-3
+generation-6 artifact are both rejected before EL0; neither rejection
+publishes a manifest or mutates either policy slot.
+
+M76 also adds an offline split-signing boundary. The repository-side tool can
+prepare the exact 256-byte signed request and assemble a 512-byte BMS1 only
+from that request, a detached 256-byte signature, and a pinned public PEM. It
+verifies the canonical request, RSA-2048 exponent, expected modulus digest,
+detached signature, key id, and final artifact. It accepts no private-key or
+signing input, and the repository contains only public anchors and fixture
+signatures.
+
+This is a bounded fixture-key rotation transaction on a writable QEMU disk,
+not production key management or hardware anti-rollback. There is no HSM/key
+ceremony, production authorization/recovery policy, or trusted monotonic
+RPMB/eFuse-class backend. A privileged host can still replay, erase, or tamper
+with the disk, and no hardware power-cut behavior is claimed. M76 remains a
+bounded, single-core QEMU research prototype:
+`fixture_keys=1 production_key_claim=0 hsm_claim=0 rpmb_claim=0
+efuse_claim=0 host_rollback_resistance=0 erase_resistance=0
+tamper_resistance=0 hardware_powercut_claim=0 emulator_only=1
+general_runtime=0 real_phone_claim=0`. It is not flashable or suitable for
+daily phone use. Hardware work still requires an explicitly selected target
+and explicit user authorization.
+
+M33--M76 are 44 opt-in leaves; with default M32 there are 45 separate evidence
+ledgers. The static audit finds 52 literal shell QEMU launches, every one with
+exactly one `-nic none`. The focused static, host, and seven-boot QEMU gates
+have passed. The complete offline suite also passed from scratch with exit 0:
+`target/m76-full-suite.log` has 4,496 lines and SHA-256
+`f4066b7cd057da32ea71af3a6df446af458e7a4130bd254b76fbb09073aa9e95`.
+Its final `BNDROID_TEST_SUITE_OK` contains
+`unified_product_key_rotation_reboot=1 unified_product_key_rotation_boots=5
+key_rotation_fail_closed_pre_el0_boots=2 key_rotation_floor=5
+key_rotation_policy_writes=3 key_rotation_steady_read_only=1
+qemu_psci_self_exits=18 qemu_self_exits=26`.
+
+Focused M76 evidence is:
+
+```text
+UNIFIED_PRODUCT_KEY_ROTATION_SOURCE_OK abi=37 syscalls=0-56 artifact=BMS1 bytes=512 algorithm=RSA2048-PKCS1-v1_5-SHA256 keyring_keys=3 key_ids=2/3/4 key_epochs=2/3/4 policy_sha256=30676f357683b6c8d2c5d67755e48beb93bdfe8864eccc67c716a1785e935e01 committed_floor=5 slots=2 positive_boots=5 negative_boots=2 key_transitions=2 redundancy_repair=1 steady_read_only=1 retired_key_rejection=1 rejected_slot_mutations=0 offline_split_signing=1 qemu_launches=52 nic_none=52 network=0 semihosting=0 fixture_keys=1 production_key_claim=0 hsm_claim=0 rpmb_claim=0 efuse_claim=0 host_rollback_resistance=0 erase_resistance=0 tamper_resistance=0 hardware_powercut_claim=0 emulator_only=1 general_runtime=0 real_phone_claim=0
+KEY_ROTATION_ARTIFACTS_OK format=1 keyring_keys=3 policy_sha256=30676f357683b6c8d2c5d67755e48beb93bdfe8864eccc67c716a1785e935e01 key2_id=2 key3_id=3 key4_id=4 transition_generation=4 transition_signature_valid=1 active_generation=5 active_signature_valid=1 retired_generation=6 retired_signature_valid=1 retired_rejected_by_persistent_epoch=1 bad_signature_valid=0 signed_region_mutations=0 offline_request_bytes=256 detached_signature_bytes=256 offline_roundtrip=1 private_key_in_repository=0 production_key_claim=0 hardware_rollback_claim=0
+UNIFIED_PRODUCT_KEY_ROTATION_REBOOT_OK format=1 abi=37 product_shutdowns=5 verified_manifest_sessions=5 artifact_verifications=7 signature_successes=6 signature_rejections=1 key_transitions=2 retired_key_rejections=1 manifest_generation=5 artifact_index=5 committed_floor=5 legacy_seed_key_id=2 transition_key_id=3 active_key_id=4 legacy_migration=1 transition_floor_advance=1 active_floor_advance=1 redundancy_repair=1 steady_read_only=1 policy_reads=14 policy_writes=3 policy_flushes=3 slots=2 slot_generations=3/4 active_policy_slots=2 crc_verified=2 binding_verified=2 old_slot_preserved=1 rejected_boot_slot_mutations=0 negative_signature_boots=1 negative_retired_key_boots=1 fail_closed_pre_el0_boots=2 manifests_published_after_rejection=0 offline_split_signing=1 event_supervision_sessions=5 clean_rotations=10 ui_query_calls=219 ui_query_waits=214 ui_query_successes=5 psci_system_off_requests=5 qemu_psci_self_exits=5 semihosting_uses=0 qemu_disk_key_policy=1 fixture_keys=1 production_key_claim=0 hsm_claim=0 rpmb_claim=0 efuse_claim=0 host_rollback_resistance=0 erase_resistance=0 tamper_resistance=0 hardware_powercut_claim=0 emulator_only=1 real_phone_claim=0
+```
+
+Reproduce the focused offline gates with:
+
+```bash
+./scripts/check-unified-product-key-rotation-static.sh
+BNDROID_PROFILE=release ./scripts/check-unified-product-key-rotation-runtime.sh
+```
+
+The next local P0 is production HSM-backed custody, key ceremonies,
+authorization/recovery, and signed root-of-trust/update metadata, together with
+a threat-modeled trusted monotonic backend. Maintenance controls still need
+authentication and audit. The QEMU proof also needs broader cut-point and
+corruption campaigns, arbitrary repeated rotations, accepted-session
+cancellation races, and longer nondeterministic soak. Real BSP, controller,
+RPMB/eFuse, PMIC, power-cut, SMP/IOMMU, and phone validation remain gated on a
+user-selected and explicitly authorized target.
+
+## Historical baseline: ABI-v36 / M75
+
+As of 2026-07-27, the M75 milestone was
+`unified-product-persistent-rollback-runtime`. M75 strictly extends the
+matched M74 kernel/userspace closure without adding a syscall: ABI v36 still
+exposes only syscalls 0--56, and raw 57 remains unknown. Before starting any
+EL0 process, the kernel verifies the external generation/index-3 BMS1 artifact
+with the distinct pinned fixture key id 2, then runs a synchronous rollback
+transaction while IRQ-backed block I/O is available. The immutable manifest
+VMO cannot be published until both steps succeed.
+
+The rollback ledger is a QEMU-disk-only, two-slot `BNDRRBK1` record stored in
+reserved `BNDROID_DATA` sectors 3 and 4. Each slot is wrapped in the existing
+`DataRecord` CRC/FNV, generation, data-epoch, and manifest-binding checks. An
+empty ledger uses bootstrap floor 2: the first boot advances and readback
+verifies floor 3 in slot 0/generation 1; the second boot preserves that slot
+and repairs redundancy in slot 1/generation 2; the third boot selects the
+newest valid slot and performs zero writes and zero flushes. Unit coverage also
+seals torn-inactive recovery, foreign/corrupt-slot rejection, bounds,
+durability, and selected-slot preservation on mutation failure.
+
+The focused release gate passed three complete positive boots and two negative
+boots. A corrupted signature is rejected before ledger access, and a validly
+signed generation/index-2 artifact is rejected against the persisted floor 3;
+both failures occur before EL0, manifest publication, or init-ready and leave
+the rollback slots unchanged. Across the three positive boots, the gate records
+10 ledger reads, two writes, two flushes, six clean StorageServer rotations,
+three exact UI screenshots, and three PSCI QEMU self-exits.
+
+This is persistent rollback state across boots of one writable QEMU disk, not
+production or hardware anti-rollback. Key id 2 is a fixture trust anchor; no
+private key is stored in the repository and no production custody/rotation
+policy is claimed. The ledger is not RPMB/eFuse-backed and does not resist host
+disk rollback, disk erasure, or tampering; hardware power-cut behavior is not
+claimed. M75 remains a bounded, single-core QEMU research prototype:
+`fixture_key=1 production_key_claim=0 rpmb_claim=0 efuse_claim=0
+host_rollback_resistance=0 erase_resistance=0 tamper_resistance=0
+hardware_powercut_claim=0 emulator_only=1 general_runtime=0
+real_phone_claim=0`. It is not flashable or suitable for daily phone use.
+Hardware work still requires an explicitly selected target and explicit user
+authorization.
+
+M33--M75 are 43 opt-in leaves; with default M32 there are 44 separate evidence
+ledgers. The static audit finds 52 literal shell QEMU launches, every one with
+exactly one `-nic none`. The complete offline suite passed from scratch with
+4,068 log lines. Its sealed log is `target/m75-full-suite.log`, SHA-256
+`a370baa795702627a9808fbeba5923406d9ec7128aaab9e4781360682a022332`.
+The final aggregate includes
+`unified_product_persistent_rollback_reboot=1
+unified_product_persistent_rollback_boots=3
+persistent_rollback_fail_closed_pre_el0_boots=2
+persistent_rollback_floor=3 persistent_rollback_slot_writes=2
+persistent_rollback_steady_read_only=1 qemu_psci_self_exits=13
+qemu_self_exits=21`.
+
+Focused M75 evidence is:
+
+```text
+PERSISTENT_ROLLBACK_ARTIFACTS_OK format=1 current_signature_valid=1 current_generation=3 rollback_index=3 bootstrap_floor=2 old_signature_valid=1 old_generation=2 old_rejected_after_floor3=1 bad_signature_valid=0 signed_region_mutations=0 key_id=2 algorithm=RSA2048-PKCS1-v1_5-SHA256 fixture_key=1 private_key_in_repository=0 production_key_claim=0 hardware_rollback_claim=0
+UNIFIED_PRODUCT_PERSISTENT_ROLLBACK_REBOOT_OK format=1 abi=36 product_shutdowns=3 verified_manifest_sessions=3 artifact_verifications=5 signature_successes=4 signature_rejections=1 persistent_rollback_rejections=1 manifest_generation=3 artifact_index=3 bootstrap_floor=2 committed_floor=3 first_boot_advances=1 second_boot_repairs=1 steady_boot_read_only=1 ledger_reads=10 ledger_writes=2 ledger_flushes=2 slots=2 slot_generations=1/2 valid_slots=2 rejected_slots=0 crc_verified=2 binding_verified=2 old_slot_preserved=1 rejected_boot_slot_mutations=0 negative_signature_boots=1 negative_rollback_boots=1 fail_closed_pre_el0_boots=2 manifests_published_after_rejection=0 event_supervision_sessions=3 clean_rotations=6 ui_query_calls=131 ui_query_waits=128 ui_query_successes=3 psci_system_off_requests=3 qemu_psci_self_exits=3 semihosting_uses=0 qemu_disk_ledger=1 fixture_key=1 production_key_claim=0 rpmb_claim=0 efuse_claim=0 host_rollback_resistance=0 erase_resistance=0 tamper_resistance=0 hardware_powercut_claim=0 emulator_only=1 real_phone_claim=0
+UNIFIED_PRODUCT_PERSISTENT_ROLLBACK_STATIC_OK source=1 feature_closure=1 abi=36 syscalls=0-56 artifact=BMS1 bytes=512 algorithm=RSA2048-PKCS1-v1_5-SHA256 key_id=2 artifact_index=3 bootstrap_floor=2 committed_floor=3 slots=2 positive_boots=3 negative_boots=2 first_advance=1 second_repair=1 steady_read_only=1 rejected_slot_mutations=0 manifest_published_after_rejection=0 parser_serial_negative=9 parser_fail_closed_negative=6 semihosting=0 network=0 fixture_key=1 production_key_claim=0 rpmb_claim=0 efuse_claim=0 host_rollback_resistance=0 erase_resistance=0 tamper_resistance=0 hardware_powercut_claim=0 emulator_only=1 general_runtime=0 real_phone_claim=0
+```
+
+Reproduce the focused offline gates with:
+
+```bash
+./scripts/check-unified-product-persistent-rollback-static.sh
+BNDROID_PROFILE=release ./scripts/check-unified-product-persistent-rollback-runtime.sh
+```
+
+The next local P0 is production-grade key custody/rotation and an offline
+signing policy, then a replay-resistant trusted monotonic backend and explicit
+host-rollback/erase/tamper threat model. Maintenance controls still need
+authentication and audit, while the QEMU ledger needs broader cut-point and
+unexpected-corruption campaigns. Arbitrary repeated rotations,
+accepted-session cancellation races, and long nondeterministic soak also
+remain. Real BSP, controller, RPMB/eFuse, PMIC, power-cut, SMP/IOMMU, and phone
+validation remain gated on a user-selected and explicitly authorized target.
+
+## Historical baseline: ABI-v35 / M74
+
+As of 2026-07-27, the M74 milestone was
+`unified-product-verified-manifest-runtime`. M74 strictly extends the matched
+M73 kernel/userspace closure without adding a syscall: ABI v35 still exposes
+only syscalls 0--56, and raw 57 remains unknown. The kernel now consumes a
+512-byte external BMS1 artifact consisting of a strict 32-byte envelope, the
+224-byte BMF1 service manifest, and a 256-byte RSA signature. It verifies the
+complete 256-byte signed region with RSA-2048 PKCS#1 v1.5 SHA-256 against
+kernel-pinned key id 1 and enforces rollback index 2 against a static floor of
+2 before publishing the immutable manifest VMO.
+
+The verifier is allocation-free and fail-closed. The positive artifact has
+generation/index 2. A separately signed generation/index-1 fixture proves that
+a cryptographically valid old artifact is rejected by the rollback floor, and
+a signature-corrupted fixture proves signature rejection. Both negative QEMU
+boots converge the real UI first, then stop with failure `0x7201` before
+manifest publication or init-ready. Two positive release boots retain M73's
+event supervision, two clean StorageServer rotations, persistent AppData,
+exact UI screenshot, and PSCI self-exit.
+
+This is a real RSA verification path, but not a production secure-boot claim.
+The repository contains no private key; the fixture key has no production
+custody or rotation policy. The rollback floor is kernel-static, not persistent
+RPMB/eFuse state. M74 remains a single-core QEMU-only research prototype:
+`production_key_claim=0 hardware_rollback_claim=0 emulator_only=1
+general_runtime=0 real_phone_claim=0`. It is not flashable or suitable for
+daily phone use. Hardware work still requires an explicitly selected target
+and explicit user authorization.
+
+M33--M74 are 42 opt-in leaves; with default M32 there are 43 separate evidence
+ledgers. The static audit finds 52 literal shell QEMU launches, every one with
+exactly one `-nic none`. M70--M74 contribute ten PSCI self-exits; M66--M74
+contribute eighteen total QEMU self-exits.
+The complete offline suite passed with 3,937 log lines; its sealed log is
+`target/m74-full-suite.log`, SHA-256
+`c100415c2f9187047d17aa67fd08f939aac50a46d9a22572a8e3841609653565`.
+
+Focused M74 evidence (the long reboot aggregate below retains its key fields):
+
+```text
+VERIFIED_MANIFEST_ARTIFACTS_OK format=1 product_signature_valid=1 product_generation=2 rollback_index=2 rollback_floor=2 old_signature_valid=1 old_generation=1 old_rejected_by_floor=1 bad_signature_valid=0 signed_region_mutations=0 algorithm=RSA2048-PKCS1-v1_5-SHA256 private_key_in_repository=0 production_key_claim=0 hardware_rollback_claim=0
+UNIFIED_PRODUCT_VERIFIED_MANIFEST_OK format=1 abi=35 artifact=BMS1 artifact_bytes=512 signed_bytes=256 payload=BMF1 payload_bytes=224 algorithm=RSA2048-PKCS1-v1_5-SHA256 key_id=1 rollback_index=2 rollback_floor=2 verification_attempts=1 verification_successes=1 signature_successes=1 signature_rejections=0 rollback_rejections=0 format_rejections=0 signed_sha256=99c3865eb64c5314c96ee87318924c9dd29a4bf55fdb571499d36db9cb2f7bc3 trust_anchor_sha256=6249c4c758ecd9117cd3799d705a371fac64a210fa464c0e64007fccc30c7d6c external_artifact=1 kernel_pinned_key=1 static_rollback_floor=1 manifest_published_after_verification=1 private_key_in_repository=0 production_key_claim=0 rpmb_claim=0 efuse_claim=0 hardware_rollback_claim=0 emulator_only=1 real_phone_claim=0
+VERIFIED_MANIFEST_NEGATIVE_BOOT_OK reason=signature failure=0x7201 ui_converged=1 manifest_published=0 init_ready=0 qemu_terminated_by_host=1 emulator_only=1 real_phone_claim=0
+VERIFIED_MANIFEST_NEGATIVE_BOOT_OK reason=rollback failure=0x7201 ui_converged=1 manifest_published=0 init_ready=0 qemu_terminated_by_host=1 emulator_only=1 real_phone_claim=0
+UNIFIED_PRODUCT_VERIFIED_MANIFEST_REBOOT_OK boots=2 qemu_self_exits=2 authenticated_power_keys=2 ui_interactions=2 ui_screenshots=2 ui_sha256=1d466ebb9c519c31f9c2f7a86c742efb36d2493e0283e2d532b10de549ed1994 product_shutdowns=2 verified_manifest_sessions=2 artifact_verifications=2 signature_successes=2 signature_rejections=0 rollback_rejections=0 manifest_generation=2 rollback_index=2 rollback_floor=2 signed_sha256_consistent=1 trust_anchor_consistent=1 negative_signature_boots=1 negative_rollback_boots=1 fail_closed_boots=2 manifests_published_after_rejection=0 event_supervision_sessions=2 clean_rotations=4 process_exit_faults=4 process_terminate_calls=0 terminated_killed=0 restart_budget_rearms=4 cancel_windows=2 cancelled_pending=8 drained_pending=0 qemu_psci_self_exits=2 semihosting_uses=0 qemu_backend_persistence=1 production_key_claim=0 hardware_rollback_claim=0 emulator_only=1 general_runtime=0 real_phone_claim=0
+UNIFIED_PRODUCT_VERIFIED_MANIFEST_STATIC_OK source=1 feature_closure=1 abi=35 syscalls=0-56 artifact=BMS1 bytes=512 algorithm=RSA2048-PKCS1-v1_5-SHA256 key_id=1 rollback_index=2 rollback_floor=2 positive_boots=2 negative_boots=2 signature_rejection=1 rollback_rejection=1 manifest_published_after_rejection=0 parser_serial_negative=15 parser_fail_closed_negative=8 semihosting=0 network=0 production_key_claim=0 hardware_rollback_claim=0 emulator_only=1 general_runtime=0 real_phone_claim=0
+```
+
+Reproduce the focused offline gates with:
+
+```bash
+./scripts/check-unified-product-verified-manifest-static.sh
+BNDROID_PROFILE=release ./scripts/check-unified-product-verified-manifest-runtime.sh
+```
+
+M74's then-next local P0 was production-grade key custody/rotation and an offline
+signing policy, followed by persistent monotonic rollback state with atomic
+floor advancement and recovery. Maintenance controls also still need
+authentication/auditing, arbitrary repeated rotations, unexpected-fault and
+accepted-session cancellation-race coverage, and long soak. Real BSP,
+controller, RPMB/eFuse, PMIC, power-cut, SMP/IOMMU, and phone validation remain
+gated on a user-selected and explicitly authorized target.
+
+## Historical baseline: ABI-v34 / M73
+
+As of 2026-07-27, the M73 milestone was
+`unified-product-event-supervision-runtime`. M73 strictly extends the matched
+M72 kernel/userspace closure and adds init-only syscall 56,
+`ServiceSupervisorReport`. Operation 0 is a read-only query of the
+kernel-owned predecessor UI-convergence seal: it returns `ShouldWait` until the
+real UI is ready, returns no handle or authority, and is accounted separately
+from transition reports. The remaining operations publish bounded supervisor
+transitions into a kernel ledger, which cross-checks report order against
+generation-qualified process counts and the kernel-observed live
+StorageServer PID.
+
+After UI convergence, init transactionally binds the same five-service BMF1
+manifest, starts an event-driven multi-channel health loop, and remains in that
+loop until an authenticated external power event. The M73 proof profile sends
+two external F5 maintenance requests. Each request cleanly asks the live
+StorageServer to flush and exit, waits for `Exited`, propagates App
+block/resume, applies the real 30 ms backoff, spawns the same-slot next
+generation, remounts the unchanged AppData generation, observes two stable
+Healthy rounds, and rearms exactly one restart-budget window. It does not use
+an injected health miss, `ProcessTerminate`, or a synthetic process kill.
+
+Before the power event, M73 deliberately leaves four already-issued health
+probes in flight. It records the cancel window, waits for the authenticated
+power message, stops new batches, drains all four replies, validates the
+five-service graph, and only then enters the existing AppData/resident
+shutdown/PSCI closure. The InputServer control path consumes exactly one
+envelope per readiness notification, so a health probe cannot trap the server
+waiting for a second control message and starve F5/power input.
+
+Two release boots on one writable image passed the strict relational parser,
+the exact UI screenshot check, persistent AppData checks, two maintenance
+rotations per boot, and QEMU PSCI self-exit. This remains a single-core
+QEMU-only research prototype, not a real or flashable phone:
+`emulator_only=1 general_runtime=0 real_phone_claim=0`. The proof profile
+still fixes five known services, four known dependencies, two F5 rotations,
+and one QEMU input/control path. It does not prove arbitrary-duration soak,
+unexpected hardware faults, a signed/anti-rollback manifest chain, PMIC
+poweroff, SMP/IOMMU, production drivers, or a real device. Hardware work still
+requires an explicitly selected target and explicit user authorization.
+
+M73 is ABI v34; raw syscall 56 remains unknown in M72/ABI-v33 and raw 57 is
+unknown in M73. M33–M73 are 41 opt-in leaves; with default M32 there are 42
+separate evidence ledgers. The static audit finds 52 literal shell QEMU
+launches, every one with exactly one `-nic none`. M70–M73 contribute eight
+PSCI self-exits; M66–M73 contribute sixteen total QEMU self-exits.
+
+Exact historical M73 evidence:
+
+```text
+UNIFIED_PRODUCT_EVENT_SUPERVISION_REBOOT_OK boots=2 qemu_self_exits=2 authenticated_power_keys=2 ui_interactions=2 ui_screenshots=2 ui_sha256=1d466ebb9c519c31f9c2f7a86c742efb36d2493e0283e2d532b10de549ed1994 product_shutdowns=2 event_supervision_sessions=2 manifests_decoded=2 manifest_open_calls=4 manifest_open_successes=2 manifest_argument_rejections=2 manifest_permission_denials=0 supervised_services=10 liveness_dependency_edges=8 ui_query_calls=87 ui_query_waits=85 ui_query_successes=2 event_batches=6 report_calls=18 report_successes=16 report_argument_rejections=2 report_permission_denials=0 report_state_rejections=0 clean_rotations=4 process_exit_faults=4 process_terminate_calls=0 terminated_exited=24 terminated_killed=0 backoff_waits=4 restart_budget_rearms=4 dependent_blocks=4 dependent_resumes=4 cancel_windows=2 cancelled_pending=8 drained_pending=0 storage_epochs=6 psci_discoveries=2 psci_version_probes=2 psci_version_1_1=2 fdt_psci_nodes=2 hvc_conduits=2 psci_system_off_requests=2 qemu_psci_self_exits=2 semihosting_uses=0 resident_nodes=8 dependency_edges=10 quiesce_waves=3 registrations=16 quiesces=16 order_rejections=2 storage_server_flushes=2 storage_server_readbacks=2 storage_server_exits=2 prepare_calls=8 prepares=2 commit_calls=2 commits=2 spawn_rejections=2 connect_rejections=4 final_appdata_generation=6 final_health_generation=4 final_health_slot=0 prior_health_generation=3 prior_health_slot=1 final_boot_open=0 prior_boot_open=1 qemu_backend_persistence=1 outside_data_appdata_unchanged=1 unused_data_unchanged=1 appdata_changed=1 changed_data_bytes=153 changed_appdata_bytes=2755 emulator_only=1 hardware_poweroff_claim=0 pmic_claim=0 psci_claim=1 powercut_claim=0 smp_claim=0 general_runtime=0 real_phone_claim=0
+UNIFIED_PRODUCT_EVENT_SUPERVISION_STATIC_OK source=1 feature_closure=1 abi=34 syscall=56 ui_query=read-only event_driven=1 services=5 rotations=2 clean_exit=2 process_terminate_calls=0 restart_budget_rearms=2 cancel_pending=4 drained_pending=0 parser_serial_negative=26 parser_host_negative=4 semihosting=0 full_suite=1 emulator_only=1 general_runtime=0 real_phone_claim=0
+```
+
+Reproduce the focused offline gates with:
+
+```bash
+./scripts/check-unified-product-event-supervision-static.sh
+BNDROID_PROFILE=release ./scripts/check-unified-product-event-supervision-runtime.sh
+```
+
+M73's then-next local P0 was to load the manifest from a signed, verified,
+anti-rollback boot artifact and authenticate/audit maintenance policy rather
+than relying on the proof-profile F5 control. The supervisor then needs
+arbitrary repeated service rotations, unexpected-fault coverage, accepted
+session cancellation races, and longer nondeterministic soak. Real BSP,
+controller, PMIC, power-cut, SMP/IOMMU, and phone validation remain gated on a
+user-selected and explicitly authorized target.
+
+## Historical baseline: ABI-v33 / M72
+
+As of 2026-07-27, the current milestone is
+`unified-product-manifest-supervision-runtime`. M72 strictly extends the
+matched M71 closure and adds syscall 55, `ServiceManifestOpen`, as an
+init-only, zero-flags/zero-reserved operation. The kernel validates its own
+224-byte immutable BMF1 v1/generation-1 production manifest before exposing a
+read-only VMO; init performs one deliberate invalid-argument probe, then one
+successful open, exact read, close, and allocation-free transactional decode.
+The parser rejects malformed headers, sizes, reserved bytes, fingerprints,
+duplicate identities/nodes/policies, invalid dependencies, and cycles before
+publishing any supervisor state.
+
+The production manifest deliberately orders
+App → ServiceManager → StorageServer → InputServer → SurfaceServer, rather
+than M71's literal order. Four entries bind already-resident processes; the
+StorageServer entry supplies the image for both initial spawn and replacement.
+The parser accepts valid bounded subsets and permutations up to 5 services and
+10 dependencies, but the current product validator still requires exactly the
+five known service kinds and four known edges. Consequently
+`arbitrary_service_set_claim=0`. The FNV fingerprint is a wire-integrity check,
+not a signature: the manifest is currently a kernel-compiled constant, not a
+signed boot/OTA artifact.
+
+M72 retains M71's bounded injected supervision window: each boot performs 21
+cadence rounds and 107 probes (104 healthy, 3 deliberately missed), including
+two tolerated transient misses and one escalated StorageServer replacement.
+Two same-disk release boots complete the real project UI/AppData/shutdown
+closure and FDT-discovered PSCI 1.1 QEMU self-exit. This remains a single-core,
+emulator-only research prototype, not a real or flashable phone:
+`bounded=1 emulator_only=1 general_runtime=0 real_phone_claim=0`. There is no
+PMIC/hardware-poweroff proof, signed manifest chain, arbitrary service launch,
+non-injected indefinite watchdog, SMP, or real-device validation. Hardware work
+requires an explicitly named target and explicit user authorization.
+
+M72 is ABI v33; raw syscall 55 remains unknown in M71/ABI-v32 and raw 56 is
+unknown in M72. M33–M72 are 40 opt-in leaves; with default M32 there are 41
+separate ledgers. The tree has 85 top-level shell scripts and the static audit
+finds 52 literal shell QEMU launches, each with exactly one `-nic none`.
+M70/M71/M72 contribute six PSCI self-exits; M66–M72 contribute fourteen total
+QEMU self-exits. Full regression also fixed an older M47 publication race by
+making its permission-denial syscall counter visible before the trace Release
+commit; five repeated M47 runs and the complete suite passed.
+
+Exact current evidence:
+
+```text
+UNIFIED_PRODUCT_MANIFEST_SUPERVISION_OK format=1 abi=33 authority=kernel-owned-immutable-bmf1-vmo-plus-init-transactional-binding-plus-kernel-authenticated-pid manifest=BMF1 manifest_generation=1 manifest_bytes=224 manifest_fingerprint=0xd69d11fdbc0fc7a9 manifest_open_calls=2 manifest_open_successes=1 manifest_argument_rejections=1 manifest_permission_denials=0 parser_transactional=1 bounded_service_capacity=5 bounded_dependency_capacity=10 services=5 service_order=App+ServiceManager+StorageServer+InputServer+SurfaceServer legacy_literal_order_independent=1 resident_bindings=4 manifest_spawns=1 service_set=ServiceManager+SurfaceServer+InputServer+StorageServer+App protocol=BSH1 dependency_edges=4 hard_edges=3 soft_edges=1 probes=107 healthy=104 missed=3 cadence_waits=21 cadence_ms=40 periodic_rounds=21 fully_healthy_rounds=20 healthy_soak_rounds=16 batch_rounds=18 batched_probes=90 health_timeouts=3 health_timeout_ms=100 concurrent_miss_windows=1 concurrent_miss_services=2 missed_probe_tolerance=1 transient_miss_recoveries=2 escalated_faults=1 backoff_waits=1 backoff_ms=30 restart_budget=1 restarts=1 old_pid=4294967306 replacement_pid=8589934602 app_pid=4294967305 same_slot=1 generation_step=1 process_terminate_calls=1 process_terminate_successes=1 terminated_killed=1 storage_epochs=2 next_epoch=3 releases=2 fault_transitions=2 recovery_transitions=2 tolerated_miss_dependency_transitions=0 dependent_blocks=1 dependent_resumes=1 resident_health_sequences=21 app_health_sequences=21 replacement_health_sequences=20 replacement_mounted=1 replacement_healthy=1 elapsed_supervision_ms=1070 bounded=1 arbitrary_service_set_claim=0 injected_storage_hang=1 injected_transient_misses=1 emulator_only=1 general_runtime=0 real_phone_claim=0
+UNIFIED_PRODUCT_MANIFEST_SUPERVISION_REBOOT_OK boots=2 qemu_self_exits=2 authenticated_power_keys=2 ui_interactions=2 ui_screenshots=2 ui_sha256=1d466ebb9c519c31f9c2f7a86c742efb36d2493e0283e2d532b10de549ed1994 product_shutdowns=2 manifest_supervision_recoveries=2 manifests_decoded=2 manifest_open_calls=4 manifest_open_successes=2 manifest_argument_rejections=2 manifest_permission_denials=0 manifest_services=10 resident_bindings=8 manifest_spawns=2 supervised_services=10 liveness_dependency_edges=8 health_probes=214 healthy=208 missed=6 health_timeouts=6 cadence_waits=42 periodic_rounds=42 fully_healthy_rounds=40 healthy_soak_rounds=32 batch_rounds=36 batched_probes=180 concurrent_miss_windows=2 concurrent_miss_services=4 transient_miss_recoveries=4 escalated_faults=2 dependency_fault_transitions=4 dependency_recovery_transitions=4 dependent_blocks=2 dependent_resumes=2 killed_servers=2 replacements=2 replacement_healthy=2 storage_epochs=4 psci_discoveries=2 psci_version_probes=2 psci_version_1_1=2 fdt_psci_nodes=2 hvc_conduits=2 psci_system_off_requests=2 qemu_psci_self_exits=2 semihosting_uses=0 resident_nodes=8 dependency_edges=10 quiesce_waves=3 registrations=16 quiesces=16 order_rejections=2 storage_server_flushes=2 storage_server_readbacks=2 storage_server_exits=2 prepare_calls=8 prepares=2 commit_calls=2 commits=2 spawn_rejections=2 connect_rejections=4 final_appdata_generation=6 final_health_generation=4 final_health_slot=0 prior_health_generation=3 prior_health_slot=1 final_boot_open=0 prior_boot_open=1 qemu_backend_persistence=1 outside_data_appdata_unchanged=1 unused_data_unchanged=1 appdata_changed=1 changed_data_bytes=153 changed_appdata_bytes=2755 emulator_only=1 hardware_poweroff_claim=0 pmic_claim=0 psci_claim=1 powercut_claim=0 smp_claim=0 general_runtime=0 real_phone_claim=0
+UNIFIED_PRODUCT_MANIFEST_SUPERVISION_STATIC_OK source=1 feature_closure=1 abi=33 syscall=55 manifest=BMF1 generation=1 bytes=224 services=5 dependency_edges=4 bounded_capacity=5/10 nonlegacy_order=1 resident_bindings=4 manifest_spawns=1 parser_transactional=1 parser_serial_negative=26 parser_host_negative=3 semihosting=0 full_suite=1 bounded=1 arbitrary_service_set_claim=0 emulator_only=1 general_runtime=0 real_phone_claim=0
+BNDROID_TEST_SUITE_OK qemu_boot_profiles=5 framebuffer=1 keyboard_qmp=1 tablet_touch_qmp=1 compositor_interaction=1 userspace_surface=1 userspace_ui=1 ui_screenshot=1 process_terminate=1 app_lifecycle=1 app_crash_recovery=1 mapped_graphics=1 graphics_owner_death=1 graphics_surface_restart=1 graphics_producer_orphan=1 graphics_frame_clock=1 graphics_swapchain=1 multi_window=1 persistent_window=1 text_input=1 soft_keyboard=1 input_server=1 input_server_surface_restart=1 input_server_restart=1 service_supervisor=1 service_dependency=1 post_recovery_interaction=1 post_recovery_focus=1 post_recovery_focus_roundtrip=1 post_recovery_lifecycle_focus=1 app_data_runtime=1 app_data_async_recovery=1 storage_server_static=1 storage_server_recovery_static=1 storage_server_repeated_recovery_static=1 storage_server_async_recovery_static=1 storage_server_fault_policy_static=1 storage_server_owner_liveness_static=1 storage_server_terminal_quarantine_static=1 storage_server_persistent_health_static=1 storage_server_clean_shutdown_static=1 storage_server_shutdown_orchestration_static=1 resident_platform_shutdown_static=1 unified_product_static=1 unified_product_liveness_static=1 unified_product_multiservice_liveness_static=1 unified_product_psci_shutdown_static=1 unified_product_continuous_supervision_static=1 unified_product_manifest_supervision_static=1 storage_recovery_unification_static=1 storage_server_runtime_boots=3 storage_server_recovery=1 storage_server_repeated_recovery=1 storage_server_async_recovery=1 storage_server_fault_policy=1 storage_server_owner_liveness=1 storage_server_terminal_quarantine=1 storage_server_persistent_health_reboot=1 persistent_health_boots=2 storage_server_clean_shutdown_reboot=1 clean_shutdown_boots=2 storage_server_shutdown_orchestration_reboot=1 shutdown_orchestration_boots=2 resident_platform_shutdown_reboot=1 resident_platform_shutdown_boots=2 unified_product_reboot=1 unified_product_boots=2 unified_product_ui_interactions=2 unified_product_liveness_reboot=1 unified_product_liveness_boots=2 unified_product_liveness_recoveries=2 unified_product_multiservice_liveness_reboot=1 unified_product_multiservice_liveness_boots=2 unified_product_multiservice_liveness_recoveries=2 unified_product_psci_shutdown_reboot=1 unified_product_psci_shutdown_boots=2 unified_product_continuous_supervision_reboot=1 unified_product_continuous_supervision_boots=2 unified_product_continuous_supervision_recoveries=2 unified_product_manifest_supervision_reboot=1 unified_product_manifest_supervision_boots=2 manifest_supervision_decodes=2 manifest_supervision_services=10 manifest_supervision_resident_bindings=8 manifest_supervision_spawns=2 manifest_open_calls=4 manifest_open_successes=2 manifest_argument_rejections=2 continuous_supervised_services=10 continuous_health_probes=214 continuous_healthy=208 continuous_missed=6 qemu_psci_self_exits=6 qemu_self_exits=14 storage_negative_cases=11 persistence_reboot=1 recovery=1 irq_race=1 storage_irq_cooperative_recovery=1
+```
+
+M72's then-next local P0 was a non-injected, event-driven long-running supervisor with
+clean cancellation and back-to-back independent escalations, plus loading the
+manifest from a verified boot artifact instead of a compiled constant.
+
+Bndroid OS is an experimental Rust-first, non-Linux mobile operating system.
+The historical M71 milestone is **M71 five-service continuous
+supervision**. Its opt-in ABI-v32
+`unified-product-continuous-supervision-runtime` extends exactly the matched
+M70 kernel/userspace closure and has the literal kernel feature chain
+M71→M70→M69→M68→M67→M66→M65→M64→M63→M62→M61→M60→M58→M57→M56→M55:
+`unified-product-psci-shutdown-runtime` ->
+`unified-product-multiservice-liveness-runtime` ->
+`unified-product-liveness-runtime` ->
+`unified-product-runtime` -> `resident-platform-shutdown-runtime` ->
+`storage-server-shutdown-orchestration-runtime` ->
+`storage-server-clean-shutdown-runtime` ->
+`storage-server-persistent-health-runtime` ->
+`storage-server-terminal-quarantine-runtime` ->
+`storage-server-owner-liveness-runtime` ->
+`storage-server-fault-policy-runtime` ->
+`storage-server-async-recovery-runtime` ->
+`storage-server-repeated-recovery-runtime` ->
+`storage-server-recovery-runtime` -> `storage-server-runtime`. M59 remains
+an independent historical milestone with two separate ledgers: the ABI-v24
+`app-data-async-recovery-runtime` child of `app-data-runtime`, and the ABI-v23
+`storage-irq-timeout-self-test`, which is a low-level self-test rather than a
+product opt-in runtime leaf. The ordinary/default runtime remains ABI v23.
+Historical M55--M64 remain ABI v25, M65 remains ABI v26, M66 remains ABI v27,
+M67 remains ABI v28, M68 remains ABI v29, M69 remains ABI v30, and M70 remains
+ABI v31. M66 added syscall 54 `ServiceShutdown`; M67 through M71 add no
+syscall, image, or capability right, so syscall 54 remains the maximum and
+ABI-v32 raw 55 is rejected as unknown. ABI v32 is an evidence-contract bump,
+not a new authority surface.
+M67 reuses the M45 real UI/InputServer execution path before handing the same
+boot into AppData, the M66 resident shutdown graph, durable close, and an
+emulator-only exit. Historical M68 keeps that exact path and adds one allocation-free,
+init-owned `ServiceSupervisor<1>` for StorageServer: probe 1 is healthy, probe
+2 is deliberately withheld, a real finite 100 ms wait expires, a real 30 ms
+backoff completes, init terminates and reaps the old generation as `Killed`,
+and the same process slot is restarted at generation + 1. The replacement
+remounts the unchanged AppData generation, answers healthy, and the M67
+shutdown path then completes. This is one injected hang and one budgeted
+restart, not a general watchdog. Historical M69 replaces that profile-local
+supervisor with a fixed `ServiceSupervisor<2, 1>` for StorageServer and the
+live App, plus one hard edge `StorageServer -> App`. Three real 40 ms cadence
+boundaries surround healthy rounds and one deliberately withheld StorageServer
+probe. The real 100 ms timeout hard-blocks App; after the real 30 ms backoff,
+same-slot next-generation replacement and replacement Healthy, App is resumed
+and both services complete their final healthy round before AppData proceeds.
+This is still one injected hang, one replacement, two fixed services, and one
+fixed dependency—not a general service graph or long-running watchdog.
+Historical M70 retains that path, strictly discovers the direct-root `/psci`
+FDT node, accepts only enabled `arm,psci-1.0`/`arm,psci-0.2` with exact `hvc`
+or `smc`, probes `PSCI_VERSION`, seals the discovered descriptor in kernel
+state, and invokes `SYSTEM_OFF` (`0x84000008`) only after authenticated
+shutdown has converged. The observed QEMU `virt` contract is
+`arm,psci-1.0`, `hvc`, PSCI 1.1.
+
+Historical M71 preserves that PSCI path and adds a transactional,
+allocation-free catalog for ServiceManager, SurfaceServer, InputServer,
+StorageServer, and App, with four declared dependencies (three hard and one
+soft). Catalog construction and each probe batch are all-or-none. Each
+service has an independent missed-probe tolerance of one. Per boot, the
+runtime performs 21 real 40 ms cadence rounds and 107 BSH1 probes: 104
+Healthy, three missed, 20 fully healthy rounds, 16 additional healthy soak
+rounds, and 18 batches/90 batched probes. SurfaceServer and InputServer each
+miss once in the same window and independently recover on the next round
+without dependency propagation. Consecutive StorageServer misses exceed the
+tolerance and retain the real 100 ms timeout, 30 ms backoff, one restart
+budget, same-slot next-generation replacement, and App block/resume path.
+Both same-disk release boots then complete the real UI/AppData closure and a
+PSCI self-exit.
+
+M70 and M71 supply no semihosting configuration; historical M66--M69 retain
+their isolated semihosting ledgers. M71 is a bounded, fault-injected,
+single-core QEMU research prototype:
+`arbitrary_soak_claim=0 emulator_only=1 general_runtime=0
+real_phone_claim=0`. Sixteen additional healthy rounds do not establish
+arbitrary-duration or non-injected long-term reliability. This proves QEMU
+self-exits, not PMIC control, hardware poweroff, or a usable phone. M63 and
+M64 remain kernel-only and expose no EL0 control. M33--M71 are thirty-nine
+opt-in leaves; with default M32 they form forty separate ledgers
+(`39 opt-in + default = 40`) that must not be combined. The timeout self-test
+does not add another product-runtime ledger.
+
+Recovery authority is kernel-only. `OutcomeUnknown` and `RequiresReset` are
+session-fatal: the affected StorageServer exits, process cleanup closes its
+sessions and unbinds the volume capability, and only then may the kernel reset
+the device. Recovery requires virtio status 0, stable device identity,
+identical negotiated features and capacity, a rebuilt split queue over the
+still-owned DMA pages, and two-phase IRQ prepare/commit rearming with rollback
+on failure. Recovery clears old GIC pending/active state only during the
+initial disable; re-enable preserves every new-epoch pending edge and performs
+a DAIF-masked post-enable ISR/queue/status audit before commit. A replacement
+StorageServer must acquire owner epoch + 1 and
+remount the durable AppData volume; the old session is never resumed.
+
+The shared `cooperative-block-recovery` physical engine is used by the
+M65/M64/M63/M62/M61/M60/M58 StorageServer branch, ordinary AppData's real recovery path, and
+the two historical M59 fault-proof consumers. Historical M60 wraps that engine in a boot-local
+ticketed state machine: a physical success enters `Probation`, only a successful
+post-recovery I/O returns it to `Healthy`, and failed attempts use a three-attempt
+cap with a two-tick base backoff and multiplier two before sticky `Offline`.
+Its exact campaign is six inherited transient EL0 controls in `WRFWRF` order,
+followed by one permanent ordinary read. The permanent read-loss and persistent
+RebuildQueue fault are prearmed by the kernel during recovery-attempt 7; EL0
+selects the ordinary read workload but has zero permanent-fault arm controls.
+The retry coordinator now issues a later attempt only after a completed
+backoff has observed timer progress and progress by both unrelated workers.
+M61/M62 also make one nonrenewable early-rejection probe; neither change
+loosens the attempt cap, policy ticket, identity checks, or EL0 authority.
+
+Physical IRQ-rearm commit never opens admission implicitly, but coordinator
+commit order is not uniform. M60 keeps DAIF masked across rearm -> admission
+open -> kernel permanent prearm -> broker commit, publishes its success ledgers,
+then restores DAIF. Its terminal `Offline` publisher rolls IRQ state back,
+keeps logical admission closed, verifies terminal DMA/transport state, and only
+then publishes the ownerless broker Offline state. M62 dynamically covers the
+independent terminal fallback: if that final direct proof is deliberately made
+unavailable, one kernel-only, nonrenewable proof deferral runs a three-step
+cooperative quarantine (two `Pending` returns and one simulated physical
+error), redoes IRQ rollback and DMA/transport verification, and only then
+publishes boot-local Offline. The fallback consumes no recovery-policy attempt
+or ticket and has no EL0 control. Historical M55/M56/M57
+synchronously perform rearm -> open -> broker; historical M59 AppData and
+timeout coordinators perform rearm -> open before their own finalize/return
+policy; M58 uses rearm -> broker -> open. The build wrapper closes the exact
+M65 -> M64 -> M63 -> M62 -> M61 -> M60 -> M58 -> M57 -> M56 -> M55 kernel
+chain. M65 has a matched userspace feature that inherits M62; M63/M64 remain
+kernel-only. The wrapper rejects userspace M63/M64, rejects userspace M65
+unless the kernel also selects M65, rejects a userspace child higher than the
+kernel, and rejects every AppData/StorageServer/timeout profile mix instead of
+choosing one by precedence.
+
+The historical M56 directed runtime suppresses exactly one QueueNotify for each
+of read, write, and flush. Read is reported as `RequiresReset`; write and flush
+are reported as `OutcomeUnknown`. Each case rotates the owner and completes a
+kernel reset before a replacement server remounts generation 1. Its exact
+historical markers remain:
+
+```text
+STORAGE_SERVER_RECOVERY_OK cases=3 read_requires_reset=1 mutation_outcome_unknown=2 control_sequences=3 injected_reads=1 injected_writes=1 injected_flushes=1 owner_exits=3 broker_releases=3 broker_abandoned=3 reset_attempts=3 reset_successes=3 reset_failures=0 driver_timeouts=3 driver_resets=3 final_epoch=4 final_generation=1 requests=7813 completions=7810 invariant_errors=0
+STORAGE_SERVER_RUNTIME_OK abi=25 sector_bytes=512 batch_max=8 volume_sectors=1920 fail_stop=1 kernel_reset_authority=1
+BOOT_OK: M56 fail-stop StorageServer recovery verified
+```
+
+Historical M57 then runs two **serial**, bounded W/R/F cycles in exact `WRFWRF` order; this
+is not a concurrency claim. Driver-consumed suppression is exactly read/write/
+flush `2/2/2`. The fourth recovery attempt injects one IRQ-rearm commit abort,
+rolls back fail-closed, and the fifth attempt is the genuine successful retry;
+the final ledger is attempts/commits/rollbacks `7/6/1`. IRQ-sensitive broker
+access follows an IRQ-masked discipline, closing a Running owner records
+`ServiceAbandoned` instead of panicking, and a physical-submission gate blocks
+new device work while recovery is latched. The successful M57 run emitted:
+
+```text
+STORAGE_SERVER_REPEATED_RECOVERY_OK cycles=2 cases=6 fault_order=WRFWRF read_requires_reset=2 mutation_outcome_unknown=4 control_sequences=6 injected_reads=2 injected_writes=2 injected_flushes=2 owner_exits=6 broker_releases=6 broker_abandoned=6 recovery_attempts=7 recovery_commits=6 recovery_rollbacks=1 injected_rearm_aborts=1 fail_closed_retries=1 driver_timeouts=6 driver_resets=7 final_epoch=7 final_generation=1 requests=9625 completions=9619 invariant_errors=0
+STORAGE_SERVER_RUNTIME_OK abi=25 sector_bytes=512 batch_max=8 volume_sectors=1920 fail_stop=1 kernel_reset_authority=1 repeated_recovery=1
+BOOT_OK: M57 repeated fail-stop StorageServer recovery and retry verified
+```
+
+The historical M58 StorageServer predecessor retains M57's `WRFWRF`, `7/6/1`, and
+request-delta-six semantics while making all seven physical recoveries
+cooperative. The driver borrow is released
+between phases; each cooperative step samples reset status or the
+generation-qualified capacity tuple at most once; each phase
+has a short DAIF-masked counter measurement. One outer coordinator attempt ID
+spans physical recovery, IRQ rearm, broker commit, and admission. The physical
+gate stays closed until that full commit. Real `timer_dispatches`, both kernel
+workers, and an authenticated EL0 StorageServer all make progress in every
+recovery window, with no masked polling. The complete measured evidence is:
+
+```text
+STORAGE_SERVER_ASYNC_RECOVERY_OK cycles=2 cases=6 fault_order=WRFWRF read_requires_reset=2 mutation_outcome_unknown=4 control_sequences=6 injected_reads=2 injected_writes=2 injected_flushes=2 owner_exits=6 broker_releases=6 broker_abandoned=6 recovery_attempts=7 recovery_commits=6 recovery_rollbacks=1 injected_rearm_aborts=1 fail_closed_retries=1 driver_timeouts=6 driver_resets=7 async_starts=7 physical_completions=7 async_steps=28 recovery_yields=21 timer_progress_windows=7 worker_progress_windows=7 el0_progress_windows=7 acquire_waits=21 acquire_dispatch_changes=21 masked_poll_iterations=0 max_step_masked_ticks=39750 max_control_masked_ticks=31500 timer_period_ticks=625000 long_daif_masks=0 final_epoch=7 final_generation=1 requests=9625 completions=9619 invariant_errors=0
+STORAGE_SERVER_RUNTIME_OK abi=25 sector_bytes=512 batch_max=8 volume_sectors=1920 fail_stop=1 kernel_reset_authority=1 repeated_recovery=1 async_recovery=1
+BOOT_OK: M58 cooperative fail-stop StorageServer recovery verified
+```
+
+Historical M59 adds an independent ABI-v24 AppData recovery ledger. The
+`app-data-async-recovery-runtime` child suppresses exactly one read
+QueueNotify, freezes the original operation's outcome before recovery, maps the
+read deadline to `RequiresReset`, and never replays the original operation in
+the kernel. Userspace permits exactly one zero-output `Unavailable` retry for
+`FileOpenAt`; mutations retain `OutcomeUnknown` and have zero blind retries.
+The physical driver borrow is released across four steps and three Pending
+returns; the outer coordinator yields five times and retains no device or
+workspace borrow across turns. After physical completion, a real timer, both
+workers, and the authenticated owner all progress before masked IRQ rearm,
+explicit admission opening, and final commit. The exact final evidence is:
+
+```text
+APPDATA_ASYNC_RECOVERY_OK abi=24 cases=1 fault_order=R read_requires_reset=1 injected_reads=1 unavailable_read_retries=1 blind_mutation_retries=0 recovery_starts=1 physical_completions=1 recovery_commits=1 recovery_failures=0 async_steps=4 physical_pending_returns=3 coordinator_yields=5 step_completion_relation=1 timer_progress_windows=1 worker_progress_windows=1 el0_progress_windows=1 authenticated_waits=2 wait_dispatch_changes=2 driver_timeouts=1 driver_resets=1 masked_poll_iterations=0 max_step_masked_ticks=53500 max_control_masked_ticks=86187 timer_period_ticks=625000 long_daif_masks=0 final_active=0 gate_open=1 invariant_errors=0
+APPDATA_RUNTIME_OK abi=24 phase=created version=1 boot_generation=0 committed_generation=2 entries=2 files=1 directories=1 submissions=11 completions=11 retrievals=11 mutations=2 reads=1 lists=3 conflicts=1 expected_terminal=4 disk_reads=6682 disk_writes=580 disk_flushes=4 old_or_new=1 full_readback=1 resident=1 errors=0 async_recovery=1
+BOOT_OK: M59 cooperative kernel-monitor AppData recovery verified
+```
+
+Historical M59's second ledger is the ABI-v23 low-level timeout self-test, not another
+product runtime leaf. Its single physical recovery has four steps and three
+yields; every Pending boundary spans an actual timer dispatch and progress by
+both unrelated workers. It explicitly reopens admission only after rearm,
+preserves the historical M22 timeout/reset/late-event marker exactly, and makes
+no EL0-progress claim:
+
+```text
+STORAGE_IRQ_COOPERATIVE_RECOVERY_OK starts=1 physical=1 steps=4 yields=3 step_yield_relation=1 timer_progress_windows=3 worker_progress_windows=3 timer_dispatches=9 worker0_work=539135 worker1_work=376383 masked_poll_iterations=0 max_step_masked_ticks=59375 max_control_masked_ticks=87188 timer_period_ticks=625000 long_daif_masks=0 final_active=0 gate_open=1 el0_progress_claim=0
+STORAGE_IRQ_RACE_OK timeout_requests=2 timeouts=1 resets=1 reset_tokens_invalidated=2 simulated_late_irq=1 spurious_acked=1 recovered_requests=2 recovered_completions=2 double_completions=0 dma_frames_before=2 dma_frames_after=2 digest0=0xbebd264b8c14cd72 digest1=0x8294de399174037c
+BOOT_OK: M32 transferable graphics buffers, M22 storage IRQ timeout/reset self-test, and M20 multi-session services verified
+```
+
+M60 extends the M58 StorageServer branch with a bounded boot-local policy. The
+directed `WRFWRFR` campaign first preserves all six historical transient cases,
+then kernel-prearms an ordinary read-notification loss plus persistent
+RebuildQueue failure. The first permanent recovery reaches `Probation`, its
+ordinary read fails as `RequiresReset`, and two later physical rebuilds fail;
+the third consecutive unconfirmed attempt publishes sticky `Offline`. The
+observed run used three completed backoffs totaling eight ticks, kept timer,
+both workers, and authenticated EL0 progressing, rejected one later acquire,
+and stayed quiet for 16 post-Offline ticks. Its exact release evidence is:
+
+```text
+STORAGE_SERVER_FAULT_POLICY_OK recoverable_cases=6 permanent_cases=1 fault_order=WRFWRFR read_requires_reset=3 mutation_outcome_unknown=4 transient_control_sequences=6 kernel_permanent_owner_requests=1 kernel_permanent_fault_arms=1 kernel_permanent_reads=1 el0_permanent_fault_arm_controls=0 permanent_epoch=7 permanent_authority=kernel-prearmed injected_reads=3 injected_writes=2 injected_flushes=2 owner_exits=7 offline_probe_exits=1 broker_releases=7 broker_abandoned=7 recovery_attempts=9 recovery_commits=6 recovery_failures=3 recovery_rollbacks=1 fail_closed_retries=1 physical_successes=7 physical_failures=2 attempt_failures=4 probation_io_failures=1 attempt_cap=3 backoffs=3 backoffs_completed=3 backoff_base_ticks=2 backoff_multiplier=2 backoff_ticks=8 probation=7/5/2 healthy_transitions=5 device_offline=1 offline_transitions=1 offline_denials=1 early_rejections=0 early_physical_starts=0 offline_rejections=0 stale_ticket_rejections=0 invalid_transition_rejections=0 generation_exhaustions=0 persistent_fault_armed=1 persistent_fault_hits=2 driver_timeouts=7 driver_resets=10 async_starts=9 physical_completions=7 async_physical_failures=2 async_steps=35 recovery_yields=26 timer_progress_windows=9 worker_progress_windows=9 el0_progress_windows=9 backoff_timer_progress_windows=3 backoff_worker_progress_windows=3 acquire_waits=26 acquire_dispatch_changes=26 terminal_quarantine_starts=0 terminal_quarantine_completions=0 terminal_quarantine_physical_errors=0 terminal_irq_rollbacks=1 terminal_dma_verifications=1 terminal_driver_state=2 terminal_transport_status=0 terminal_in_flight=0 masked_poll_iterations=0 max_step_masked_ticks=44188 max_control_masked_ticks=34813 timer_period_ticks=625000 long_daif_masks=0 offline_quiet_ticks=16 post_offline_attempt_delta=0 post_offline_reset_delta=0 post_offline_submission_delta=0 final_epoch=0 next_epoch=8 final_generation=1 final_irq_armed=0 final_irq_failed=1 final_recovery_required=1 final_admission_open=0 final_broker_state=4 final_broker_bound=0 final_broker_pending=0 requests=9023 completions=9016 simulated_permanent=1 hardware_claim=0 arbitrary_soak_claim=0 powercut_claim=0 concurrency_claim=0 general_runtime=0 invariant_errors=0
+STORAGE_SERVER_RUNTIME_OK abi=25 sector_bytes=512 batch_max=8 volume_sectors=1920 fail_stop=1 kernel_reset_authority=1 repeated_recovery=1 async_recovery=1 fault_policy=1 attempt_cap=3 device_offline=1
+BOOT_OK: M60 bounded StorageServer fault policy and boot-local Offline state verified
+```
+
+M61 extends that historical M60 profile with a fault-triggered owner-retirement
+barrier. Publishing each session-fatal completion atomically arms a
+nonrenewable 250 ms grace ticket qualified by exact process generation,
+broker epoch, lease generation, and the physical counter. Six owners retire
+cooperatively. The epoch-6 flush owner instead receives `OutcomeUnknown`, is
+denied a live `StorageVolume` `HandleClose`, and blocks in a real single-object
+`ObjectWait`; at the physical deadline the authenticated kernel monitor marks
+that exact process `Killed`. The ordinary process reaper then abandons the wait,
+releases the broker and handles, destroys the address space, and only then
+allows recovery and the epoch-7 replacement. EL0 has no arm, renew, or
+`ProcessTerminate` authority. The exact release log
+(`sha256=7fe87bdeb58b981ac38167f6976be30002ac5cd28e4f44ce1698e6d44f1499e4`)
+contains:
+
+```text
+STORAGE_SERVER_FAULT_POLICY_OK recoverable_cases=6 permanent_cases=1 fault_order=WRFWRFR read_requires_reset=3 mutation_outcome_unknown=4 transient_control_sequences=6 kernel_permanent_owner_requests=1 kernel_permanent_fault_arms=1 kernel_permanent_reads=1 el0_permanent_fault_arm_controls=0 permanent_epoch=7 permanent_authority=kernel-prearmed injected_reads=3 injected_writes=2 injected_flushes=2 owner_exits=7 offline_probe_exits=1 broker_releases=7 broker_abandoned=7 recovery_attempts=9 recovery_commits=6 recovery_failures=3 recovery_rollbacks=1 fail_closed_retries=1 physical_successes=7 physical_failures=2 attempt_failures=4 probation_io_failures=1 attempt_cap=3 backoffs=3 backoffs_completed=3 backoff_base_ticks=2 backoff_multiplier=2 backoff_ticks=8 probation=7/5/2 healthy_transitions=5 device_offline=1 offline_transitions=1 offline_denials=1 early_rejections=1 early_physical_starts=0 offline_rejections=0 stale_ticket_rejections=0 invalid_transition_rejections=0 generation_exhaustions=0 persistent_fault_armed=1 persistent_fault_hits=2 driver_timeouts=7 driver_resets=10 async_starts=9 physical_completions=7 async_physical_failures=2 async_steps=35 recovery_yields=26 timer_progress_windows=9 worker_progress_windows=9 el0_progress_windows=9 backoff_timer_progress_windows=3 backoff_worker_progress_windows=3 acquire_waits=26 acquire_dispatch_changes=26 terminal_quarantine_starts=0 terminal_quarantine_completions=0 terminal_quarantine_physical_errors=0 terminal_irq_rollbacks=1 terminal_dma_verifications=1 terminal_driver_state=2 terminal_transport_status=0 terminal_in_flight=0 masked_poll_iterations=0 max_step_masked_ticks=38500 max_control_masked_ticks=36563 timer_period_ticks=625000 long_daif_masks=0 offline_quiet_ticks=16 post_offline_attempt_delta=0 post_offline_reset_delta=0 post_offline_submission_delta=0 final_epoch=0 next_epoch=8 final_generation=1 final_irq_armed=0 final_irq_failed=1 final_recovery_required=1 final_admission_open=0 final_broker_state=4 final_broker_bound=0 final_broker_pending=0 requests=9023 completions=9016 simulated_permanent=1 hardware_claim=0 arbitrary_soak_claim=0 powercut_claim=0 concurrency_claim=0 general_runtime=0 invariant_errors=0
+STORAGE_SERVER_OWNER_LIVENESS_OK authority=kernel-fatal-completion ticket=pid-epoch-lease-generation deadline=physical-counter grace_ms=250 grace_counter_units=15625000 arms=7 cooperative_retirements=6 deadlines_expired=1 early_expirations=0 termination_requests=1 already_terminal=0 forced_retirements=1 forced_reaps=1 terminal_race_retirements=0 stalled_epoch=6 stalled_operation=flush stalled_completion=outcome-unknown live_volume_close=denied target_wait=single object_wait_abandoned=1 el0_process_terminate_calls=0 terminated_exited=7 terminated_killed=1 recovery_after_forced_retirement=1 replacement_epoch=7 final_phase=0 final_owner_pid=0 final_broker_epoch=0 next_lease_generation=8 el0_arm_controls=0 el0_renew_controls=0 simulated_fault=1 hardware_claim=0 smp_claim=0 arbitrary_soak_claim=0 powercut_claim=0 concurrency_claim=0 general_runtime=0 invariant_errors=0
+STORAGE_SERVER_RUNTIME_OK abi=25 sector_bytes=512 batch_max=8 volume_sectors=1920 fail_stop=1 kernel_reset_authority=1 repeated_recovery=1 async_recovery=1 fault_policy=1 attempt_cap=3 device_offline=1 owner_liveness=1 exit_grace_ms=250
+BOOT_OK: M61 fault-latched StorageServer owner retirement and recovery convergence verified
+```
+
+M62 extends M61 without adding ABI surface. At the final physical failure, a
+kernel-only gate deliberately withholds the direct terminal proof once and
+allows exactly one nonrenewable proof deferral. The fallback then advances
+through three cooperative physical steps with two `Pending` returns, observes
+one simulated persistent physical error, reruns terminal IRQ rollback and
+DMA/transport verification, and publishes the same boot-local Offline boundary.
+It consumes zero policy attempts and zero policy tickets, and exposes zero EL0
+controls. The exact release log
+(`sha256=c283849e9f7836140f5c1f40349f64cc5248ed51d9dbb2a9b9bca70faba4281d`)
+contains:
+
+```text
+STORAGE_SERVER_FAULT_POLICY_OK recoverable_cases=6 permanent_cases=1 fault_order=WRFWRFR read_requires_reset=3 mutation_outcome_unknown=4 transient_control_sequences=6 kernel_permanent_owner_requests=1 kernel_permanent_fault_arms=1 kernel_permanent_reads=1 el0_permanent_fault_arm_controls=0 permanent_epoch=7 permanent_authority=kernel-prearmed injected_reads=3 injected_writes=2 injected_flushes=2 owner_exits=7 offline_probe_exits=1 broker_releases=7 broker_abandoned=7 recovery_attempts=9 recovery_commits=6 recovery_failures=3 recovery_rollbacks=1 fail_closed_retries=1 physical_successes=7 physical_failures=2 attempt_failures=4 probation_io_failures=1 attempt_cap=3 backoffs=3 backoffs_completed=3 backoff_base_ticks=2 backoff_multiplier=2 backoff_ticks=8 probation=7/5/2 healthy_transitions=5 device_offline=1 offline_transitions=1 offline_denials=1 early_rejections=1 early_physical_starts=0 offline_rejections=0 stale_ticket_rejections=0 invalid_transition_rejections=0 generation_exhaustions=0 persistent_fault_armed=1 persistent_fault_hits=3 driver_timeouts=7 driver_resets=11 async_starts=9 physical_completions=7 async_physical_failures=2 async_steps=38 recovery_yields=28 timer_progress_windows=9 worker_progress_windows=9 el0_progress_windows=9 backoff_timer_progress_windows=3 backoff_worker_progress_windows=3 acquire_waits=26 acquire_dispatch_changes=26 terminal_quarantine_starts=1 terminal_quarantine_completions=0 terminal_quarantine_physical_errors=1 terminal_irq_rollbacks=2 terminal_dma_verifications=1 terminal_driver_state=2 terminal_transport_status=0 terminal_in_flight=0 masked_poll_iterations=0 max_step_masked_ticks=42062 max_control_masked_ticks=33625 timer_period_ticks=625000 long_daif_masks=0 offline_quiet_ticks=16 post_offline_attempt_delta=0 post_offline_reset_delta=0 post_offline_submission_delta=0 final_epoch=0 next_epoch=8 final_generation=1 final_irq_armed=0 final_irq_failed=1 final_recovery_required=1 final_admission_open=0 final_broker_state=4 final_broker_bound=0 final_broker_pending=0 requests=9023 completions=9016 simulated_permanent=1 hardware_claim=0 arbitrary_soak_claim=0 powercut_claim=0 concurrency_claim=0 general_runtime=0 invariant_errors=0
+STORAGE_SERVER_OWNER_LIVENESS_OK authority=kernel-fatal-completion ticket=pid-epoch-lease-generation deadline=physical-counter grace_ms=250 grace_counter_units=15625000 arms=7 cooperative_retirements=6 deadlines_expired=1 early_expirations=0 termination_requests=1 already_terminal=0 forced_retirements=1 forced_reaps=1 terminal_race_retirements=0 stalled_epoch=6 stalled_operation=flush stalled_completion=outcome-unknown live_volume_close=denied target_wait=single object_wait_abandoned=1 el0_process_terminate_calls=0 terminated_exited=7 terminated_killed=1 recovery_after_forced_retirement=1 replacement_epoch=7 final_phase=0 final_owner_pid=0 final_broker_epoch=0 next_lease_generation=8 el0_arm_controls=0 el0_renew_controls=0 simulated_fault=1 hardware_claim=0 smp_claim=0 arbitrary_soak_claim=0 powercut_claim=0 concurrency_claim=0 general_runtime=0 invariant_errors=0
+STORAGE_SERVER_TERMINAL_QUARANTINE_OK authority=kernel-offline-transition trigger=simulated-proof-unavailable gate=nonrenewable gate_phase=2 proof_arms=1 proof_deferrals=1 unsafe_observations=0 proof_publications=1 fallback_starts=1 fallback_steps=3 fallback_pending_returns=2 fallback_completions=0 fallback_physical_errors=1 fallback_timer_progress_windows=1 fallback_worker_progress_windows=1 persistent_fault_hits=3 terminal_irq_rollbacks=2 terminal_dma_verifications=1 final_driver_state=2 final_transport_status=0 final_in_flight=0 final_recovery_active=0 final_requests_terminal=1 policy_attempt_delta=0 policy_ticket_consumed=0 el0_controls=0 simulated_fault=1 hardware_claim=0 arbitrary_soak_claim=0 powercut_claim=0 concurrency_claim=0 smp_claim=0 general_runtime=0 invariant_errors=0
+STORAGE_SERVER_RUNTIME_OK abi=25 sector_bytes=512 batch_max=8 volume_sectors=1920 fail_stop=1 kernel_reset_authority=1 repeated_recovery=1 async_recovery=1 fault_policy=1 attempt_cap=3 device_offline=1 owner_liveness=1 exit_grace_ms=250 terminal_quarantine=1 proof_deferral=1
+BOOT_OK: M62 terminal StorageServer quarantine fallback and reverified Offline boundary verified
+```
+
+M63 extends M62 without changing ABI, syscalls, images, capability rights, or
+userspace features. It stores an 80-byte `BNDRHLT1` version-1 payload inside
+the existing M25 double-slot `BNDROID_DATA` record transaction. The payload
+contains a boot generation, an unclosed-boot hint, and a non-secret snapshot of
+the current virtio-blk contract (capacity, selected features, MMIO base, IRQ,
+sector size, queue size, read-only state, and FLUSH support) with a digest and
+witness. It never persists `Offline`, never reconstructs `Offline` from disk,
+and grants no EL0 control.
+
+The first release boot upgrades the legacy 32-byte payload and commits
+generation 1 to slot 1. The second boot reads `prior_boot_open=1`, treats that
+only as `reprobe_required=1`, verifies the current live writable+FLUSH device,
+negotiated features, IRQ/recovery state, current read completions, status, and
+absence of resets/timeouts/config events, then commits generation 2 to slot 0
+with flush and full readback. A changed contract is likewise only a reprobe
+hint: the durable record cannot publish broker Offline, clear recovery, or open
+admission. The default M25 boot-counter path preserves a valid M63 payload, so
+an M63-used disk remains backward compatible with the default kernel. The exact
+release log is 97 lines / 24819 bytes with
+`sha256=6e7d023540a90ecb6901c9817189c2ddefc0e21baffb28608dfcc066e41fd06b`:
+
+```text
+STORAGE_DEVICE_HEALTH_REBOOT_OK boots=2 legacy_upgrades=1 unclosed_hints=1 reprobe_required=1 reprobe_verified=2 contract_changes=0 final_generation=2 final_slot=0 prior_slot=1 qemu_backend_persistence=1 outside_data_appdata_unchanged=1 unused_data_unchanged=1 changed_data_bytes=154 offline_persisted=0 offline_from_record=0 el0_controls=0 hardware_identity_claim=0 hotplug_claim=0 powercut_claim=0 tamper_resistance_claim=0 general_runtime=0
+BOOT_OK: M63 persistent unclosed-boot hint and fresh kernel reprobe boundary verified
+```
+
+M64 extends M63 without changing ABI, syscalls, images, capability rights, or
+userspace features. Before any EL0 process starts, the kernel retains the exact
+generation of the just-opened health session as an in-memory capability,
+reconstructs and matches the current live device contract, writes the inactive
+slot with `boot_open=false`, flushes, performs a full readback, and verifies
+that the old slot remains intact. It then masks local IRQs, seals storage
+admission, disables the logical and physical block IRQ, proves every request
+terminal and the device healthy/idle, and halts without any later storage
+mutation. A second boot of the same image proves that a cleanly closed prior
+session removes only the unclosed-session hint; every boot still performs a
+fresh live probe.
+
+This is a bounded pre-EL0 shutdown-commit proof. It is not full userspace
+shutdown orchestration, PSCI/hardware poweroff, a real power-cut test, an SMP
+proof, or a general runtime. It exposes no shutdown syscall or EL0 control and
+does not persist or reconstruct `Offline`. The current log is 83 lines /
+15,855 bytes with
+`sha256=a1d620dc22bae3853c1ac02ea40e24a65a6c3e7ac2930ab53cccaa379564c113`;
+its host-level reboot seal is:
+
+```text
+STORAGE_CLEAN_SHUTDOWN_REBOOT_OK boots=2 legacy_upgrades=1 clean_closes=2 prior_closed=1 unclosed_hints=0 reprobe_required=0 reprobe_verified=2 contract_changes=0 final_generation=4 final_slot=0 prior_generation=3 prior_slot=1 final_boot_open=0 prior_boot_open=1 qemu_backend_persistence=1 outside_data_unchanged=1 appdata_unchanged=1 unused_data_unchanged=1 changed_data_bytes=153 offline_persisted=0 offline_from_record=0 el0_started=0 el0_controls=0 full_userspace_shutdown_claim=0 hardware_poweroff_claim=0 powercut_claim=0 smp_claim=0 general_runtime=0
+BOOT_OK: M64 kernel-owned clean boot-session close and no-later-storage boundary verified
+```
+
+M65 extends M64 with matched kernel/userspace ABI v26 and init-only syscall 53
+`SystemShutdown`. `Prepare` is accepted only after both fixed workload clients
+have exited and been reaped, the StorageServer is idle, every broker request is
+complete, and the physical device is healthy with no in-flight DMA. The
+accepted transition atomically closes new process creation and new storage
+acquire/connect/accept admission while leaving the already-authenticated
+StorageServer's submit/take path available for its terminal work. A post-
+Prepare `ProcessSpawn` is rejected, and both client attempts to invoke
+`SystemShutdown` are denied.
+
+Init then sends the generation-qualified shutdown command. StorageServer waits
+on its control and volume capabilities together, flushes AppData, performs a
+full recovery/readback of the same generation, acknowledges init, exits
+normally, and is reaped. Only after an exact `InitReady` proof may init issue
+`Commit`. The kernel monitor revalidates the process, broker, I/O, IRQ, DMA,
+generation, and syscall ledgers; invokes M64's authenticated durable health
+close; seals storage admission and the shutdown state; disables the block IRQ;
+and halts. The syscall grants authority only to init, not arbitrary EL0.
+
+The same writable image boots twice. It proves AppData generations 5 then 6,
+health open/close generations `1→2` then `3→4`, two normal StorageServer exits,
+two final flush/readback cycles, and no mutation outside
+`BNDROID_DATA/BNDROID_APPDATA`. The current log is 91 lines / 18,869 bytes with
+`sha256=2c338c42a97a869375ccca50ec33cd8d84556b71cbcf7f56bffe8c44be58c645`.
+Its host-level reboot seal is:
+
+```text
+STORAGE_SERVER_SHUTDOWN_ORCHESTRATION_REBOOT_OK boots=2 userspace_shutdowns=2 clients_drained=4 storage_server_flushes=2 storage_server_readbacks=2 storage_server_exits=2 prepare_calls=8 prepares=2 commit_calls=2 commits=2 spawn_rejections=2 final_appdata_generation=6 final_health_generation=4 final_health_slot=0 prior_health_generation=3 prior_health_slot=1 final_boot_open=0 prior_boot_open=1 qemu_backend_persistence=1 outside_data_appdata_unchanged=1 unused_data_unchanged=1 appdata_changed=1 changed_data_bytes=153 changed_appdata_bytes=2755 offline_persisted=0 offline_from_record=0 el0_started=1 el0_controls=1 full_userspace_shutdown_claim=0 hardware_poweroff_claim=0 powercut_claim=0 smp_claim=0 general_runtime=0
+BOOT_OK: M65 userspace StorageServer shutdown orchestration and durable close verified
+```
+
+This is still a directed single-core storage-profile proof. It does not
+quiesce the complete resident UI/service graph, invoke PSCI or hardware
+poweroff, prove real power-loss durability, provide a general shutdown API, or
+establish SMP safety.
+
+M66 extends that historical M65 boundary with one fixed, simultaneously live
+resident graph: StorageServer plus ServiceManager, Provider, two distinct
+Client instances, SurfaceServer, InputServer, Launcher, and App. Before
+Prepare, the kernel inspects 10 live processes, 9 init-control pairs, 10 real
+dependency pairs, 38 unique Channel endpoints, 39 total handles, exact rights,
+empty queues, and one StorageServer volume capability. ABI-v27 syscall 54
+`ServiceShutdown` authenticates each of the eight non-storage nodes by exact
+generation-qualified PID, executable image, dependency mask, and spawn slot.
+After Prepare, one deliberate early SurfaceServer quiesce is rejected; the
+accepted reverse-topological waves are clients/Launcher/App, then
+Provider/InputServer, then ServiceManager/SurfaceServer. Launcher and App also
+perform the real bounded AppData workload and both prove post-Prepare storage
+connection denial.
+
+Only after all nine children have exited and been reaped, the StorageServer
+has flushed/read back/exited, M65 has committed, M64 has durably closed the
+boot session, storage admission is sealed, block IRQ is disabled, and local
+IRQ is masked can the kernel create an opaque platform token. The sole current
+backend consumes that token through AArch64 QEMU semihosting
+`SYS_EXIT_EXTENDED`; a return panics. The host checker boots the same writable
+image twice and requires QEMU itself to exit with status 0 both times—host
+kill is never a success path. The current 89-line / 19,200-byte log has
+`sha256=656186fb9e4275bed2f64d95484160e97cdbe7960a74f90e209f566b7aff81de`:
+
+```text
+RESIDENT_PLATFORM_SHUTDOWN_REBOOT_OK boots=2 qemu_self_exits=2 emulator_poweroffs=2 resident_shutdowns=2 resident_nodes=8 dependency_edges=10 quiesce_waves=3 registrations=16 quiesces=16 order_rejections=2 storage_server_flushes=2 storage_server_readbacks=2 storage_server_exits=2 prepare_calls=8 prepares=2 commit_calls=2 commits=2 spawn_rejections=2 connect_rejections=4 final_appdata_generation=6 final_health_generation=4 final_health_slot=0 prior_health_generation=3 prior_health_slot=1 final_boot_open=0 prior_boot_open=1 qemu_backend_persistence=1 outside_data_appdata_unchanged=1 unused_data_unchanged=1 appdata_changed=1 changed_data_bytes=153 changed_appdata_bytes=2755 emulator_only=1 full_userspace_shutdown_claim=0 hardware_poweroff_claim=0 psci_claim=0 powercut_claim=0 smp_claim=0 general_runtime=0
+BOOT_OK: M66 complete resident graph quiesced and QEMU platform exit armed
+```
+
+This is an emulator-only, fixed-graph, single-core shutdown proof—not PSCI,
+PMIC or hardware poweroff, not a physical power-cut result, and not a general
+runtime or real-phone claim.
+
+Historical M67 is the matched kernel/userspace unified-product trajectory. It runs the
+real M45 UI and InputServer path to exact convergence, accepts one authenticated
+QMP `qcode=power` event as physical key code 116 through InputServer, performs
+the Launcher/App AppData work, spawns the final StorageServer, and then executes
+the historical M66 eight-node reverse-topological shutdown, durable close, and
+guest-requested QEMU exit. The QMP event is emulator input and the semihosting
+exit is an emulator backend; neither is PSCI, PMIC, hardware poweroff, or a
+physical-phone result.
+
+The M67-only bounded profile has process capacity `10` (`init + 9` dynamic
+slots), a 64 KiB worker exception stack, and a 256-page/1 MiB kernel heap.
+Those larger bounds do not rewrite M66 or older evidence. Its release checker
+boots the same writable 8 MiB image twice, requires the exact final PPM
+SHA-256 `1d466ebb9c519c31f9c2f7a86c742efb36d2493e0283e2d532b10de549ed1994`
+on both boots, requires QEMU status 0 without host kill, and proves that only
+the DATA/AppData regions change:
+
+```text
+UNIFIED_PRODUCT_REBOOT_OK boots=2 qemu_self_exits=2 authenticated_power_keys=2 ui_interactions=2 ui_screenshots=2 ui_sha256=1d466ebb9c519c31f9c2f7a86c742efb36d2493e0283e2d532b10de549ed1994 product_shutdowns=2 resident_nodes=8 dependency_edges=10 quiesce_waves=3 registrations=16 quiesces=16 order_rejections=2 storage_server_flushes=2 storage_server_readbacks=2 storage_server_exits=2 prepare_calls=8 prepares=2 commit_calls=2 commits=2 spawn_rejections=2 connect_rejections=4 final_appdata_generation=6 final_health_generation=4 final_health_slot=0 prior_health_generation=3 prior_health_slot=1 final_boot_open=0 prior_boot_open=1 qemu_backend_persistence=1 outside_data_appdata_unchanged=1 unused_data_unchanged=1 appdata_changed=1 changed_data_bytes=153 changed_appdata_bytes=2755 emulator_only=1 hardware_poweroff_claim=0 psci_claim=0 powercut_claim=0 smp_claim=0 general_runtime=0 real_phone_claim=0
+```
+
+This is a unified, tested product **trajectory**, not a real or daily-usable
+phone system. It remains a bounded, single-core QEMU research prototype with
+`general_runtime=0` and `real_phone_claim=0`.
+
+Historical M68 keeps that exact M67 UI/AppData/shutdown route and adds a bounded
+BSH1 liveness transaction for one StorageServer. Probe 1 returns `Healthy`;
+the first generation deliberately consumes but withholds probe 2. Init observes
+a real finite 100 ms `ObjectWait` timeout classified as `HealthTimeout`, waits
+a real 30 ms backoff, spends the sole restart budget, and issues exactly one
+`ProcessTerminate` followed by `ProcessWait` with reason `Killed`. The
+replacement uses the same process slot at generation + 1, remounts without
+changing the AppData generation, answers its first probe as `Healthy`, and
+then continues the complete M67 path. The exact per-boot and two-boot seals are:
+
+```text
+UNIFIED_PRODUCT_LIVENESS_OK format=1 abi=29 authority=init-bsh1-plus-kernel-authenticated-pid service=StorageServer protocol=BSH1 probes=3 healthy=2 withheld=1 health_timeouts=1 health_timeout_ms=100 backoff_waits=1 backoff_ms=30 restart_budget=1 restarts=1 old_pid=4294967306 replacement_pid=8589934602 same_slot=1 generation_step=1 process_terminate_calls=1 process_terminate_successes=1 terminated_killed=1 storage_epochs=2 next_epoch=3 releases=2 replacement_mounted=1 replacement_healthy=1 bounded=1 single_service=1 injected_hang=1 emulator_only=1 general_runtime=0 real_phone_claim=0
+UNIFIED_PRODUCT_LIVENESS_REBOOT_OK boots=2 qemu_self_exits=2 authenticated_power_keys=2 ui_interactions=2 ui_screenshots=2 ui_sha256=1d466ebb9c519c31f9c2f7a86c742efb36d2493e0283e2d532b10de549ed1994 product_shutdowns=2 storage_liveness_recoveries=2 health_probes=6 healthy=4 health_timeouts=2 backoff_waits=2 killed_servers=2 replacements=2 replacement_healthy=2 storage_epochs=4 resident_nodes=8 dependency_edges=10 quiesce_waves=3 registrations=16 quiesces=16 order_rejections=2 storage_server_flushes=2 storage_server_readbacks=2 storage_server_exits=2 prepare_calls=8 prepares=2 commit_calls=2 commits=2 spawn_rejections=2 connect_rejections=4 final_appdata_generation=6 final_health_generation=4 final_health_slot=0 prior_health_generation=3 prior_health_slot=1 final_boot_open=0 prior_boot_open=1 qemu_backend_persistence=1 outside_data_appdata_unchanged=1 unused_data_unchanged=1 appdata_changed=1 changed_data_bytes=153 changed_appdata_bytes=2755 emulator_only=1 hardware_poweroff_claim=0 psci_claim=0 powercut_claim=0 smp_claim=0 general_runtime=0 real_phone_claim=0
+```
+
+This is one deliberately injected hang and one bounded restart of one service,
+not a periodic long-running watchdog, multi-service dependency recovery,
+concurrent-fault coverage, or arbitrary soak. It remains a bounded single-core
+QEMU research prototype, not a flashable or daily-usable phone.
+
+Historical M69 keeps the complete M68 route but supervises the fixed
+`StorageServer + App` set with `ServiceSupervisor<2, 1>` and one hard
+`StorageServer -> App` dependency. Per boot it performs eight probes: seven
+Healthy replies and one deliberately withheld old-StorageServer reply. Three
+real 40 ms cadence waits separate the bounded health rounds. The real 100 ms
+timeout publishes the StorageServer fault, changes App to `HardBlocked`, and
+requires the live App to acknowledge the block before any further AppData
+command. After the real 30 ms backoff, init kills and reaps the old server,
+starts the same slot at generation + 1, waits for replacement Healthy, clears
+the root fault, and requires the App resume acknowledgement. Only after final
+Healthy replies from both services does the inherited UI/AppData/shutdown
+closure continue. The exact per-boot and two-boot seals are:
+
+```text
+UNIFIED_PRODUCT_MULTISERVICE_LIVENESS_OK format=1 abi=30 authority=init-bsh1-plus-kernel-authenticated-pid services=2 service_set=StorageServer+App protocol=BSH1 dependency=StorageServer->App dependency_kind=hard probes=8 healthy=7 withheld=1 cadence_waits=3 cadence_ms=40 periodic_rounds=3 health_timeouts=1 health_timeout_ms=100 backoff_waits=1 backoff_ms=30 restart_budget=1 restarts=1 old_pid=4294967306 replacement_pid=8589934602 app_pid=4294967305 same_slot=1 generation_step=1 process_terminate_calls=1 process_terminate_successes=1 terminated_killed=1 storage_epochs=2 next_epoch=3 releases=2 fault_transitions=2 recovery_transitions=2 dependent_blocks=1 dependent_resumes=1 app_health_sequences=3 replacement_health_sequences=2 replacement_mounted=1 replacement_healthy=1 bounded=1 single_dependency=1 injected_hang=1 emulator_only=1 general_runtime=0 real_phone_claim=0
+UNIFIED_PRODUCT_MULTISERVICE_LIVENESS_REBOOT_OK boots=2 qemu_self_exits=2 authenticated_power_keys=2 ui_interactions=2 ui_screenshots=2 ui_sha256=1d466ebb9c519c31f9c2f7a86c742efb36d2493e0283e2d532b10de549ed1994 product_shutdowns=2 multiservice_liveness_recoveries=2 supervised_services=4 liveness_dependency_edges=2 health_probes=16 healthy=14 withheld=2 health_timeouts=2 cadence_waits=6 dependency_fault_transitions=4 dependency_recovery_transitions=4 dependent_blocks=2 dependent_resumes=2 killed_servers=2 replacements=2 replacement_healthy=2 storage_epochs=4 resident_nodes=8 dependency_edges=10 quiesce_waves=3 registrations=16 quiesces=16 order_rejections=2 storage_server_flushes=2 storage_server_readbacks=2 storage_server_exits=2 prepare_calls=8 prepares=2 commit_calls=2 commits=2 spawn_rejections=2 connect_rejections=4 final_appdata_generation=6 final_health_generation=4 final_health_slot=0 prior_health_generation=3 prior_health_slot=1 final_boot_open=0 prior_boot_open=1 qemu_backend_persistence=1 outside_data_appdata_unchanged=1 unused_data_unchanged=1 appdata_changed=1 changed_data_bytes=153 changed_appdata_bytes=2755 emulator_only=1 hardware_poweroff_claim=0 psci_claim=0 powercut_claim=0 smp_claim=0 general_runtime=0 real_phone_claim=0
+```
+
+M69 is not arbitrary-DAG supervision: it fixes two services, one hard edge,
+three scheduled rounds, one injected fault, and one restart. It has no
+non-injected long-running watchdog, concurrent-fault coverage, soak evidence,
+hardware poweroff, or real-device validation. It remains an emulator-only,
+single-core research prototype, not a flashable or daily-usable phone.
+
+Historical M70 uses the complete M69 route and replaces the M70 shutdown backend
+with a strictly discovered QEMU `virt` PSCI contract. The allocation-free FDT
+parser accepts one enabled direct-root `/psci` node, requires
+`arm,psci-1.0`/`arm,psci-0.2` and exact `hvc`/`smc`, probes `PSCI_VERSION`,
+and seals that descriptor in kernel-only state before `SYSTEM_OFF`. The
+observed QEMU contract is `arm,psci-1.0`, `hvc`, PSCI 1.1. M70 supplies no
+semihosting configuration. Its exact runtime and static seals are:
+
+```text
+M70_PSCI_DISCOVERY_OK format=1 abi=31 node=/psci compatible=arm,psci-1.0 method=hvc psci_version=1.1 version_raw=0x00010001 version_probe=PSCI_VERSION version_function_id=0x84000000 system_off_function_id=0x84000008 fdt_validated=1 installed_once=1 semihosting=0 emulator_only=1 hardware_poweroff_claim=0 pmic_claim=0 real_phone_claim=0
+UNIFIED_PRODUCT_PSCI_SHUTDOWN_OK format=1 abi=31 authority=fdt-plus-psci-version-plus-kernel-seal node=/psci compatible=arm,psci-1.0 method=hvc psci_version=1.1 version_raw=0x00010001 version_probe=PSCI_VERSION version_function_id=0x84000000 system_off_function_id=0x84000008 backend=qemu-psci system_off_requested=1 host_self_exit_verified=0 semihosting=0 emulator_only=1 hardware_poweroff_claim=0 pmic_claim=0 real_phone_claim=0
+UNIFIED_PRODUCT_PSCI_SHUTDOWN_REBOOT_OK boots=2 qemu_self_exits=2 authenticated_power_keys=2 ui_interactions=2 ui_screenshots=2 ui_sha256=1d466ebb9c519c31f9c2f7a86c742efb36d2493e0283e2d532b10de549ed1994 product_shutdowns=2 psci_discoveries=2 psci_version_probes=2 psci_version_1_1=2 fdt_psci_nodes=2 hvc_conduits=2 psci_system_off_requests=2 qemu_psci_self_exits=2 semihosting_uses=0 multiservice_liveness_recoveries=2 supervised_services=4 liveness_dependency_edges=2 health_probes=16 healthy=14 withheld=2 health_timeouts=2 cadence_waits=6 dependency_fault_transitions=4 dependency_recovery_transitions=4 dependent_blocks=2 dependent_resumes=2 killed_servers=2 replacements=2 replacement_healthy=2 storage_epochs=4 resident_nodes=8 dependency_edges=10 quiesce_waves=3 registrations=16 quiesces=16 order_rejections=2 storage_server_flushes=2 storage_server_readbacks=2 storage_server_exits=2 prepare_calls=8 prepares=2 commit_calls=2 commits=2 spawn_rejections=2 connect_rejections=4 final_appdata_generation=6 final_health_generation=4 final_health_slot=0 prior_health_generation=3 prior_health_slot=1 final_boot_open=0 prior_boot_open=1 qemu_backend_persistence=1 outside_data_appdata_unchanged=1 unused_data_unchanged=1 appdata_changed=1 changed_data_bytes=153 changed_appdata_bytes=2755 emulator_only=1 hardware_poweroff_claim=0 pmic_claim=0 psci_claim=1 powercut_claim=0 smp_claim=0 general_runtime=0 real_phone_claim=0
+UNIFIED_PRODUCT_PSCI_SHUTDOWN_SOURCE_OK abi=31 fdt_node=/psci compatible=arm,psci-1.0 method=hvc psci_version=1.1 version_raw=0x00010001 version_function_id=0x84000000 system_off_function_id=0x84000008 fdt_negative_classes=7 contract_negative_classes=4 parser_serial_negative=13 parser_host_negative=3 qemu_launches=52 nic_none=52 semihosting_m70=0 no_new_syscall=1 emulator_only=1 hardware_poweroff_claim=0 pmic_claim=0 real_phone_claim=0
+UNIFIED_PRODUCT_PSCI_SHUTDOWN_EVIDENCE_PARSER_SELF_TEST_OK positive=4 serial_negative=13 host_negative=3
+UNIFIED_PRODUCT_PSCI_SHUTDOWN_STATIC_OK source=1 feature_closure=1 abi=31 fdt_strict=1 psci_version_probe=1 system_off=1 opaque_seal=1 two_boot=1 parser_serial_negative=13 parser_host_negative=3 no_new_syscall=1 semihosting=0 full_suite=1 emulator_only=1 hardware_poweroff_claim=0 pmic_claim=0 real_phone_claim=0
+BOOT_OK: M70 FDT-validated QEMU PSCI SYSTEM_OFF, two-service liveness, AppData, and bounded shutdown armed
+```
+
+This is QEMU PSCI self-exit evidence only. It is not a PMIC implementation,
+hardware poweroff proof, board-support package, or real-phone validation.
+
+Historical M71 preserves the entire M70 closure and adds a transactional
+five-service catalog and all-or-none probe batches. Per boot, ServiceManager,
+SurfaceServer, InputServer, StorageServer, and App form four declared edges
+(three hard, one soft). Twenty-one real cadence rounds include 16 additional
+healthy soak rounds. SurfaceServer and InputServer each miss once in the same
+window and independently recover within tolerance; consecutive StorageServer
+misses exceed tolerance and retain the existing timeout, replacement, and App
+block/resume path. The exact per-boot, two-boot, and static seals are:
+
+```text
+UNIFIED_PRODUCT_CONTINUOUS_SUPERVISION_OK format=1 abi=32 authority=init-bsh1-catalog-plus-kernel-authenticated-pid services=5 service_set=ServiceManager+SurfaceServer+InputServer+StorageServer+App protocol=BSH1 catalog_transactional=1 catalog_capacity=5/4 dependency_edges=4 hard_edges=3 soft_edges=1 probes=107 healthy=104 missed=3 cadence_waits=21 cadence_ms=40 periodic_rounds=21 fully_healthy_rounds=20 healthy_soak_rounds=16 batch_rounds=18 batched_probes=90 health_timeouts=3 health_timeout_ms=100 concurrent_miss_windows=1 concurrent_miss_services=2 missed_probe_tolerance=1 transient_miss_recoveries=2 escalated_faults=1 backoff_waits=1 backoff_ms=30 restart_budget=1 restarts=1 old_pid=4294967306 replacement_pid=8589934602 app_pid=4294967305 same_slot=1 generation_step=1 process_terminate_calls=1 process_terminate_successes=1 terminated_killed=1 storage_epochs=2 next_epoch=3 releases=2 fault_transitions=2 recovery_transitions=2 tolerated_miss_dependency_transitions=0 dependent_blocks=1 dependent_resumes=1 resident_health_sequences=21 app_health_sequences=21 replacement_health_sequences=20 replacement_mounted=1 replacement_healthy=1 elapsed_supervision_ms=1070 bounded=1 injected_storage_hang=1 injected_transient_misses=1 arbitrary_soak_claim=0 emulator_only=1 general_runtime=0 real_phone_claim=0
+UNIFIED_PRODUCT_CONTINUOUS_SUPERVISION_REBOOT_OK boots=2 qemu_self_exits=2 authenticated_power_keys=2 ui_interactions=2 ui_screenshots=2 ui_sha256=1d466ebb9c519c31f9c2f7a86c742efb36d2493e0283e2d532b10de549ed1994 product_shutdowns=2 continuous_supervision_recoveries=2 supervised_services=10 liveness_dependency_edges=8 health_probes=214 healthy=208 missed=6 health_timeouts=6 cadence_waits=42 periodic_rounds=42 fully_healthy_rounds=40 healthy_soak_rounds=32 batch_rounds=36 batched_probes=180 concurrent_miss_windows=2 concurrent_miss_services=4 transient_miss_recoveries=4 escalated_faults=2 dependency_fault_transitions=4 dependency_recovery_transitions=4 dependent_blocks=2 dependent_resumes=2 killed_servers=2 replacements=2 replacement_healthy=2 storage_epochs=4 psci_discoveries=2 psci_version_probes=2 psci_version_1_1=2 fdt_psci_nodes=2 hvc_conduits=2 psci_system_off_requests=2 qemu_psci_self_exits=2 semihosting_uses=0 resident_nodes=8 dependency_edges=10 quiesce_waves=3 registrations=16 quiesces=16 order_rejections=2 storage_server_flushes=2 storage_server_readbacks=2 storage_server_exits=2 prepare_calls=8 prepares=2 commit_calls=2 commits=2 spawn_rejections=2 connect_rejections=4 final_appdata_generation=6 final_health_generation=4 final_health_slot=0 prior_health_generation=3 prior_health_slot=1 final_boot_open=0 prior_boot_open=1 qemu_backend_persistence=1 outside_data_appdata_unchanged=1 unused_data_unchanged=1 appdata_changed=1 changed_data_bytes=153 changed_appdata_bytes=2755 emulator_only=1 hardware_poweroff_claim=0 pmic_claim=0 psci_claim=1 powercut_claim=0 smp_claim=0 general_runtime=0 real_phone_claim=0
+UNIFIED_PRODUCT_CONTINUOUS_SUPERVISION_SOURCE_OK abi=32 services=5 dependency_edges=4 healthy_soak_rounds=16 batch_rounds=18 concurrent_miss_services=2 transient_miss_recoveries=2 parser_serial_negative=18 parser_host_negative=3 qemu_launches=52 nic_none=52 no_new_syscall=1 semihosting_m71=0 bounded=1 arbitrary_soak_claim=0 emulator_only=1 general_runtime=0 real_phone_claim=0
+UNIFIED_PRODUCT_CONTINUOUS_SUPERVISION_EVIDENCE_PARSER_SELF_TEST_OK positive=4 serial_negative=18 host_negative=3
+UNIFIED_PRODUCT_CONTINUOUS_SUPERVISION_STATIC_OK source=1 feature_closure=1 abi=32 services=5 dependency_edges=4 healthy_soak_rounds=16 batch_rounds=18 concurrent_miss_services=2 transient_miss_recoveries=2 parser_serial_negative=18 parser_host_negative=3 no_new_syscall=1 semihosting=0 full_suite=1 bounded=1 arbitrary_soak_claim=0 emulator_only=1 general_runtime=0 real_phone_claim=0
+```
+
+This is two bounded, fault-injected QEMU runs totaling 2.14 seconds of
+supervision. The 16 additional healthy rounds are not arbitrary-duration soak
+or non-injected long-term reliability evidence. The enforced boundary remains
+`bounded=1 arbitrary_soak_claim=0 emulator_only=1 general_runtime=0
+real_phone_claim=0`.
+
+The M56 `7813/7810`, M57 `9625/9619`, and M58 `9625/9619` totals and M58
+masked-tick maxima are measured builds, not cross-build constants. The checked
+M56 and M57/M58 request deltas are respectively 3 and 6.
+Run the current offline gates with:
+
+```bash
+CARGO_NET_OFFLINE=true ./scripts/check-unified-product-continuous-supervision-static.sh
+CARGO_NET_OFFLINE=true BNDROID_PROFILE=release ./scripts/check-unified-product-continuous-supervision-runtime.sh
+CARGO_NET_OFFLINE=true ./scripts/check-unified-product-psci-shutdown-static.sh
+CARGO_NET_OFFLINE=true BNDROID_PROFILE=release ./scripts/check-unified-product-psci-shutdown-runtime.sh
+CARGO_NET_OFFLINE=true ./scripts/check-unified-product-multiservice-liveness-static.sh
+CARGO_NET_OFFLINE=true BNDROID_PROFILE=release ./scripts/check-unified-product-multiservice-liveness-runtime.sh
+CARGO_NET_OFFLINE=true ./scripts/check-unified-product-liveness-static.sh
+CARGO_NET_OFFLINE=true BNDROID_PROFILE=release ./scripts/check-unified-product-liveness-runtime.sh
+CARGO_NET_OFFLINE=true ./scripts/check-unified-product-static.sh
+CARGO_NET_OFFLINE=true BNDROID_PROFILE=release ./scripts/check-unified-product-runtime.sh
+CARGO_NET_OFFLINE=true BNDROID_PROFILE=release ./scripts/check-resident-platform-shutdown-runtime.sh
+./scripts/check-resident-platform-shutdown-static.sh
+CARGO_NET_OFFLINE=true BNDROID_PROFILE=release ./scripts/check-storage-server-shutdown-orchestration-runtime.sh
+./scripts/check-storage-server-shutdown-orchestration-static.sh
+CARGO_NET_OFFLINE=true BNDROID_PROFILE=release ./scripts/check-storage-server-clean-shutdown-runtime.sh
+./scripts/check-storage-server-clean-shutdown-static.sh
+CARGO_NET_OFFLINE=true BNDROID_PROFILE=release ./scripts/check-storage-server-persistent-health-runtime.sh
+./scripts/check-storage-server-persistent-health-static.sh
+CARGO_NET_OFFLINE=true BNDROID_PROFILE=release ./scripts/check-storage-server-terminal-quarantine-runtime.sh
+./scripts/check-storage-server-terminal-quarantine-static.sh
+CARGO_NET_OFFLINE=true BNDROID_PROFILE=release ./scripts/check-storage-server-owner-liveness-runtime.sh
+./scripts/check-storage-server-owner-liveness-static.sh
+CARGO_NET_OFFLINE=true BNDROID_PROFILE=release ./scripts/check-storage-server-fault-policy-runtime.sh
+./scripts/check-storage-server-fault-policy-static.sh
+CARGO_NET_OFFLINE=true ./scripts/check-app-data-async-recovery-runtime.sh
+CARGO_NET_OFFLINE=true ./scripts/check-storage-recovery-unification-static.sh
+CARGO_NET_OFFLINE=true ./scripts/check-storage-irq-race.sh
+CARGO_NET_OFFLINE=true BNDROID_PROFILE=release ./scripts/check-storage-server-async-recovery-runtime.sh
+./scripts/check-storage-server-async-recovery-static.sh
+CARGO_NET_OFFLINE=true ./scripts/test.sh
+```
+
+The M56 through M68 checkers remain independent historical regression gates
+and explicitly reject later evidence. The M69 checker has its own
+`target/m69/unified-product-multiservice-liveness-runtime.log`, exact screenshot
+contract, strict two-positive/ten-negative parser self-test, physical QMP
+power-key route, and two-boot two-service dependency ledger. The M68 checker has its own
+`target/m68/unified-product-liveness-runtime.log`, exact screenshot contract,
+strict two-positive/eight-negative parser self-test, physical QMP power-key
+route, and two-boot liveness ledger. The M67 checker has its own target
+directory, exact UI screenshot contract, strict two-positive/six-negative
+parser self-test, physical QMP power-key route, and two-boot product ledger.
+The historical M66 checker has its own target
+directory and log, boots the same persistent image twice, and requires exact
+kernel-inspected graph topology, authenticated reverse-order quiescence,
+durable close, final seals, and two status-0 guest-requested QEMU exits. The
+M65 checker retains its independent bounded client/StorageServer ledger. The M64 checker
+retains its independent pre-EL0 open/close/no-later-storage ledger. The
+M63 checker retains its independent two-boot health ledger. The M62 checker has its
+own target directory and log and requires the exact ordered M60-base,
+M61-owner, M62-quarantine, M62-runtime, and M62-boot lines above. The historical
+M61 checker has its own target
+directory and log and requires the exact ordered M60-base, M61-owner, M61-runtime,
+and M61-boot lines above. The historical M60 checker has its own target directory
+and log, requires the three exact ordered M60 lines above, and rejects stale
+M55--M59 markers. The current non-QEMU static seals are:
+
+```text
+STORAGE_SERVER_STATIC_OK shell_scripts=76 qemu_launches=52 nic_none=52 abi=25 catalog_images=8 storage_elf_gate=1 markers=4 offline=1
+STORAGE_SERVER_RECOVERY_STATIC_OK sources=14 qemu_launches=52 nic_none=52 fault_kinds=3 owner_rotation=1 kernel_reset_authority=1
+STORAGE_SERVER_REPEATED_RECOVERY_STATIC_OK sources=15 qemu_launches=52 nic_none=52 cycles=2 fault_cases=6 owner_rotations=6 fail_closed_retries=1 kernel_reset_authority=1
+STORAGE_SERVER_ASYNC_RECOVERY_STATIC_SOURCE_OK sources=17 qemu_launches=52 nic_none=52 cooperative_phases=4 admission_gate=1 masked_poll_iterations=0
+STORAGE_SERVER_ASYNC_RECOVERY_PARSER_OK negative_cases=18
+STORAGE_SERVER_ASYNC_RECOVERY_STATIC_OK feature_mismatch_cases=4 parser_negative_cases=18 kernel_reset_authority=1
+STORAGE_RECOVERY_UNIFICATION_STATIC_SOURCE_OK sources=10 qemu_launches=52 nic_none=52 shared_engine=1 appdata_coordinator=1 timeout_coordinator=1 m58_coordinator=1 m60_coordinator=1 read_only_retry=1 mutation_retries=0
+APPDATA_ASYNC_RECOVERY_PARSER_OK negative_cases=25
+STORAGE_IRQ_COOPERATIVE_RECOVERY_PARSER_OK negative_cases=29
+STORAGE_RECOVERY_UNIFICATION_STATIC_OK feature_mismatch_cases=5 parser_self_tests=2 shared_engine=1 explicit_gate_commits=5 offline=1
+STORAGE_SERVER_FAULT_POLICY_STATIC_SOURCE_OK sources=15 qemu_launches=52 nic_none=52 ticketed=1 probation=1 attempt_cap=3 backoff_base_ticks=2 backoff_multiplier=2 device_offline=sticky offline_probe=1 commit_order=rearm-open-prearm-broker transient_el0_controls=6 el0_permanent_fault_arm_controls=0 permanent_authority=kernel-prearmed terminal_irq_dma_proof=1
+STORAGE_SERVER_FAULT_POLICY_PARSER_OK negative_cases=111
+STORAGE_SERVER_FAULT_POLICY_STATIC_OK feature_mismatch_cases=5 parser_negative_cases=111 ticketed=1 probation=1 probation_io_failure=requires-reset attempt_cap=3 backoff=2x2 offline=sticky offline_probe=1 transient_el0_controls=6 el0_permanent_fault_arm_controls=0 permanent_authority=kernel-prearmed terminal_irq_dma_proof=1
+STORAGE_SERVER_OWNER_LIVENESS_STATIC_SOURCE_OK sources=15 host_tests=9 feature_chain=M61-M60-M58-M57-M56-M55 pure_policy=1 nonrenewable=1 finish_arm_daif_window=1 ticket=pid-epoch-lease-generation-physical-deadline m61_reaper_release_only=1 historical_handle_close_release=1 recovery_barrier=1 monitor_only=1 live_volume_close=denied epoch6_flush_object_wait=1 init_process_terminate=0 qemu_launches=1 nic_none=1
+STORAGE_SERVER_OWNER_LIVENESS_PARSER_OK negative_cases=184 base_fields=97 owner_fields=39 runtime_fields=13
+STORAGE_SERVER_OWNER_LIVENESS_STATIC_OK feature_mismatch_cases=6 parser_negative_cases=184 parser_base_fields=97 parser_owner_fields=39 parser_runtime_fields=13 host_tests=9 pure_policy=1 nonrenewable=1 finish_arm_daif_window=1 monitor_only=1 m61_reaper_release_only=1 historical_handle_close_release=1 recovery_barrier=1 live_volume_close=denied epoch6_flush_object_wait=1 init_process_terminate=0 qemu_launches=1 nic_none=1
+STORAGE_SERVER_TERMINAL_QUARANTINE_STATIC_SOURCE_OK sources=13 host_tests=8 feature_chain=M62-M61-M60-M58-M57-M56-M55 pure_policy=1 nonrenewable=1 kernel_offline_arm=1 el0_controls=0 fallback_policy_ticket=0 fallback_steps=3 fallback_pending_returns=2 reverified_dma=1 qemu_launches=1 nic_none=1
+STORAGE_SERVER_TERMINAL_QUARANTINE_PARSER_OK negative_cases=204 base_fields=97 owner_fields=39 quarantine_fields=34 runtime_fields=15
+STORAGE_SERVER_TERMINAL_QUARANTINE_STATIC_OK feature_mismatch_cases=6 parser_negative_cases=204 parser_base_fields=97 parser_owner_fields=39 parser_quarantine_fields=34 parser_runtime_fields=15 host_tests=8 pure_policy=1 nonrenewable=1 kernel_offline_arm=1 el0_controls=0 fallback_policy_ticket=0 fallback_steps=3 fallback_pending_returns=2 reverified_dma=1 qemu_launches=1 nic_none=1
+STORAGE_SERVER_PERSISTENT_HEALTH_STATIC_SOURCE_OK sources=14 host_tests=7 feature_chain=M63-M62-M61-M60-M58-M57-M56-M55 kernel_only=1 legacy_upgrade=1 unclosed_hint=1 current_reprobe=1 offline_persisted=0 offline_from_record=0 el0_controls=0 qemu_launches=1 qemu_boots=2 nic_none=1
+STORAGE_SERVER_PERSISTENT_HEALTH_PARSER_OK negative_cases=54 health_fields=36 phases=2
+STORAGE_SERVER_PERSISTENT_HEALTH_STATIC_OK feature_mismatch_cases=4 parser_negative_cases=54 parser_health_fields=36 parser_phases=2 host_tests=7 persist_tests=23 kernel_only=1 legacy_upgrade=1 unclosed_hint=1 current_reprobe=1 offline_persisted=0 offline_from_record=0 el0_controls=0 qemu_launches=1 qemu_boots=2 nic_none=1
+STORAGE_SERVER_CLEAN_SHUTDOWN_STATIC_SOURCE_OK sources=15 host_tests=8 feature_chain=M64-M63-M62-M61-M60-M58-M57-M56-M55 kernel_only=1 pre_el0=1 clean_close=1 session_capability=1 admission_seal=1 offline_persisted=0 offline_from_record=0 el0_controls=0 qemu_launches=1 qemu_boots=2 nic_none=1
+STORAGE_SERVER_CLEAN_SHUTDOWN_PARSER_OK negative_cases=93 health_fields=36 close_fields=37 phases=2
+STORAGE_SERVER_CLEAN_SHUTDOWN_STATIC_OK feature_mismatch_cases=4 parser_negative_cases=93 parser_health_fields=36 parser_close_fields=37 parser_phases=2 host_tests=8 persist_tests=31 kernel_only=1 pre_el0=1 clean_close=1 session_capability=1 admission_seal=1 offline_persisted=0 offline_from_record=0 el0_controls=0 qemu_launches=1 qemu_boots=2 nic_none=1
+STORAGE_SERVER_SHUTDOWN_ORCHESTRATION_STATIC_SOURCE_OK sources=16 host_tests=4 feature_chain=M65-M64-M63-M62-M61-M60-M58-M57-M56-M55 abi=26 init_only=1 prepare_commit=1 generation_bound=1 process_gate=1 storage_gate=1 server_flush=1 server_readback=1 durable_close=1 admission_seal=1 el0_controls=1 hardware_poweroff_claim=0 powercut_claim=0 smp_claim=0 general_runtime=0 qemu_launches=1 qemu_boots=2 nic_none=1
+STORAGE_SERVER_SHUTDOWN_ORCHESTRATION_PARSER_OK negative_cases=133 health_fields=36 shutdown_fields=52 phases=2
+STORAGE_SERVER_SHUTDOWN_ORCHESTRATION_STATIC_OK feature_mismatch_cases=4 parser_negative_cases=133 parser_health_fields=36 parser_shutdown_fields=52 parser_phases=2 host_tests=4 abi_tests=1 abi=26 init_only=1 prepare_commit=1 generation_bound=1 process_gate=1 storage_gate=1 server_flush=1 server_readback=1 durable_close=1 admission_seal=1 el0_controls=1 hardware_poweroff_claim=0 powercut_claim=0 smp_claim=0 general_runtime=0 qemu_launches=1 qemu_boots=2 nic_none=1
+RESIDENT_PLATFORM_SHUTDOWN_STATIC_SOURCE_OK sources=21 feature_chain=M66-M65-M64-M63-M62-M61-M60-M58-M57-M56-M55 abi=27 resident_nodes=8 dependency_edges=10 quiesce_waves=3 authenticated_nodes=1 kernel_topology=1 reverse_order=1 durable_close=1 platform_token=opaque fail_closed=1 qemu_backend=semihosting qemu_launches=1 qemu_boots=2 nic_none=1 hardware_poweroff_claim=0 psci_claim=0 powercut_claim=0 smp_claim=0 general_runtime=0
+RESIDENT_PLATFORM_SHUTDOWN_PARSER_OK negative_cases=144 health_fields=36 platform_fields=59 phases=2
+RESIDENT_PLATFORM_SHUTDOWN_STATIC_OK feature_mismatch_cases=4 parser_negative_cases=144 parser_health_fields=36 parser_platform_fields=59 parser_phases=2 service_tests=4 platform_tests=2 abi_tests=2 abi=27 resident_nodes=8 dependency_edges=10 quiesce_waves=3 authenticated_nodes=1 kernel_topology=1 reverse_order=1 durable_close=1 platform_token=opaque fail_closed=1 qemu_backend=semihosting qemu_launches=1 qemu_boots=2 nic_none=1 hardware_poweroff_claim=0 psci_claim=0 powercut_claim=0 smp_claim=0 general_runtime=0
+UNIFIED_PRODUCT_SOURCE_OK abi=28 ui=m45-real-ui power_key=116 appdata=1 resident_nodes=8 dynamic_capacity=9 heap_pages=256 exception_stack_kib=64 qemu_nic_none=1 real_phone_claim=0
+UNIFIED_PRODUCT_EVIDENCE_PARSER_SELF_TEST_OK positive=2 negative=6
+UNIFIED_PRODUCT_STATIC_OK source=1 feature_closure=1 abi=28 ui=real-m45 input=physical-qmp power_key=116 appdata=1 shutdown_graph=8 qemu_self_exit=1 parser_negative_cases=6 full_suite=1 emulator_only=1 real_phone_claim=0
+UNIFIED_PRODUCT_LIVENESS_SOURCE_OK abi=29 service=StorageServer protocol=BSH1 probes=3 healthy=2 health_timeout_ms=100 backoff_ms=30 replacements=1 same_slot_next_generation=1 process_capacity=10 dynamic_capacity=9 heap_pages=256 exception_stack_kib=64 qemu_nic_none=1 general_runtime=0 real_phone_claim=0
+UNIFIED_PRODUCT_LIVENESS_EVIDENCE_PARSER_SELF_TEST_OK positive=2 negative=8
+UNIFIED_PRODUCT_LIVENESS_STATIC_OK source=1 feature_closure=1 abi=29 service=StorageServer protocol=BSH1 finite_timeout=1 bounded_backoff=1 same_slot_next_generation=1 parser_negative_cases=8 full_suite=1 emulator_only=1 general_runtime=0 real_phone_claim=0
+UNIFIED_PRODUCT_MULTISERVICE_LIVENESS_SOURCE_OK abi=30 services=2 dependency_edges=1 dependency_kind=hard probes=8 healthy=7 health_timeout_ms=100 cadence_ms=40 backoff_ms=30 replacements=1 qemu_launches=52 nic_none=52 no_new_syscall=1 emulator_only=1 general_runtime=0 real_phone_claim=0
+UNIFIED_PRODUCT_MULTISERVICE_LIVENESS_EVIDENCE_PARSER_SELF_TEST_OK positive=2 negative=10
+UNIFIED_PRODUCT_MULTISERVICE_LIVENESS_STATIC_OK source=1 feature_closure=1 abi=30 services=2 dependency_edges=1 dependency_kind=hard probes=8 healthy=7 withheld=1 cadence_waits=3 finite_timeout=1 bounded_backoff=1 same_slot_next_generation=1 parser_negative_cases=10 no_new_syscall=1 full_suite=1 emulator_only=1 general_runtime=0 real_phone_claim=0
+UNIFIED_PRODUCT_CONTINUOUS_SUPERVISION_SOURCE_OK abi=32 services=5 dependency_edges=4 healthy_soak_rounds=16 batch_rounds=18 concurrent_miss_services=2 transient_miss_recoveries=2 parser_serial_negative=18 parser_host_negative=3 qemu_launches=52 nic_none=52 no_new_syscall=1 semihosting_m71=0 bounded=1 arbitrary_soak_claim=0 emulator_only=1 general_runtime=0 real_phone_claim=0
+UNIFIED_PRODUCT_CONTINUOUS_SUPERVISION_EVIDENCE_PARSER_SELF_TEST_OK positive=4 serial_negative=18 host_negative=3
+UNIFIED_PRODUCT_CONTINUOUS_SUPERVISION_STATIC_OK source=1 feature_closure=1 abi=32 services=5 dependency_edges=4 healthy_soak_rounds=16 batch_rounds=18 concurrent_miss_services=2 transient_miss_recoveries=2 parser_serial_negative=18 parser_host_negative=3 no_new_syscall=1 semihosting=0 full_suite=1 bounded=1 arbitrary_soak_claim=0 emulator_only=1 general_runtime=0 real_phone_claim=0
+```
+
+At the historical M71 milestone, all `52/52` project QEMU launch sites
+contained exactly one `-nic none` across 83 top-level shell scripts.
+`scripts/test.sh` at that milestone ran the M71 through M60 static/parser and
+release runtime gates, the
+historical M59 unification/parser gates and both M59 runtime ledgers, all four
+historical StorageServer static gates, and the release M56/M57/M58 regression
+runtimes. Its terminal schema adds the two M62 fields
+`storage_server_terminal_quarantine_static=1
+storage_server_terminal_quarantine=1`, retains the two M61 fields
+`storage_server_owner_liveness_static=1 storage_server_owner_liveness=1`, retains
+the M60 fields `storage_server_fault_policy_static=1
+storage_server_fault_policy=1`, and retains
+`app_data_async_recovery=1 storage_recovery_unification_static=1
+storage_irq_cooperative_recovery=1`, plus
+`storage_server_recovery_static=1 storage_server_repeated_recovery_static=1
+storage_server_async_recovery_static=1 storage_server_recovery=1
+storage_server_repeated_recovery=1 storage_server_async_recovery=1` while
+preserving the historical `storage_server_runtime_boots=3` seal. Its M63
+terminal fields are
+`storage_server_persistent_health_static=1
+storage_server_persistent_health_reboot=1 persistent_health_boots=2`; its M64
+fields are `storage_server_clean_shutdown_static=1
+storage_server_clean_shutdown_reboot=1 clean_shutdown_boots=2`; its M65 fields
+are `storage_server_shutdown_orchestration_static=1
+storage_server_shutdown_orchestration_reboot=1
+shutdown_orchestration_boots=2`.
+Its M66 fields are `resident_platform_shutdown_static=1
+resident_platform_shutdown_reboot=1 resident_platform_shutdown_boots=2
+qemu_self_exits=2`. Its M67 fields are `unified_product_static=1
+unified_product_reboot=1 unified_product_boots=2
+unified_product_ui_interactions=2`. Its M68 fields are
+`unified_product_liveness_static=1 unified_product_liveness_reboot=1
+unified_product_liveness_boots=2 unified_product_liveness_recoveries=2`. Its
+M69 fields are `unified_product_multiservice_liveness_static=1
+unified_product_multiservice_liveness_reboot=1
+unified_product_multiservice_liveness_boots=2
+unified_product_multiservice_liveness_recoveries=2`. Its M70 fields are
+`unified_product_psci_shutdown_static=1
+unified_product_psci_shutdown_reboot=1
+unified_product_psci_shutdown_boots=2 qemu_psci_self_exits=2`. Its M71 fields
+are `unified_product_continuous_supervision_static=1
+unified_product_continuous_supervision_reboot=1
+unified_product_continuous_supervision_boots=2
+unified_product_continuous_supervision_recoveries=2
+continuous_supervised_services=10 continuous_health_probes=214
+continuous_healthy=208 continuous_missed=6`. M70 and M71 produce an aggregate
+`qemu_psci_self_exits=4`; M66 through M71 retained separate two-boot ledgers,
+so that historical aggregate self-exit count was `qemu_self_exits=12`.
+
+On 2026-07-27, the historical M71 targeted offline gates and its complete
+offline suite exited 0. The complete suite is rerun after every milestone and
+remains the final regression authority. That M71 host-executed
+`CARGO_NET_OFFLINE=true ./scripts/test.sh` run exited 0. Its host-executed
+historical pre-M67 workspace library ledger is 778 tests: the sealed M61 total of 763 plus the
+eight allocation-free M62 terminal-quarantine policy tests and seven M63
+persistence tests. The M64 feature-enabled kernel ledger contains 368 tests;
+its persistent-record test ledger contains 31 tests, including eight new
+clean-close cases. The M65 feature-enabled kernel ledger contains 372 tests
+(the M64 ledger plus four allocation-free shutdown transition tests); its
+ABI-v26 stability filter passes once, and its runtime parser rejects 133
+negative fixtures across 36 health and 52 shutdown fields.
+The M66 feature-enabled ABI/kernel ledgers contain 37/419 tests; its static
+gate separately runs two ABI filters, four service-ledger tests, two platform
+contract tests, four mismatch cases, and 144 negative parser fixtures across
+36 health and 59 platform fields. M67 additionally passed its exact feature
+closure/source gate, two positive and six negative parser fixtures, base and
+all-feature `clippy -D warnings`, two release QEMU boots, two authenticated
+power-key interactions, and two exact screenshots.
+M68 additionally passed its exact feature/source gate, two positive and eight
+negative liveness-parser fixtures, base and all-feature `clippy -D warnings`,
+and two release QEMU boots. Across those boots the checker observed exactly two
+finite health timeouts, two backoff waits, two killed old StorageServers, two
+same-slot generation-advanced replacements, two replacement-health replies,
+two exact UI screenshots, and two QEMU self-exits.
+M69 additionally passed its exact feature/source gate, two positive and ten
+negative parser fixtures, the focused hard-dependency host test, the ABI-v30
+no-new-syscall test, target checks, and two release QEMU boots. Across those
+boots it observed four supervised service instances, two hard edges, sixteen
+probes with fourteen Healthy replies and two withheld replies, six real cadence
+waits, four fault and four recovery transitions, two dependent blocks and
+resumes, two killed old StorageServers, two healthy replacements, two exact UI
+screenshots, and two QEMU self-exits.
+The historical M60
+split remains ABI/AppData/compositor/ELF/input/ServiceManager/storage/UI/init/
+kernel = `36/28/51/19/106/61/13/120/0/320`; it is not rewritten as M61
+feature evidence. The historical M71 suite emitted:
+
+```text
+BNDROID_TEST_SUITE_OK qemu_boot_profiles=5 framebuffer=1 keyboard_qmp=1 tablet_touch_qmp=1 compositor_interaction=1 userspace_surface=1 userspace_ui=1 ui_screenshot=1 process_terminate=1 app_lifecycle=1 app_crash_recovery=1 mapped_graphics=1 graphics_owner_death=1 graphics_surface_restart=1 graphics_producer_orphan=1 graphics_frame_clock=1 graphics_swapchain=1 multi_window=1 persistent_window=1 text_input=1 soft_keyboard=1 input_server=1 input_server_surface_restart=1 input_server_restart=1 service_supervisor=1 service_dependency=1 post_recovery_interaction=1 post_recovery_focus=1 post_recovery_focus_roundtrip=1 post_recovery_lifecycle_focus=1 app_data_runtime=1 app_data_async_recovery=1 storage_server_static=1 storage_server_recovery_static=1 storage_server_repeated_recovery_static=1 storage_server_async_recovery_static=1 storage_server_fault_policy_static=1 storage_server_owner_liveness_static=1 storage_server_terminal_quarantine_static=1 storage_server_persistent_health_static=1 storage_server_clean_shutdown_static=1 storage_server_shutdown_orchestration_static=1 resident_platform_shutdown_static=1 unified_product_static=1 unified_product_liveness_static=1 unified_product_multiservice_liveness_static=1 unified_product_psci_shutdown_static=1 unified_product_continuous_supervision_static=1 storage_recovery_unification_static=1 storage_server_runtime_boots=3 storage_server_recovery=1 storage_server_repeated_recovery=1 storage_server_async_recovery=1 storage_server_fault_policy=1 storage_server_owner_liveness=1 storage_server_terminal_quarantine=1 storage_server_persistent_health_reboot=1 persistent_health_boots=2 storage_server_clean_shutdown_reboot=1 clean_shutdown_boots=2 storage_server_shutdown_orchestration_reboot=1 shutdown_orchestration_boots=2 resident_platform_shutdown_reboot=1 resident_platform_shutdown_boots=2 unified_product_reboot=1 unified_product_boots=2 unified_product_ui_interactions=2 unified_product_liveness_reboot=1 unified_product_liveness_boots=2 unified_product_liveness_recoveries=2 unified_product_multiservice_liveness_reboot=1 unified_product_multiservice_liveness_boots=2 unified_product_multiservice_liveness_recoveries=2 unified_product_psci_shutdown_reboot=1 unified_product_psci_shutdown_boots=2 unified_product_continuous_supervision_reboot=1 unified_product_continuous_supervision_boots=2 unified_product_continuous_supervision_recoveries=2 continuous_supervised_services=10 continuous_health_probes=214 continuous_healthy=208 continuous_missed=6 qemu_psci_self_exits=4 qemu_self_exits=12 storage_negative_cases=11 persistence_reboot=1 recovery=1 irq_race=1 storage_irq_cooperative_recovery=1
+```
+
+That run also exercised the historical M51 dependency trace after hardening its
+post-`GraphPrepared` client-rebind ACK state machine: authenticated Launcher and
+App ACKs are accepted in either legal serialization, while exact-once role,
+PID/image/token, and payload checks remain unchanged.
+
+Historical M55 remains sealed separately. It moved AppData namespace policy
+into the standalone EL0 StorageServer, retained the kernel raw-sector broker,
+and established persistent AppData generation `0 -> 4 -> 5 -> 5`; boot 3 made
+zero AppData writes/flushes and left the boot-2/boot-3 AppData partitions
+byte-identical. Historical M59 shares the cooperative physical engine across
+the M58 StorageServer branch, AppData, and the low-level timeout self-test; M60
+adds the bounded policy only to the StorageServer branch. Ordinary AppData sector I/O
+still busy-spins with IRQs enabled, M55/M56/M57 physical recovery remains
+synchronous, and early-probe/fatal-cleanup synchronous resets remain. The one
+injected M59 AppData fault is read-only; no mutation fault is dynamically
+injected, and notification suppression does not prove mutation execution. The
+low-level ledger explicitly claims no EL0 progress. The `long_daif_masks=0`
+evidence covers only measured driver/control sections, not the whole kernel.
+
+M60's permanent fault remains simulated, not a hardware failure. M61 adds only
+a nonrenewable grace after a session-fatal completion has already latched; it is
+not a general healthy-service heartbeat or hang detector. The dynamic proof is
+one fixed epoch-6 flush stall in single-core QEMU. It does not dynamically cover
+the accepted/queued session race matrix or arbitrary out-of-band IRQ races.
+M61 denies live volume close and leaves broker release to the ordinary reaper;
+the historical M60 explicit-close ABI remains isolated behind its older
+feature. M62 dynamically enters the independent terminal
+cooperative-quarantine fallback once, but only through a deterministic
+simulated proof-unavailable gate and persistent simulated RebuildQueue fault.
+M63 persists only an unclosed-boot hint and a non-secret device-contract
+snapshot, then requires a fresh kernel probe before the next commit. It does
+not persist or reconstruct `Offline`, prove unique hardware identity, or
+implement hotplug/device-replacement policy. M64 adds an authenticated
+kernel-owned clean close for the exact current session and proves no later
+storage mutation, but only in a bounded pre-EL0 halt path. M65 adds an
+init-only two-phase shutdown for two completed workload clients and one
+StorageServer: it closes new admission, performs a final AppData
+flush/readback, reaps StorageServer, and then invokes M64's close. It does not
+quiesce the complete resident UI/service graph or invoke platform poweroff.
+M66 adds a fixed authenticated eight-node dependency graph and a fail-closed
+QEMU-only exit backend, but those node programs are a bounded shutdown proof,
+not the unified feature-rich UI/product runtime and not a hardware backend.
+
+All profiles remain bounded single-core QEMU research prototypes with
+`general_runtime=0`: they are not real phones, are not flashable, and are not
+suitable for daily use. General concurrent-fault policy, arbitrary-duration
+soak, real power-cut, back-to-back escalated faults, real-controller behavior,
+SMP, and IOMMU remain unproved. Historical M68 proves only one deliberately withheld StorageServer
+heartbeat and one budgeted replacement. M69 adds the live App and one hard
+dependency, but still fixes the graph at two services/one edge and performs
+only three scheduled rounds around one injected fault; it is not a general
+watchdog. M71 adds a transactional five-service/four-edge catalog, batch
+probing, 16 additional healthy rounds, and one two-service transient-miss
+window, while retaining one escalated StorageServer recovery. The next P0 is
+catalog-driven discovery/startup for arbitrary bounded services, a
+non-injected long-running health loop, back-to-back escalated-fault policy,
+and arbitrary-duration soak, then real platform power control behind
+separately validated PSCI/PMIC backends. Hotplug,
+device identity/replacement, and real-controller/hardware adaptation remain
+open. These results are not real-hardware evidence.
+
+The historical **M53 ABI-v23 post-recovery lifecycle-focus convergence** seal
+remains unchanged. ABI v23, syscalls 0--41, the all-or-none eight-image catalog,
+process capacity 9 (`init + 8 dynamic`), and the single-core twelve-context
+profile are unchanged. M53 is the opt-in child of the complete historical M52
+focus-roundtrip prefix and injects no new input or frame: physical input remains
+`1..11`/BIE event 17, compositor focus remains App/5, InputServer focus remains
+App/4, and output remains frame 6/write generation 6. In recovered Surface
+session 2, Launcher and App each consume Ready and App/1 focus, acknowledge with
+RFCK, then both converge on Launcher/2 with LFCK at physical 8 and App/3 with
+AFCK at physical 10. The historical M53 ledger is BUE `8/8` plus private ACK
+`6/6`, hence Channel `14/14`; M52's APCK is separately counted as boundary
+`1/1` and is not added to M52's immutable 17-bit trace or Channel `8/8`. The
+M53 and M52 screenshots have the same frozen SHA-256
+`97807add9d09682d39e75ace000bc1ccb7548c6b5e97854bde1f3166976e6dfb` and an
+exact zero-pixel diff. M53's dedicated checker was offline, used local Unix QMP,
+and launched QEMU with networking disabled by `-nic none`. M53 and all earlier
+matrices below remain immutable historical seals.
+The earlier M42 historical matrix remains **M42 ABI-v20 persistent userspace
+window-session slice on top of the M41 bounded multi-window compositor and M40 resident two-buffer,
+software-paced swapchain slice, the M39 software frame-clock and
+grant-gated mapped-present slice and the M38 producer-death orphan-reclamation
+and two-slot GraphicsBuffer scrub/reuse slice and the M37 deterministic
+SurfaceServer restart/client-rebind and resident mapped-App frame-recovery
+slice, the M36 graphics-consumer owner-death release and producer-recovery slice, and M35 shared mapped
+GraphicsBuffer, single-slot BufferQueue, and acquire/release fence slice, M34
+bounded unexpected App owner-death recovery, M33 lifecycle runtime, and M32 transferable
+graphics-buffer path, M31 independent userspace App/focus routing, M30 split
+SurfaceServer/Launcher, M29 EL0-owned single-surface shell, M28 clickable-shell model, M27 two-layer compositor/tablet
+path, M26 QEMU ramfb boundary, M25 bounded
+durable DATA-record slice, M24
+capability-scoped read-only EL0 file/VMO catalog, M23
+GPT/FAT16/VFS boot path, M22 interrupt-driven virtio block I/O, and the
+unchanged M20 bounded resilient two-session service slice**, not a usable phone
+system. The ordinary/default runtime remains the fully interactive M32 path;
+the dedicated `app-lifecycle-runtime` build selects M33, while
+`app-crash-recovery-runtime` extends it with the separately verified M34 crash
+scenario; `mapped-graphics-runtime` independently selects the M35 two-App-generation
+mapping profile; `graphics-owner-death-runtime` selects the M36 stopped-consumer
+cleanup profile; `graphics-surface-restart-runtime` selects the M37 one-crash
+SurfaceServer replacement/rebind profile; `graphics-producer-orphan-runtime`
+selects the M38 producer-orphan/two-slot-reuse profile; and
+`graphics-frame-clock-runtime` selects the M39 resident one-App/one-buffer pacing
+proof; `graphics-swapchain-runtime` selects the M40 resident one-App/two-buffer
+ownership and scheduling proof; `multi-window-runtime` selects the M41
+two-client z-order, occlusion, damage, output-swapchain, and pointer-capture
+proof; `persistent-window-runtime` selects the M42 boundary-routing,
+destroy/recreate, and resident-session proof; `text-input-runtime` extends
+that prefix with the M43 keyboard/text-editor proof; and
+`soft-keyboard-runtime` extends M43 with the M44 touch-keyboard proof; and
+`input-server-runtime` moves physical routing, focus/capture, text-context, and
+IME ownership into the separate M45 InputServer. The independent
+`input-server-surface-restart-runtime` starts from the frozen M41 checkpoint
+and selects the M46 one-restart route-gap/rebind/capture-cancel proof without
+replaying the M42--M45 physical-input transcripts. The independent
+`input-server-restart-runtime` selects the M47 one-authorized-restart,
+capability-reacquire, route-resync, and permission-denial proof. The independent
+`service-supervisor-runtime` selects the historical M48 authenticated
+health/watchdog, second-fault quarantine, and degraded-UI proof. The independent
+`service-dependency-runtime` selects the historical M49 two-service dependency,
+Surface replacement, Input watchdog/replacement, and degraded-to-recovered
+proof. `post-recovery-interaction-runtime` selects the historical M50 rejection,
+App routing/present, second health probe, and resident proof;
+`post-recovery-focus-runtime` selects the historical M51 Launcher capture,
+App-to-Launcher focus handoff, present, damage, health, and resident proof;
+`post-recovery-focus-roundtrip-runtime` selects the historical M52 App capture,
+Launcher-to-App return-focus synchronization, present, exact damage, and
+resident proof; `post-recovery-lifecycle-focus-runtime` is its M53 child and
+selects recovered-session Ready plus App/1→Launcher/2→App/3 lifecycle-focus
+convergence without another input or frame; `app-data-runtime` is the M54 child
+that selects the private writable AppData proof and ABI v24. These twenty-two
+M33--M54 opt-in leaf runtimes plus the default M32 path are twenty-three separate
+ledgers. None of these scripted profiles is mislabeled as
+the default product runtime. M54 does not retroactively change the sealed
+M42--M53 history and is still not a general-purpose service graph, complete
+IME, product InputServer, or product storage service.
+M55 `storage-server-runtime` is a separate storage leaf; M56
+`storage-server-recovery-runtime` extends M55, historical M57
+`storage-server-repeated-recovery-runtime` extends M56, and the M58
+`storage-server-async-recovery-runtime` extends M57. M60
+`storage-server-fault-policy-runtime` extends M58. M61
+`storage-server-owner-liveness-runtime` extends M60, M62
+`storage-server-terminal-quarantine-runtime` extends M61, kernel-only M63
+`storage-server-persistent-health-runtime` extends M62, and kernel-only M64
+`storage-server-clean-shutdown-runtime` extends M63. Historical M65
+`storage-server-shutdown-orchestration-runtime` adds ABI-v26 init-only
+two-phase shutdown. Historical M66 `resident-platform-shutdown-runtime` is the
+ABI-v27 shutdown branch head, preserving the exact M66 -> M65 -> M64 -> M63 ->
+M62 -> M61 -> M60 -> M58 -> M57 -> M56 -> M55 kernel closure and a matched
+M66 userspace feature over M65 plus InputServer. Historical M67
+`unified-product-runtime` is the ABI-v28 child of that closure and reuses the
+real M45 UI path without adding a syscall. Historical M68
+`unified-product-liveness-runtime` is its ABI-v29 child, also adds no syscall,
+and covers one bounded StorageServer hang/replacement. Historical M69
+`unified-product-multiservice-liveness-runtime` is its ABI-v30 child, adds no
+syscall, and covers one fixed hard dependency from StorageServer to App.
+Historical M70 `unified-product-psci-shutdown-runtime` is the ABI-v31 child of
+M69, adds no syscall, and binds the final emulator exit to validated FDT and
+PSCI version evidence.
+Historical M71 `unified-product-continuous-supervision-runtime` is the ABI-v32
+child of M70, adds no syscall, and covers the transactional five-service
+catalog, four declared edges, batched probes, one simultaneous transient-miss
+window, and the inherited escalated StorageServer recovery.
+Historical M59 independently adds
+`app-data-async-recovery-runtime` as an ABI-v24 child of M54's
+`app-data-runtime`; its ABI-v23 timeout self-test is not a product leaf. Across
+the historical M71 catalog, M33--M71 are thirty-nine opt-in leaves and default
+M32 is the fortieth independent ledger. The historical M57 stage remains
+twenty-five opt-in leaves plus default M32 as its twenty-sixth ledger.
+The opt-in M54 ABI is v24, while feature-off default and historical M53 remain
+v23. ABI v23 preserves syscalls 0--38, including the historical ABI-v19 syscalls 32--36 for
+GraphicsBuffer map, unmap, queue, acquire, and release, adds level-triggered
+`FRAME_READY` at object-signal bit 4, and adds register-only syscall 37
+`SurfaceFrameAcquire`; ABI-v21 adds level-triggered `KEY_READY` at bit 5 and
+register-only syscall 38 `SurfaceReadKey`. ABI-v22 reuses the existing
+level-triggered `READABLE`/`PEER_CLOSED` object signals and adds register-only
+syscall 39 `InputAcquire` plus register-only syscall 40 `InputReadEvent`.
+ABI-v23 preserves syscalls 0--40 and adds register-only syscall 41
+`InputSessionInfo`, which takes an InputCapability handle plus two mandatory-zero
+reserved arguments and returns its session and acquisition floor. ABI-v24
+preserves 0--41 and adds `AppDataRootOpen`, `FileReplaceAt`,
+`DirectoryCreateAt`, `UnlinkAt`, and `DirectoryReadAt` as syscalls 42--46 only
+under `app-data-runtime`. The system boots in single-core
+QEMU `virt`, discovers RAM and a bounded virtio-mmio topology from the device
+tree, enables protected virtual memory, and
+the M45--M54 input profiles preemptively schedule twelve contexts: three EL1
+contexts, an independently linked build-time embedded ELF64 EL0 `init`, and
+eight dynamic EL0 process slots. The feature-off default remains the separately
+verified seven-image, capacity-8 (`init + 7 dynamic`), eleven-context M32 path.
+Worker and EL0 exception stacks remain 16 KiB. The M54 AppData profile uses a
+256 KiB boot-monitor stack for its bounded snapshot frames; historical M53 and
+feature-off builds retain the 128 KiB boot-monitor stack. Canary and fail-stop
+checks remain enabled in both profiles.
+The M45--M54 input profiles embed an all-or-none catalog of eight pairwise-distinct
+AArch64 `ET_EXEC` images: `init`, ServiceManager, echo provider, echo client,
+SurfaceServer, Launcher, App, and InputServer; the default catalog remains the
+historical seven-image set.
+A safe `no_std` parser validates a deliberately narrow static AArch64 `ET_EXEC`
+profile. Each embedded catalog image has exactly three non-overlapping `PT_LOAD`
+segments (RX text, read-only/NX rodata, and RW/NX data plus BSS); the bounded
+generic loader supports at most 256 load pages, zeroes every recycled frame
+before copying each page's exact file intersection, and leaves BSS and padding
+zero.
+
+Before the scheduler starts, two bounded, allocation-free FDT passes first
+identify the enabled GICv2 interrupt controller and then discover at most 32
+enabled direct-root `compatible = "virtio,mmio"` transports. They accept
+`compatible` string lists and arbitrary property order, honor `status`, record
+`dma-coherent`, decode the root `#address-cells`/`#size-cells` `reg` tuple, and
+resolve a node-local or root-inherited `interrupt-parent` against a GICv2
+controller with three interrupt cells. The normal QEMU topology contains 32
+coherent slots: 31 placeholder transports whose `DeviceID` is zero and one
+active block device. Its raw interrupt specifier `0/47/1` resolves to SPI INTID
+79 with an edge-rising trigger. Placeholder identity is checked before
+transport version, so QEMU's empty slots are ignored without being mistaken
+for legacy devices.
+
+The historical M22 layer activates exactly one modern virtio-mmio v2 read-only
+block device and negotiates `VIRTIO_F_VERSION_1|VIRTIO_BLK_F_RO`. Queue 0 is a
+size-8 split ring whose descriptor/available/used layout occupies 216 bytes in
+one owned DMA page. A second owned DMA page contains two 536-byte-stride
+request slots, each with a 16-byte header, 512-byte data buffer, and one-byte
+status; their three-descriptor chains begin at heads 0 and 3. Capacity is read
+under the virtio configuration-generation stability rule and is fixed by the
+M23 test fixture at 16384 sectors. A generation-qualified tracker publishes both
+sector requests before waiting, allowing two requests to be outstanding. The
+hard-IRQ path ACKs the virtio source and drains all published used entries
+before the GIC EOI; GICv2 programming includes the edge trigger and CPU-0
+target. Both DMA frames remain permanently owned after driver publication.
+The M22 transport proof reads sectors 0 and 1 through IRQ completion, rejects
+sector 16384 before submission, and exposes no raw block syscall or writes. Its
+dedicated timeout/reset race build remains physically read-only in M25.
+
+M23 adds a bounded synchronous read-only block layer and allocation-bounded
+on-disk parsers over a deterministic 8 MiB image. LBA 0 contains a protective
+MBR; primary and backup GPT headers and their 128-entry arrays are CRC32-
+validated at both ends of the disk. The single Microsoft Basic Data partition,
+`BNDROID_SYS`, spans LBA 2048 through 16350. It contains a FAT16 volume with
+512-byte clusters, two identical 56-sector FATs, 64 fixed root entries, strict
+read-only 8.3 names, and a VFS mounted at `/system`. The VFS reads
+`/system/HELLO.TXT` as the exact 28-byte payload
+`Bndroid M23 FAT16 is alive.\n` with digest `0xdd2f71342016eede`, and reads
+`/system/SYSTEM/BUILD.TXT` as the exact 40-byte build manifest with digest
+`0xe57ce4ce9f1b4ec0`. Traversal and mount escape are rejected. The parsers issue
+142 sector reads, bringing the boot total to 144 IRQ-completed requests with no
+poll fallback or timeout.
+
+After M23 validates both files and their FNV-1a64 digests, M24 copies their
+fixed 28-byte and 40-byte contents once into an immutable
+`BootfsCatalog<2>`. The catalog therefore contains exactly 68 bytes. It is
+published before `init`, and all later file opens and reads use shared,
+fallibly allocated, reference-counted VMOs: `runtime_disk_reads=0`,
+`mapped=0`, and `shared_memory=0`. `init` receives in entry register `x0` one
+move-only system-directory capability with `READ|TRANSFER` and no
+`DUPLICATE`. A successful open returns a VMO with
+`READ|DUPLICATE|TRANSFER`, but no `WRITE`, `MAP`, `EXECUTE`, or `WAIT`.
+
+M25 retains one deterministic 8 MiB GPT image and the read-only
+`BNDROID_SYS` range at LBA 2048--16350, while adding private GPT entry 1,
+`BNDROID_DATA`, at LBA 64--127. The current fixture SHA-256 is
+`6cdca2781345e712a2a0d94d4b1327ed7f971c0a971cfd7d5c5f78b8b6d2e838`;
+LBA 0/1 FNV-1a64 values are `0xbebd264b8c14cd72` and
+`0x8294de399174037c`. A normal device must be writable, negotiate
+`VERSION_1|FLUSH`, and reject read-only or missing-FLUSH devices. WRITE type 1
+and FLUSH type 4 complete with `used.len=1`; the write API accepts only the
+DATA range, so system and out-of-DATA rejections leave the request ledger
+unchanged.
+
+The DATA format has one superblock and two 512-byte CRC-protected records. A
+16-byte format epoch is bound to the DATA GPT unique GUID; when both slots are
+valid their generations must be adjacent. A commit writes the inactive slot,
+waits for its IRQ completion, submits and completes FLUSH, then rereads both
+slots while preserving the old selected slot. A fresh normal boot proves
+generation `0→1`. The dedicated persistence check reuses one writable raw
+image across two QEMU boots and proves `0→1→2`, no change outside DATA, and
+`changed_data_bytes=98`; corrupting the newest slot proves fallback to
+generation 0 and recommit of generation 1.
+
+M26 adds a strictly discovered direct-root `qemu,fw-cfg-mmio` transport and
+uses its big-endian DMA command interface to configure QEMU `ramfb`. The
+kernel-owned, page-aligned XRGB8888 framebuffer is 320×480 with a 1280-byte
+stride: 614400 bytes/150 pages and 153600 pixels. Its deterministic nine-color
+static splash has kernel FNV-1a64 digest `0x6ef9c2b7d15fde25`. The independent
+headless `scripts/check-framebuffer.sh` acceptance uses QMP `screendump` to
+validate the full frame, nine exact colors and nine sample points; its RGB
+pixel payload SHA-256 is
+`0adbceee84974eaee5af0d0105020417cbce2c71a7cc46e0f56885239c9b45ac`.
+
+M26 also binds one coherent modern virtio-input MMIO v2 keyboard (device ID
+18), negotiates `VIRTIO_F_VERSION_1` only, validates the configuration name and
+key bitmap, and requires both A and Enter. Its size-8 event queue and eight
+writable 8-byte event buffers fit in one permanently owned DMA frame. QEMU
+places the keyboard at `0x0a003c00`, edge-rising SPI INTID 78 (`0/46/1`), while
+the block device remains at `0x0a003e00`, INTID 79. `scripts/check-input.sh`
+injects QMP key A down/up and proves the exact A-down/SYN/A-up/SYN sequence:
+four completions, deliveries and recycled descriptors, `used_idx=4`,
+`avail_idx=12`, and zero drops, invalid events, configuration IRQs or spurious
+IRQs.
+
+M27 turns the static framebuffer boundary into a minimal software compositor.
+It owns one opaque 320×480 scene surface and one alpha-blended 12×22 cursor
+layer, restores the old cursor rectangle from the immutable scene, clips and
+unions dirty rectangles, and redraws only the affected scanout region. The
+hidden-cursor boot frame remains byte-for-byte compatible with M26: kernel
+FNV-1a64 `0x6ef9c2b7d15fde25` and RGB payload SHA-256
+`0adbceee84974eaee5af0d0105020417cbce2c71a7cc46e0f56885239c9b45ac`.
+
+The same milestone generalizes the permanent virtio-input owner to two
+independent devices. The keyboard remains at `0x0a003c00`, SPI 78; a QEMU
+virtio tablet is capability-classified at `0x0a003a00`, raw interrupt
+`0/45/1`, edge-rising SPI 77, with ABS X/Y ranges `0..32767`, `BTN_LEFT`, and
+`BTN_TOUCH`. Each size-8 event queue owns exactly one DMA frame. At SYN report
+boundaries, the exact seven-event QMP sequence maps raw `1234/23456` to pixel
+`12/342` and commits three samples: move, touch-down, touch-up. The compositor
+performs three dirty redraws and exposes distinct pressed/final digests.
+`scripts/check-compositor.sh` captures both full frames and proves exactly 122
+changed pixels in bounding box `12/342/21/363`, wholly inside dirty rectangle
+`12/342/12/22`; the final RGB payload SHA-256 is
+`f24699248bcdfe5069fa13a40ef7990ba7a647cfe0ac818c04f671047e748f82`.
+
+M28 historically added a deliberately bounded, kernel-owned clickable shell. The home view
+has three hit-tested app targets (`phone`, `messages`, and `settings`) plus a
+home target. A press captures its target and release activates only the same
+target; this is a capture/hit-test prototype, not a complete gesture arena.
+The acceptance tap at pixel `160/342` changes `home` to `settings`, advances
+the opaque scene to generation 1, and commits damage `56/64/208/368` with
+`written=76544 restored=76544 blended=122`. The resulting scene/scanout
+FNV-1a64 digests are `0xf79f5bb3582452a5` and `0xa2b4da7c5f306a09`.
+
+`scripts/check-ui.sh` injects six QMP tablet commands producing exactly 14
+events and six SYN-bound samples, then captures the full frame. It then uses
+15 navigation QMP commands and 35 more events to cover Settings, Phone,
+Messages, and three returns Home. Across both phases the proof observes 49
+events and 21 samples, three targets, six transitions, and a final Home view.
+Relative to the unchanged M26/M27 baseline payload SHA-256
+`0adbceee84974eaee5af0d0105020417cbce2c71a7cc46e0f56885239c9b45ac`,
+the settings frame has SHA-256
+`70720db4523aa6eb33746b76fcac314a99039b79d3aaee85422edb839bc2ee76`,
+13 colors, and exactly 53760 changed pixels in bounding box
+`56/64/263/379`. Those M28 ownership fields were explicitly `owner=kernel` and
+`userspace_surface=0`; M29 replaces that runtime path. A legal one-axis ABS initialization frame preserves the
+known coordinate and waits for the other axis. Normal input also no longer
+becomes fatal merely because the proof-specific stationary position or exact
+event/sample counts for `POINTER_EVENT_OK` have not matched; malformed axis or
+SYN contracts still fail closed.
+
+M29 historically completed the first real EL0 surface handoff. ABI v14 added syscalls 25--27
+(`SurfaceAcquire`, `SurfacePresent`, and `SurfaceReadInput`). Exactly the
+generation-qualified second ServiceManager may acquire one unique Surface
+capability with `READ|WRITE|WAIT`; it cannot be duplicated or transferred.
+The first canonical `Full/id=1` command performs one serialized
+`KernelFallback -> UserspaceBound` transition, and all later frames require an
+exactly increasing identifier. The 64-byte command is copied and decoded, and
+all capability, process, geometry, sequence, and counter checks complete before
+the first scene pixel changes. Explicit close or process death enters
+`Degraded`, freezes the last frame, raises `PEER_CLOSED`, and never creates a
+second writer. Handle close itself is a two-phase rollback transaction.
+
+The present hot path no longer takes a second whole-display snapshot after
+commit: full-frame digest passes per frame fall from four to two. Detailed
+per-input/per-frame UART evidence is behind the default-off kernel feature
+`surface-trace-evidence`; only `check-ui.sh` and `check-compositor.sh` enable it,
+while ordinary builds retain the first-frame commit marker without the hot trace.
+
+At M29, the `crates/bndr-ui` workspace member had 29 host tests for the canonical
+little-endian 64-byte `Present` plus normalized input and shell state: fixed
+`surface_id=1` and a 208x368 surface, with zero to four ordered opaque solid
+rectangles for `Full`, or one to four and `clear=0` for `Damage`.
+It rejects out-of-bounds or zero-area rectangles, nonzero reserved or unused
+bytes, noncanonical XRGB, and any first frame other than `Full` with identifier
+1; later `frame_id` values must increment by exactly one, rejecting replay,
+gaps, and exhaustion without wrapping. Five kernel host tests cover a pure
+`SurfaceSession`: it accepts a frame already validated by `bndr-ui`, then checks
+sequence, scene length, and the commit counter before any pixel write. The first frame need only be
+`Full/id=1`; a host test uses one valid four-rectangle first frame to model the
+one-way `KernelFallback → UserspaceBound` transition and reproduce the M27 Home
+scene pixel-for-pixel with digest
+`0x6ef9c2b7d15fde25`. Replay, gaps, wrong scene length, counter exhaustion, and
+commits while degraded leave scene and commit state unchanged. Pointer reports
+enter a fixed 64-item level-triggered FIFO. The Surface wait item is index zero,
+userspace verifies exact input sequence continuity, and overload replaces only
+the newest undelivered tail state while retaining its sequence and counting a
+coalescence; this preserves a gap-free delivered prefix and the newest
+pressed/released state. `scripts/check-ui.sh` proves 24 normalized input
+samples, frame/commit sequence `1..13`, all three app targets and three Home returns,
+with the same deterministic screenshot hashes and final Settings digests.
+The same scene/virtual-scanout backing is initialized without ramfb, and the
+storage IRQ recovery profile proves a complete headless acquire/handoff/commit.
+M30 historically moved the Surface capability to a standalone EL0
+SurfaceServer and shell state/raster commands to a standalone EL0 Launcher.
+M31 adds a standalone EL0 App and a second dedicated UI Channel pair. Both
+clients are denied `SurfaceAcquire`; SurfaceServer alone owns the unique
+capability and rotates a three-item array wait over Surface, Launcher, and App.
+Each client uses one single-object Channel wait, and both pairs pin the
+kernel-stamped generation-qualified sender PID.
+
+The 64-byte `BUC1` v1 client-control protocol keeps
+`AttachAppEndpoint` client-only: it moves the App server endpoint without
+smuggling an app view or focus transition into the attach payload. Launcher
+alone may issue `SetFocus`, with a strictly increasing transition identifier.
+The 64-byte Present protocol is v2. Frames carry the client's current focus
+generation; the server accepts commits only from the focused client with the
+matching generation and maps each client's local contiguous frame sequence to
+one contiguous global sequence. An inactive or stale-generation frame receives
+`PresentCancelled` without advancing local or global sequence, so the same
+frame identifier can be retried. Host protocol tests cover that contract. The
+default-disabled, checker-only `ui-stale-present-evidence` feature makes the
+QEMU evidence deterministic: App frame 10 is read at focus generation 8,
+cancelled at generation 9, retried at generation 10, and followed by Home at
+generation 11, while the run closes at exactly 36 normalized inputs and 18
+contiguous global commits.
+
+Input routing captures a client at pointer-down until the matching release.
+The surface trace proves that a Settings press followed by a drag into the Home
+region and release delivers App-local input sequence `1..3` only to App, leaks
+nothing to Launcher, and causes no focus or frame commit. The full run contains
+24 normalized samples and 13 contiguous global commits with unchanged
+screenshot hashes. Launcher renders Home; App independently renders
+Phone/Messages/Settings.
+
+M32 advances that path to ABI v17 with a bounded, transferable
+`GraphicsBuffer` object. The kernel owns two page-aligned static XRGB8888 slots;
+each slot has a fixed 208×368/306176-byte logical image and a 307200-byte
+backing. Syscall 28 creates one App-owned buffer, syscall 29 copies a nonempty,
+four-byte-aligned range of at most 4096 bytes from the producer, and syscall 30
+lets SurfaceServer present a buffer-backed full frame. App starts with
+`READ|WRITE|DUPLICATE|TRANSFER` (`0x0f`), duplicates only
+`READ|TRANSFER` (`0x09`), and moves that attenuated handle to SurfaceServer in
+the first 64-byte `BUP1` `BufferPresent`. Historical M32 introduced wire v1;
+the current wire is v2. It carries separate client-local and global frame
+identifiers, focus generation, buffer generation, fixed full-surface geometry,
+and bytes 40..48 now hold a little-endian `system_ui_revision`. Non-mobile
+callers use an explicit unbound value of zero; every mobile present requires a
+nonzero revision and SurfaceServer cancels a stale, future, or unbound frame
+before scanout and before advancing either frame sequence.
+
+The pool identity is generation-qualified; the last close scrubs the entire
+backing before advancing the slot generation. Writes canonicalize XRGB's high
+byte. Buffer decode, capability/producer/right checks, focus and sequence
+checks, generation checks, complete source validation, and counter capacity
+all precede any scene write or commit, so a failed or cancelled transaction is
+inert. The startup proof deliberately transfers the read-only server handle in
+a pre-focus present that is cancelled: it seeds four bytes but performs no
+display present. During the interactive path App rasterizes all 76544 real
+pixels through bounded writes; SurfaceServer then copies that client image into
+the existing Surface/scanout transaction.
+
+This M32/default path is object transfer plus bounded copy, not `mmap`, shared
+user mappings, or zero-copy scanout. M35 adds a separate mapped single-slot
+queue, but neither path is a real window manager/z-order or text/IME stack.
+
+M33 adds a deliberately bounded lifecycle/window-replacement runtime behind
+the dedicated `app-lifecycle-runtime` feature. Three canonical little-endian
+64-byte v1 protocols divide responsibility: `ALC1` carries lifecycle
+request/state/command/ack messages, `UBP1` describes transferred UI bootstrap
+endpoints, and `USC1` carries Init↔SurfaceServer install/activate/show/retire
+commands and acknowledgements. The fixed scenario completes seven lifecycle
+transactions—launch/activate/suspend/resume/terminate App generation 1, then
+launch/activate App generation 2—with 35 committed `ALC1` messages and 14
+committed `USC1` messages. The lifecycle action histogram is `2/2/1/1/1`;
+USC install/activate/show/retire operations are `2/3/1/1`, including two
+endpoint-transfer commands. The first App exits cleanly, is waited and reaped,
+and the second App reuses process-table slot 8 with PID generation advanced
+from `0x0000000100000008` to `0x0000000200000008`. SurfaceServer retires the
+old UI endpoint and buffer, clears stale focus/capture identity, installs the
+new generation, and keeps the global frame sequence monotonic.
+
+The M33 QEMU acceptance fixes the process ledger at
+created/exited/reaped/live `10/2/2/8`, with 29 live handles, 26 Channel
+endpoints/13 peer pairs, and eight pending object-wait tokens split as two
+legacy-many plus six array waits. Its five resident window links—Init↔Surface,
+Init↔Launcher, Init↔App, Surface↔Launcher, and Surface↔App—are all present.
+This is a scripted two-generation proof, not a general application manager:
+arbitrary applications, windows, and z-order remain future work. The default
+M32 profile continues to provide the interactive input-routing and screenshot
+acceptance.
+
+M34 adds a second bounded profile, `app-crash-recovery-runtime`. Its ten-step
+scenario launches and activates App generation 1, suspends and resumes it,
+terminates it gracefully, launches and activates generation 2, then uses ABI
+v18 `ProcessTerminate` while that App is blocked in `ObjectWaitManyArray`.
+`ProcessWait` must report `Killed`/137. SurfaceServer observes the UI Channel
+peer close, atomically removes the dead generation's endpoint and
+GraphicsBuffer, clears focus/capture/pointer identity, returns focus to
+Launcher, preserves the monotonic compositor frame sequence, and emits an
+authenticated `USC1 OwnerDied` notification. Init records the crashed state,
+then launches and activates App generation 3 in the same process-table slot.
+The three exact PIDs are `0x0000000100000008`,
+`0x0000000200000008`, and `0x0000000300000008`.
+
+The dedicated M34 QEMU acceptance completes 46 `ALC1` messages and 19 `USC1`
+messages across ten transactions, including one owner-death notification. Its
+terminal process ledger is created/exited/reaped/live `11/3/3/8`, with exit
+reasons `2/0/1`, termination `1/1`, 29 handles, 26 Channel endpoints/13 peer
+pairs, eight pending wait tokens (`2` legacy-many + `6` array), and abandoned
+waits `0/0/1`. This proves one exact crash/restart path, not a general restart
+policy or arbitrary application manager. Surface input forwarding code is
+present in this profile, but the M34 checker does not yet inject pointer input,
+so the existing M32 interaction suite remains the input-routing evidence.
+
+The accepted dedicated marker is:
+
+```text
+APP_CRASH_RECOVERY_OK protocol=1 messages=46 errors=0 transactions=10 completed=10 requests=9 states=19 crashes=1 commands=9 acks=9 actions=3/3/1/1/1 transfer_commands=3 first_instance=1 last_instance=3 first_pid=0x0000000100000008 crashed_pid=0x0000000200000008 last_pid=0x0000000300000008 slot_reused=1 generations_advanced=2 created=11 exited=3 reaped=3 live=8 reasons=2/0/1 terminate=1/1 handles=29 endpoints=26 object_pending=8 many_pending=2 array_pending=6 abandoned=0/0/1 process_waits=4/3/2/2/1/1 graphics_generation=3 supervisor=19/0/10/10 supervisor_messages=9/9/1 supervisor_operations=3/4/1/1 supervisor_transfer=3 topology=exact final_state=active final_app_resident=1
+BOOT_OK: M34 app owner-death cleanup and generation-safe crash restart verified
+```
+
+M35 adds the separately selected `mapped-graphics-runtime` profile on ABI v19.
+Each App generation creates a mappable 75-page/307200-byte GraphicsBuffer and
+maps the producer view read-write at `0x0000000200100000`; SurfaceServer maps
+the same physical backing read-only in its own ASID/root. App renders directly
+with volatile EL0 stores. Queue validates all 76544 canonical XRGB8888 pixels
+and zero page padding before Arm break-before-make changes all producer leaves
+from RW to RO and performs ASID-scoped TLBI. Acquire exposes the queued
+generation only to the mapped SurfaceServer consumer. Cancel/release or a
+successful mapped present changes the producer leaves back to RW with the same
+BBM discipline. SurfaceServer performs volatile EL0 reads of the first, middle,
+and last pixels on every acquire, so the acceptance proves a real data-plane
+alias rather than only matching mapping metadata. Explicit unmap clears leaves
+and invalidates the ASID before dropping the mapping pin.
+
+The seven-transaction M35 run covers two App generations and four complete
+Queue/Acquire cycles: two cancel/release cycles and two mapped presents. App1
+and its SurfaceServer view unmap explicitly; the final App2 producer and
+consumer maps remain as one 75-page shared physical pair. No legacy copy-write
+or copy-present operation participates. The exact accepted markers are:
+
+```text
+MAPPED_GRAPHICS_OK abi=19 protocol=1 messages=35 errors=0 transactions=7 completed=7 supervisor=14/0/7/7 first_instance=1 last_instance=2 first_pid=0x0000000100000008 last_pid=0x0000000200000008 created=10 exited=2 reaped=2 live=8 handles=29 endpoints=26 waits=8/2/6 process_waits=3/2/1 buffers=2 mappable=2 map=4/4 unmap=2/2 queue=4/4 acquire=4/4 explicit_release=2/2 releases=4 mapped_presents=2 total_presents=2 validated_pixels=306176 validated_bytes=1224704 copy_writes=0/0 mappings=2/150 protects=8 producer=1/rw consumer=1/ro shared_pairs=1 physical_alias=1 identity=1 buffer_generation=2 contexts_distinct=1 topology=exact final_state=active final_app_resident=1
+BOOT_OK: M35 shared mapped BufferQueue and acquire/release fences verified
+```
+
+This is still a single-slot queue on a single CPU, not a product compositor.
+There is no vsync/frame clock or pacing, multi-buffer swapchain, DMA-BUF,
+IOMMU-backed device sharing, multi-window composition, or z-order. The mapped
+profile is not yet combined with the M34 crash profile, and if SurfaceServer
+dies after Acquire the buffer still needs automatic consumer-owner-death
+abandon/release before its producer can become writable again. M36 closes that
+specific leak as described below; this M35 marker remains the exact preceding
+milestone evidence.
+
+M36 adds the separately selected `graphics-owner-death-runtime` profile without
+changing ABI v19. Its exact scenario launches one mapped App producer, maps the
+same 75-page buffer read-only into SurfaceServer, queues and acquires generation
+1, then terminates SurfaceServer. A normal consumer cannot unmap a queued or
+acquired frame, and a process cannot close its still-mapped GraphicsBuffer
+handle. On reaping the stopped SurfaceServer, address-space mapping metadata
+rather than its handle table is authoritative: the reaper retains the mapping
+pin, destroys the consumer leaves and invalidates that ASID, then uses BBM plus
+ASID-scoped TLBI to restore the surviving producer from RO to RW before it
+generation-safely abandons/releases the frame and wakes object waiters. The
+state machine supports both Queued and Acquired owner death; this dedicated
+QEMU run exercises Acquired, while host tests cover both branches.
+
+After the wake, App rewrites all 75 pages through EL0, checks mapped samples,
+explicitly unmaps, closes, and exits. The exact ledger proves two successful
+maps, one rejected consumer unmap, one successful explicit producer unmap, two
+mapping removals, one owner-death release with no explicit release syscall, and
+zero final mapping/page/surface/GraphicsBuffer-handle residue. The display is
+deliberately left Degraded because M36 does not restart or rebind SurfaceServer.
+The accepted markers are:
+
+```text
+GRAPHICS_OWNER_DEATH_OK abi=19 protocol=1 messages=5 errors=0 transactions=1 completed=1 supervisor=2/0/1/1 consumer_pid=0x0000000100000006 producer_pid=0x0000000100000008 created=9 exited=3 reaped=3 live=6 handles=19 endpoints=19 waits=4/2/2 process_waits=4/3/1 owner=1/1/0/1/1/0/1 wake_nonzero=1 buffers=1 map=2/2 unmap_syscalls=2/1 mappings_removed=2 denied_consumer_unmap=1 denied_mapped_close=1 queue=1/1 acquire=1/1 explicit_release=0/0 releases=1 mappings=0/0 protects=2 surfaces=0 graphics_handles=0 producer=0/unmapped consumer=0/unmapped shared_pairs=0 el0_rewrite=all-pages explicit_cleanup=1 surface_absent=1 app_exited=1
+BOOT_OK: M36 graphics consumer owner-death release and producer recovery verified
+```
+
+M37 adds the separately selected `graphics-surface-restart-runtime` profile.
+It intentionally proves one deterministic recovery window: Init terminates the
+generation-1 SurfaceServer after it acquires App's mapped frame; the M36 reaper
+path first removes the stopped consumer alias, restores the resident producer
+RW, releases the frame, and wakes App. The display freezes the last scene while
+the trusted process supervisor spawns SurfaceServer generation 2. A single
+atomic reacquire changes Surface session `1→2`, replaces the trusted binding,
+resets the new server's frame/input namespace, and preserves the frozen
+scene/scanout digest.
+
+Launcher and the still-resident App detect their old UI peers closing, receive
+new authenticated endpoints, and bind to the replacement SurfaceServer. App
+rewrites the mapped generation-2 frame, transfers the attenuated consumer
+view, and the replacement server maps it read-only, acquires, validates, and
+presents it as session-2 frame 1. The final topology again contains eight live
+processes, 29 handles, 26 endpoints/13 pairs, two live 75-page aliases, an
+Active resident App, and a userspace-owned Surface. The accepted markers are:
+
+```text
+GRAPHICS_SURFACE_RESTART_OK abi=19 protocol=1 messages=10 errors=0 transactions=2 completed=2 supervisor=4/0/2/2 old_surface=0x0000000100000006 new_surface=0x0000000200000006 app=0x0000000100000008 sessions=1/2 created=10 exited=2 reaped=2 live=8 handles=29 endpoints=26 waits=8/2/6 process_waits=3/2/1 owner=1/1/0/1/1/0/1 wake_nonzero=1 reacquire=1 discarded_input=0 buffers=1 map=3/3 unmap_syscalls=1/0 mappings_removed=1 queue=2/2 acquire=2/2 explicit_release=0/0 releases=2 mapped_presents=1 total_presents=1 validated_pixels=153088 validated_bytes=612352 mappings=2/150 protects=4 producer=1/rw consumer=1/ro shared_pairs=1 physical_alias=1 identity=1 surface_session=2 surface_owner=replacement frame=1 topology=exact final_state=active final_app_resident=1
+BOOT_OK: M37 SurfaceServer restart, client rebind, and mapped frame recovery verified
+```
+
+This is not a general service watchdog. It does not define retry backoff,
+restart budgets, repeated-crash handling, crash-loop quarantine, or a generic
+service dependency graph. Producer-death/orphan reclamation and two-slot reuse
+remain outside this M37 run and are covered by the separate M38 profile below.
+
+M38 adds the separately selected `graphics-producer-orphan-runtime` profile
+without changing ABI v19. App creates and maps both 307200-byte static backing
+slots, transfers authenticated consumer views to SurfaceServer, queues slot 0,
+and leaves it Acquired while slot 1 remains Writable. Init then terminates and
+waits for App first, so the SurfaceServer-held references become producer
+orphans, and only afterward terminates and waits for SurfaceServer. Reaping the
+stopped consumer removes its mappings before the generation-safe orphan
+release; closing the remaining references scrubs every byte of both complete
+backings and advances both nonzero slot generations.
+
+Launcher then reuses both vacant slots, maps them, and proves all 307200 bytes
+of each backing are zero before writing and verifying canonical pixels. A
+third concurrent allocation returns `OutOfMemory`, proving the two-slot bound;
+explicit unmap/close leaves no graphics mappings, surfaces, or handles. The
+four creates comprise the original pair and the reused pair, both final slot
+generations are 3, and the accepted profile marker is:
+
+```text
+GRAPHICS_PRODUCER_ORPHAN_OK abi=19 protocol=1 messages=5 errors=0 transactions=1 completed=1 supervisor=2/0/1/1 consumer_pid=0x0000000100000006 producer_pid=0x0000000100000008 reuser_pid=0x0000000100000007 created=9 exited=3 reaped=3 live=6 reasons=1/0/2 handles=18 endpoints=18 pairs=9 waits=4/2/2 process_waits=4/3/1 owner=1/2/0/1/0/1/1 wake_nonzero=1 buffers=4 mappable=4 exhausted=1 map=6/6 unmap_syscalls=3/2 mappings_removed=6 protects=1 queue=1/1 acquire=1/1 explicit_release=0/0 releases=1 mappings=0/0 surfaces=0 graphics_handles=0 pool=2/2 reused=2 generations=3/3 vacant=2 scrubbed=2 producer=absent consumer=absent topology=exact
+BOOT_OK: M38 producer orphan reclamation and two-slot graphics-buffer reuse verified
+```
+
+This is a deterministic ownership/reuse proof, not a true multi-buffer
+swapchain. Its frame-scheduling gap is addressed only by the bounded M39
+software-clock profile below.
+
+M39 advances the shared interface to ABI v20 and adds the separately selected
+`graphics-frame-clock-runtime`. The architectural timer remains a 100 Hz
+logical tick; a fixed divider of 2 produces a nominal 50 Hz software frame
+clock. This is not hardware display vblank, scanout page-flip completion, or a
+physical refresh guarantee. The clock uses an explicit
+`Disarmed → Waiting → Ready → Outstanding` state machine. Absolute fixed-phase
+deadline advancement coalesces arbitrarily late ticks in O(1): at most one
+level-triggered `FRAME_READY` edge and one epoch-qualified grant can be pending,
+while additional elapsed boundaries are counted as suppressed.
+
+`FRAME_READY` is object-signal bit 4. Register-only syscall 37
+`SurfaceFrameAcquire` atomically clears that level signal and moves the exact
+grant to Outstanding. A Surface present without an outstanding grant is
+rejected. Validation failure preserves the same grant for retry; only a
+successful display commit consumes it and returns the clock to Waiting.
+Surface degradation explicitly accounts for a discarded Ready opportunity or
+a cancelled Outstanding grant instead of silently losing pacing state.
+
+The dedicated QEMU proof keeps one App, one mapped buffer, and the complete
+resident service topology. It performs three grant-gated mapped commits,
+observes three ungated-present rejections and one validation-failure grant
+preservation, and converges with a fourth opportunity in Ready state. Its exact
+accepted evidence is:
+
+```text
+GRAPHICS_FRAME_CLOCK_OK abi=20 protocol=1 clock=software-timer tick_hz=100 frame_hz=50 divider=2 phase=ready calls=3/3/0/0 opportunities=4 edges=4 acquired=3 presented=3 suppression=observed pending=1 outstanding=0 discarded=0 cancelled=0 epochs=3/3 grant_preserved=1 ungated_rejects=3 messages=10 errors=0 transactions=2 completed=2 supervisor=4/0/2/2 created=9 exited=1 reaped=1 live=8 handles=29 endpoints=26 waits=8/2/6 process_waits=2/1/1 buffers=1 mappable=1 map=2/2 unmap=0/0 queue=4/4 acquire=4/4 explicit_release=1/1 releases=4 mapped_presents=3 total_presents=3 validated_pixels=306176 validated_bytes=1224704 copy_writes=0/0 mappings=2/150 protects=8 producer=1/rw consumer=1/ro shared_pairs=1 physical_alias=1 identity=1 buffer_generation=1 write_generation=4 contexts_distinct=1 topology=resident final_state=ready final_app_resident=1
+BOOT_OK: M39 software frame clock and gated mapped presents verified
+```
+
+The following M40 section is retained as historical previous-milestone
+evidence. M40 keeps ABI v20 and adds the separately selected
+`graphics-swapchain-runtime`. One resident App owns two distinct mapped
+GraphicsBuffer identities while SurfaceServer holds both consumer views. Both
+slots can be simultaneously in flight: the deterministic six-acquire order is
+`A-B-A-B-A-B`, the three successful software-paced commits are
+`A2 → B2 → A3`, and the next `B3` frame remains Acquired at the final boundary.
+Each committed buffer is released only after its pixels have been copied to the
+software scanout (`release=post-copy`); this is not hardware page-flip
+completion.
+
+The successful ABA trajectory preserves allocation generation 1 in both
+slots while advancing both write generations to 3. Failed paths are
+transactionally inert: two queue attempts while already in flight, one repeat
+buffer acquire, one repeat frame-grant acquire, one pool-exhaustion probe, four
+no-grant presents, and one validation failure do not advance the corresponding
+queue, acquisition, frame, or grant ledger. The validation failure preserves
+the outstanding grant for retry. Final resident evidence is 31 handles, four
+75-page mappings (300 pages total), two identity-matched physical alias pairs,
+one App address space with one RW and one RO producer mapping, and two RO
+SurfaceServer consumer mappings in a distinct ASID/root.
+
+The pacing source remains the same 100 Hz logical timer divided by 2. Nominal
+50 Hz is therefore a software scheduling rate, not hardware vblank, scanout
+page-flip, or physical-refresh evidence. The exact dedicated M40 evidence is:
+
+```text
+GRAPHICS_SWAPCHAIN_OK abi=20 protocol=1 clock=software-timer release=post-copy tick_hz=100 frame_hz=50 divider=2 phase=ready calls=4/3/0/1 opportunities=4 edges=4 acquired=3 presented=3 suppression=observed pending=1 outstanding=0 discarded=0 cancelled=0 epochs=3/3 grant_preserved=1 ungated_rejects=4 messages=10 errors=0 transactions=2 completed=2 supervisor=4/0/2/2 created=9 exited=1 reaped=1 live=8 handles=31 endpoints=26 waits=8/2/6 process_waits=2/1/1 buffers=2 mappable=2 pool_exhaustions=1 map=4/4 unmap=0/0 queue=8/6 acquire=7/6 explicit_release=2/2 releases=5 mapped_presents=3 total_presents=3 validated_pixels=459264 validated_bytes=1837056 copy_writes=0/0 mappings=4/300 protects=11 producer=2/mixed consumer=2/ro shared_pairs=2 physical_alias=1 identities=2 owner_pairs=2 allocation_generations=1/1 write_generations=3/3 refs=4/4 pool=1/0/1 peaks=2/2/2 dual=4 selective=4 per_slot_queue=3/3 per_slot_acquire=3/3 per_slot_release=3/2 acquire_order=0-1-0-1-0-1 switches=5 schedule=0:2/1:2/0:3 next=1:3 final_buffers=writable/acquired contexts_distinct=1 topology=resident final_state=ready final_app_resident=1
+BOOT_OK: M40 resident two-buffer software-paced swapchain verified
+```
+
+M41 keeps ABI v20 and adds the separately selected `multi-window-runtime`.
+Window policy now lives in userspace SurfaceServer and uses strict canonical
+64-byte `BWC1` commands and `BWE1` events; malformed wire data fails closed.
+The bounded scene contains a 208×368 Launcher layer and one 112×160 App layer,
+supports create/present/raise, retained solid content, z-order changes,
+occlusion-aware damage, focus, press-to-release capture, and signed client-local
+coordinates while captured. The kernel still receives only the final composed
+full-buffer commits.
+
+SurfaceServer exclusively owns the two output GraphicsBuffer slots. Six
+software-timer-paced commits alternate `A-B-A-B-A-B` with write generations
+`1-1/2-2/3-3` and post-copy release. The exact proof includes a fully occluded
+1024-pixel Launcher update that causes no output commit, a partially visible
+Launcher update, App-local damage, two raises, App capture during an out-of-bounds
+drag, then Launcher focus/capture after its raise. The dedicated guest evidence is:
+
+```text
+WINDOW_COMPOSITOR_OK abi=20 protocol=1 policy=userspace capacity=2 live=2 z=launcher-app commands=9/2/5/2 events=14/2/5/2 input=5 capture=app-then-launcher signed=2 focus=1-2 damage=100864/97536/3328 hidden=1 retained=1 raises=35840 output=full-buffer frames=6 schedule=0-1-0-1-0-1 generations=1-1/2-2/3-3 clock=software-timer release=post-copy opportunities=7 edges=7 acquired=6 presented=6 pending=1 lifecycle=10/0/2/2 supervisor=4/0/2/2 processes=9/1/1/8 handles=31 endpoints=26 buffers=2 map=2/2 queue=6/6 acquire=6/6 releases=6 validates=459264/1837056 mappings=2/150 protects=12 producer=2/rw consumer=0 shared_pairs=0 physical_alias=0 pool=2/0/0 peaks=1/1/1 per_slot=3/3/3/3/3/3 waits=8/2/6 topology=resident final_state=ready final_app_resident=1
+BOOT_OK: M41 bounded userspace two-window z-order, occlusion, damage, and input capture verified
+```
+
+`scripts/check-multi-window.sh` injects both pointer phases through QMP and
+accepts only the exact guest marker, boot marker, lifecycle/process/pool ledgers,
+and the following host-side coordinate evidence:
+
+```text
+MULTI_WINDOW_OK phase1_raw=13970/12587->136/184 drag_raw=7396/6568->72/96 phase2_raw=13970/12587->136/184 markers=1/1/1/1
+```
+
+The M41 marker above is retained as historical prefix evidence. M42 keeps ABI
+v20 and selects `persistent-window-runtime`. SurfaceServer now remains in one
+dynamic four-source wait loop after the M41 prefix, with command and event
+trackers guarding canonical continuation. Its complete pointer-contact state
+machine distinguishes idle, active capture, reject-until-release, and quiescent
+completion: an outside initial press is dropped through release, while a
+captured contact may move and release outside with signed client-local
+coordinates. Client peer close removes the retained layer and clears focus and
+capture, but deliberately does not claim automatic process restart.
+
+The extension routes App, Launcher, then App capture (`focus_routes=1-2-3`),
+destroys App slot 1 generation 1, exposes exactly 53760 Launcher pixels,
+recreates the same slot at generation 2, presents its complete 112×160 layer,
+and accepts an idempotent raise. `PixelLedger` checks each destroy/create/
+present/raise result. Before sending READY, userspace also asserts a quiescent
+contact, Launcher slot 0 generation 1, App slot 1 generation 2 at the top of
+z-order, no capture, and `final_focus=none/4`. Two SurfaceServer-owned output
+slots therefore commit `A-B-A-B-A-B-A-B` (`ABABABAB`), with paired write generations
+`1-1/2-2/3-3/4-4`. The exact dedicated guest evidence is:
+
+```text
+WINDOW_SESSION_OK abi=20 protocol=1 policy=userspace persistent=1 capacity=2 live=2 z=launcher-app commands=13/3/6/3/1 events=21/3/6/3/8/1 input=8 raw=14 dropped=6 capture=app-launcher-app signed=4 focus_routes=1-2-3 final_focus=none/4 generation=app1-app2 damage=118784/115456/3328 exposure=53760 hidden=1 retained=1 output=full-buffer frames=8 schedule=0-1-0-1-0-1-0-1 generations=1-1/2-2/3-3/4-4 clock=software-timer release=post-copy opportunities=9 edges=9 acquired=8 presented=8 pending=1 lifecycle=10/0/2/2 supervisor=4/0/2/2 processes=9/1/1/8 handles=31 endpoints=26 buffers=2 map=2/2 queue=8/8 acquire=8/8 releases=8 validates=612352/2449408 mappings=2/150 protects=16 producer=2/rw consumer=0 pool=2/0/0 peaks=1/1/1 per_slot=4/4/4/4/4/4 outside=reject-until-release captured_outside=signed-local waits=8/2/6 topology=resident final_state=ready final_app_resident=1
+BOOT_OK: M42 persistent userspace window session, boundary routing, and generation-safe recreation verified
+```
+
+`scripts/check-persistent-window.sh` preserves the exact M41 prefix, injects a
+third outside/captured phase through QMP, and accepts only the guest marker,
+boot marker, device/storage evidence, and this host-side result. Every QMP
+absolute/touch transition is now paced by the exact complete guest
+`USER_INPUT_READ_OK` sequence/coordinates/pressed sample instead of a fixed
+host sleep, preventing input-state coalescing under full-suite load. The
+hardened checker passed 3/3 isolated runs and the complete offline suite:
+
+```text
+PERSISTENT_WINDOW_OK phase1_raw=13970/12587->136/184 drag_raw=7396/6568->72/96 phase2_raw=13970/12587->136/184 phase3_outside_raw=2055/1369->20/20 captured_local=-84/-124 markers=1/1/1/1/1
+```
+
+M42 remains capacity 2 with solid retained layers. Kernel trace extensions are
+bounded acceptance witnesses; after they complete, canonical continuation is
+protected by userspace trackers rather than an unbounded kernel ledger.
+Peer-close cleanup is not an automatic restart policy. There is still no
+keyboard text path in the historical M42 seal.
+
+M43 keeps the complete M42 transcript as a bounded prefix and selects
+`text-input-runtime`. ABI-v21 adds a Surface-owned 32-entry hardware-key
+transition FIFO, level-triggered `KEY_READY` bit 5, and register-only syscall
+38 `SurfaceReadKey`. SurfaceServer delivers keys only to the focused App under
+one generation-qualified window/session/focus identity. Strict canonical
+64-byte `BTI1` commands (`Activate`, `StateAck`, `Deactivate`) and `BTE1` events
+(`Activated`, `Preedit`, `Commit`, `DeleteSurrounding`, `Rendered`,
+`Deactivated`) carry contiguous sequences, exact acknowledgements, revisions,
+UTF-8 byte selections, and a zero-padded eight-byte tail. The allocation-free
+editor holds at most eight UTF-8 bytes plus one scalar preedit.
+
+The dedicated QEMU witness clicks App, injects `A`, Enter, Backspace, `A`,
+Enter, then focuses Launcher and injects one unfocused `A`. It observes five
+authenticated render acknowledgements, a final single white `A` glyph, and
+focus-loss deactivation; the unfocused key pair is consumed without reaching
+the editor. Its exact guest and host evidence is:
+
+```text
+TEXT_INPUT_OK abi=21 protocol=1 wires=BTI1/BTE1 wire=64 session=1 window=app2 focus=none4-app5-launcher6 messages=19/0 commands=7/1/5/1 events=12/1/2/2/1/5/1 revisions=0-1-2-3-4-5 editor=utf8-8 preedit=1 committed=a keys=12/6/6 active=10/5/5 unfocused=2 fifo=12/12/0/32 raw=24 reports=12 transitions=12 renders=5 field=8/16/96/16 pixels=1536 glyph=64 colors=111118/facc15/f4f4f5 digests=90a60d86afe0de65/6e9b51d9b30b78a5/474faa238cb15725 frames=9-10-11-12-13 output=13 schedule=0-1-0-1-0-1-0-1-0-1-0-1-0 write_generations=7/6 damage=126464/123136/3328 pointer=20/12/8 capture=app-launcher-app-app-launcher clock=14/14/13/13/1 graphics=13/13/13/13 validates=995072/3980288 mappings=2/150 protects=26 per_slot=7/6/7/6/7/6 waits=8/2/6 topology=resident final_state=ready final_app_resident=1
+BOOT_OK: M43 focus-scoped hardware keyboard and bounded UTF-8 text-editor slice verified
+TEXT_INPUT_QMP_OK phase1=1 phase2=1 persistent=1 app_focus=136/184 keys=a-ret-backspace-a-ret key_pairs=6 transitions=12 active=10/5/5 renders=5 launcher_focus=72/96 unfocused=2/drop field=112/160/96/16 committed_pixels=64 background_pixels=1472 screenshot=target/bndroid-m43-text-field.ppm markers=1/1/1/1/1/5/1/1/1
+```
+
+This is deliberately not a complete IME. Runtime key mapping is only Latin
+`a`, Enter, and Backspace; the rasterizer contains one fixed `A` bitmap. There
+is no candidate UI, locale/composition engine, arbitrary Unicode keyboard
+mapping, grapheme-aware editing, font shaping, soft keyboard, independent
+InputServer, or physical-phone keyboard proof.
+
+## M44 historical fully verified seal
+
+M44 preserves ABI v21, every syscall, the seven-image/process topology, and the
+complete M43 transcript as an immutable prefix. The new allocation-free,
+`no_std` `bndr-input` crate provides a bounded `InputMethodEngine` and has 19
+host tests. `soft-keyboard-runtime` places that engine inside SurfaceServer
+(`input_method=in_surface`, `input_server=0`), so M44 adds neither a syscall nor
+a process. The compositor owns one trusted `system/nonfocusable` overlay rather
+than treating the keyboard as an application window; it cannot take App focus
+or pointer capture through the ordinary two-window policy.
+
+The fixed tablet-driven overlay exposes exactly three keys: `A`, Backspace, and
+Enter. Five press/release contacts (`A`, Enter, Backspace, `A`, Enter) cross
+`BTI1`/`BTE1` sessions 2 and 3, produce two preedits, two commits, one
+delete-surrounding action, five authenticated editor renders, and final
+committed text `aa`. The overlay follows focus as `show-hide-show`; touching
+the old `A` coordinates while it is hidden produces no text. The extension is
+exactly 21 messages and eight output commits over frames 14--21, and the final
+resident wait topology remains `8/2/6`. The source-of-truth guest seal is:
+
+```text
+SOFT_KEYBOARD_OK abi=21 protocol=1 prefix=m43 input_method=in_surface input_server=0 process_delta=0 windows=2 overlay=system/nonfocusable source=tablet hardware_delta=0 fifo_delta=0 contacts=9 soft=5/5 preedit=2 commit=2 delete=1 focus=launcher6-app7-launcher8-app9 visibility=show-hide-show hidden_text=0 sessions=2-3 messages=21/0 commands=8/2/5/1 events=13/2/2/2/1/5/1 state=aa editor=utf8-8 renders=5 outputs=8 frames=14-21 overlay_bounds=0/272/208/96 scanout=56/336/208/96 pixels=19968 pointer=47/27/10/17 graphics=21/21/21/21 validates=1607424/6429696 clock=22/22/21/21/1 write_generations=11/10 per_slot=11/10/11/10/11/10 waits=8/2/6 topology=resident final_state=ready final_app_resident=1
+BOOT_OK: M44 touch soft keyboard and focus-preserving text input verified
+```
+
+The hardened dedicated QEMU checker passes and verifies three independent
+screenshots: `target/bndroid-m44-soft-keyboard-visible.ppm`,
+`target/bndroid-m44-soft-keyboard-hidden.ppm`, and
+`target/bndroid-m44-soft-keyboard.ppm`. Current host evidence is 549 default
+workspace tests (`21/51/19/19/31/112/0/296` for ABI/compositor/ELF/input/
+ServiceManager/UI/init/kernel), 324 tests in the soft-keyboard kernel build,
+and 28 feature-filtered additions (`11 ui_trace + 10 window_trace + 3
+persistent + 1 text_input + 3 soft_keyboard`) for 577 unique host tests. The
+complete repository-wide `./scripts/test.sh` exits 0 with:
+
+```text
+BNDROID_TEST_SUITE_OK qemu_boot_profiles=5 framebuffer=1 keyboard_qmp=1 tablet_touch_qmp=1 compositor_interaction=1 userspace_surface=1 userspace_ui=1 ui_screenshot=1 process_terminate=1 app_lifecycle=1 app_crash_recovery=1 mapped_graphics=1 graphics_owner_death=1 graphics_surface_restart=1 graphics_producer_orphan=1 graphics_frame_clock=1 graphics_swapchain=1 multi_window=1 persistent_window=1 text_input=1 soft_keyboard=1 storage_negative_cases=11 persistence_reboot=1 recovery=1 irq_race=1
+```
+
+This remains a bounded three-key touch witness, not a product InputServer or a
+complete IME. It has no candidate bar, locale model, arbitrary-Unicode input,
+grapheme-aware editing, shaping/font stack, multipoint or physical-touchscreen
+proof. Networking, telephony/cellular, Wi-Fi, audio, power management,
+production hardware, secure boot, application sandboxing, secure update, and a
+usable phone UX also remain absent; M44 is not a real-world usable phone OS.
+
+## M45 historical fully verified seal
+
+M45 advances the shared ABI to v22 while preserving syscalls 0--38. It reuses
+the existing level-triggered `READABLE`/`PEER_CLOSED` object signals and adds two register-only entries:
+syscall 39 `InputAcquire` and syscall 40 `InputReadEvent`. Only the live,
+authenticated InputServer image may acquire the unique `InputCapability`; its
+rights are exactly `READ | WAIT` (`0x101`), and the handle cannot be duplicated
+or transferred. The kernel owns a capacity-64 physical-event broker. The M45
+run enqueues and dequeues all 59 events with no pending or coalesced event,
+high-water 1, sequence `1--59`/next 60, and composition `pointer47 + key12`.
+Neither legacy Surface input FIFO nor Surface key FIFO is read.
+
+The new `input-server-runtime` uses eight distinct embedded ELFs and a
+capacity-9 process table (`init + 8 dynamic`) across 12 scheduler contexts;
+the feature-off default remains the seven-image, capacity-8, 11-context M32
+profile. InputServer owns generation-qualified routing, focus, capture,
+text-context, and the bounded IME. SurfaceServer retains compositor, window,
+and output ownership. Both directions use strict canonical little-endian
+64-byte `BIC1`/`BIE1` messages. The guest source-of-truth transcript is:
+
+```text
+TEXT_INPUT_OK abi=22 protocol=1 prefix=m45 wires=BTI1/BTE1+BIC1/BIE1 wire=64 session=1 window=app2 focus=none4-app5-launcher6 messages=19/0 commands=7/1/5/1 events=12/1/2/2/1/5/1 revisions=0-1-2-3-4-5 editor=utf8-8 preedit=1 committed=a keys=12/6/6 active=10/5/5 unfocused=2 broker=32/32/0/1 next=33 surface_fifo=0/0 raw=24 reports=12 transitions=12 renders=5 field=8/16/96/16 pixels=1536 frames=9-13 output=13 pointer=20/12/8 capture=app-launcher-app-app-launcher clock=14/14/13/13/1 graphics=13/13/13/13 validates=995072/3980288 mappings=2/150 protects=26 input_method=in_input_server input_server=1 process_delta=1 waits=9/2/7 topology=resident final_state=ready final_app_resident=1
+INPUT_SERVER_KERNEL_OK abi=22 pid=4294967302 session=1 capacity=64 enqueued=59 dequeued=59 pending=0 high_water=1 coalesced=0 sequence_next=60 process_capacity=9 dynamic_capacity=8 scheduler_contexts=12 route=broker-only surface_fifo=0
+SOFT_KEYBOARD_OK abi=22 protocol=1 prefix=m45 input_method=in_input_server input_server=1 process_delta=1 windows=2 overlay=system/nonfocusable source=tablet hardware_delta=0 surface_fifo=0/0 broker=59/59/0/1/0 next=60 contacts=9 soft=5/5 preedit=2 commit=2 delete=1 focus=launcher6-app7-launcher8-app9 visibility=show-hide-show hidden_text=0 sessions=2-3 messages=21/0 commands=8/2/5/1 events=13/2/2/2/1/5/1 state=aa editor=utf8-8 renders=5 outputs=8 frames=14-21 overlay_bounds=0/272/208/96 scanout=56/336/208/96 pixels=19968 pointer=47/27/10/17 graphics=21/21/21/21 validates=1607424/6429696 clock=22/22/21/21/1 write_generations=11/10 per_slot=11/10/11/10/11/10 waits=9/2/7 topology=resident final_state=ready final_app_resident=1
+INPUT_SERVER_OK abi=22 protocol=1 wires=BIC1/BIE1 wire=64 owner=unique pid=4294967302 session=1 capacity=64 events=59/59/0 high_water=1 coalesced=0 sequence=1-59 next=60 physical=pointer47+key12 surface_fifo=0/0 legacy_key_reads=0 routes=generation-qualified focus=server capture=server ime=server processes=10/1/1/9 process_capacity=9/8 input_server=1/3 handles=36 endpoints=30 pairs=15/2 waits=9/2/7 topology=resident final_state=ready final_app_resident=1
+BOOT_OK: M45 dedicated InputServer routing, capture, and input-method ownership verified
+```
+
+The hardened checker also emits:
+
+```text
+INPUT_SERVER_QMP_OK phase1=1 phase2=1 persistent=1 broker=kernel/userspace surface_fallback=0 hardware_keys=a-ret-backspace-a-ret hardware_pairs=6 soft_keys=a-enter-backspace-a-enter soft_contacts=5 hidden_text=0 visibility=show-hide-show screenshots=visible-hidden-final visible_sha256=2b140efbc26f0f48cb7c0b33e0299a2e24d4720bc207fd780490c10741f5fcf3 final_sha256=1d466ebb9c519c31f9c2f7a86c742efb36d2493e0283e2d532b10de549ed1994 markers=kernel/text/runtime/boot
+```
+
+The three verified screenshots are
+`target/bndroid-m45-input-server-visible.ppm`,
+`target/bndroid-m45-input-server-hidden.ppm`, and
+`target/bndroid-m45-input-server.ppm`. The repository-wide host ledger is 599
+default tests (`26/51/19/64/31/112/0/296` for
+ABI/compositor/ELF/input/ServiceManager/UI/init/kernel) plus 24 directed
+feature-filter tests (`11 ui_trace + 10 window_trace + 3 persistent`) for 623
+executed/unique tests; the `input-server-runtime` kernel build has 334 tests.
+The complete `./scripts/test.sh` exits 0 with:
+
+```text
+BNDROID_TEST_SUITE_OK qemu_boot_profiles=5 framebuffer=1 keyboard_qmp=1 tablet_touch_qmp=1 compositor_interaction=1 userspace_surface=1 userspace_ui=1 ui_screenshot=1 process_terminate=1 app_lifecycle=1 app_crash_recovery=1 mapped_graphics=1 graphics_owner_death=1 graphics_surface_restart=1 graphics_producer_orphan=1 graphics_frame_clock=1 graphics_swapchain=1 multi_window=1 persistent_window=1 text_input=1 soft_keyboard=1 input_server=1 storage_negative_cases=11 persistence_reboot=1 recovery=1 irq_race=1
+```
+
+M45 is a separate bounded system service, not a product InputServer or complete
+IME. It still lacks candidate and locale systems, grapheme-aware editing,
+shaping/font infrastructure, arbitrary Unicode, multipoint input, physical
+phone-hardware proof, and restart/backoff/audit/permission integration.
+Networking, cellular/telephony, Wi-Fi, audio, power management, secure boot,
+sandboxing, secure updates, production drivers, and a real-device UX remain
+unimplemented; this is not yet a real-world usable phone OS.
+
+## M46 historical fully verified seal
+
+M46 keeps ABI v22 and syscalls 0--40 byte-for-byte unchanged. It is an
+independent `input-server-surface-restart-runtime` leaf rooted at the frozen
+M41 checkpoint, not a replay or extension of the M42--M45 physical broker
+transcripts. A deterministic M41 semantic fixture reconstructs exactly 23
+window traces, 9 commands, 14 events, and 6 output commits inside the old
+SurfaceServer; those events are explicitly fixture traffic rather than
+physical broker input.
+
+The new recovery path uses an eight-message `BIR1` route-control transcript
+and an eleven-message `BSR1` recovery transcript. `BSR1` has six strict,
+fixed-size 64-byte message kinds; its authenticated directions are exactly
+`Surface->Init=4`, `Init->Surface=1`, `Surface->Client=3`, and
+`Client->Surface=3`. QMP then supplies only three real broker events. They are
+all enqueued and dequeued with `pending=0`, `high_water=1`, and no Surface
+fallback. The old route captures App at physical sequence floor 2; the one
+release arriving during the restart gap is queued, then rejected as a stale
+release after route epoch `1->2`. Surface session also advances exactly
+`1->2`.
+
+Before restart, the old SurfaceServer establishes and acknowledges one bounded
+App contact. Init kills and reaps that server, starts its replacement in the
+same process slot with PID generation exactly `+1`, and transfers the stable
+Launcher/App lifecycle links. The App cancels the old contact while validating
+the replacement offer, so `established/acked/cancelled=1/1/1` and the final
+active contact is `none`. Process accounting is exactly
+`created/exited/reaped/live=11/2/2/9`; the resident topology has 36 handles, 30
+endpoints/15 pairs, and pending waits `object/many/array=9/2/7`. Surface input
+FIFO reads remain `0/0`, and legacy key reads remain 0.
+
+The frozen scanout is validated with the captured cursor still present. The
+old session publishes its recovery-only frame 7, the replacement session 2
+publishes its recovery-only frame 1, cumulative graphics output is 8, and the
+reacquired output pool is epoch 2 with per-slot generations `[1,0]`. The guest
+source-of-truth completion markers are:
+
+```text
+INPUT_SERVER_CAPTURE_CANCEL_OK old_epoch=1 new_epoch=2 target=app cancel=1 stale_release=ignored routed=0 text_delta=0 client_contact=1/1/1 final=none
+BOOT_OK: M46 InputServer SurfaceServer restart rebind, route-epoch gap recovery, and capture cancellation verified
+```
+
+The hardened staged-QMP checker proves the armed, gap-ready, route-gap,
+capture-cancel, rebind, runtime, and boot markers. Its phase images are all
+distinct. The exact checker seal, including all three SHA-256 values, is:
+
+```text
+INPUT_SERVER_SURFACE_RESTART_QMP_OK armed=1 gap_ready=1 route_epoch=1 route_gap=1 capture_cancel=1 client_contact=1/1/1 surface_rebind=1 broker=kernel/userspace surface_fallback=0 pointer=136/184/down-restart-up screenshots=pre-frozen-post pre_sha256=9ce8c28d089417834583104bc03a8dbbf626d2a5b3ae68042e37136bcb9b1992 frozen_sha256=767f08eca43b7cef18684805236fb8dfdd0a6f01f8b22fb777c067eb3e516c14 post_sha256=5e32917de2e20e532ea21bce31b2c42aefe62de0c682c3f295a55cf4bb714f65 markers=epoch/gap/cancel/rebind/runtime/boot
+```
+
+The historical M46 repository-wide host ledger is 626 default tests
+(`26/51/19/82/31/120/0/297` for ABI/compositor/ELF/input/ServiceManager/UI/
+init/kernel) plus 24 directed feature-filter tests (`11 ui_trace + 10
+window_trace + 3 persistent`) for 650 executed/unique host tests. The
+`input-server-surface-restart-runtime` kernel profile has 335 tests. The full
+`./scripts/test.sh` exits 0 with `input_server=1` and
+`input_server_surface_restart=1`; the M45 physical-input checker also passes
+again unchanged. Its exact final suite marker is:
+
+```text
+BNDROID_TEST_SUITE_OK qemu_boot_profiles=5 framebuffer=1 keyboard_qmp=1 tablet_touch_qmp=1 compositor_interaction=1 userspace_surface=1 userspace_ui=1 ui_screenshot=1 process_terminate=1 app_lifecycle=1 app_crash_recovery=1 mapped_graphics=1 graphics_owner_death=1 graphics_surface_restart=1 graphics_producer_orphan=1 graphics_frame_clock=1 graphics_swapchain=1 multi_window=1 persistent_window=1 text_input=1 soft_keyboard=1 input_server=1 input_server_surface_restart=1 storage_negative_cases=11 persistence_reboot=1 recovery=1 irq_race=1
+```
+
+M46 is only one hard-coded session, one App capture, and one restart in a
+bounded QEMU boot witness. It is not a general watchdog or a product recovery
+policy, and it is not a usable phone OS. Arbitrary windows and Apps, repeated
+service recovery, bounded restart/backoff and crash-loop quarantine, complete
+IME/font shaping/Unicode/multitouch support, networking, cellular/telephony,
+Wi-Fi, audio, power management, secure boot, application sandboxing, secure
+updates, production drivers, and real-device validation remain unimplemented.
+
+## M47 historical fully verified seal
+
+M47 advances the shared ABI to v23 while preserving syscalls 0--40 and adds
+register-only syscall 41 `InputSessionInfo`. The call accepts an
+InputCapability handle and two mandatory-zero reserved arguments, then returns
+the capability's session and acquisition floor without exposing a user
+pointer. The authenticated InputServer acquires session 1 at floor 0; after its
+bounded replacement, the new process acquires session 2 at floor 1. A
+SurfaceServer attempt to call `InputAcquire` is denied and audited before the
+restart is armed, with exactly zero handle and session deltas.
+
+The independent `input-server-restart-runtime` uses strict canonical
+little-endian, fixed-64-byte `BIR1`/`BIP1`/`BIC1`/`BIE1` traffic. Init kills and
+reaps the old InputServer, observes its control peer close, and leaves the
+stable SurfaceServer alive while the broker is unbound. The Surface publishes
+the route-loss frame, then Init performs exactly one finite 30 ms timeout. The
+restart policy consumes its sole budget entry (`1/1`) and spawns one same-slot,
+generation-advanced replacement; no early spawn is allowed. The replacement
+reacquires the unique capability, advances InputServer session and route epoch
+`1->2`, and uses a six-command `BIC1` snapshot/resync with seven corresponding
+`BIE1` ready/ack messages before routing resumes. Surface session remains 1.
+
+QMP contributes three physical broker events. Final broker accounting is
+enqueued/dequeued/pending/high-water `3/3/0/1`, with one release,
+`unbound_drops=0`, `surface_reacquires=0`, and `surface_fallback=0`. Final
+process accounting is created/exited/reaped/live `11/2/2/9`; the resident
+topology has 36 handles, 30 Channel endpoints/15 pairs, and pending waits
+`object/many/array=9/2/7`. The exact source-of-truth guest markers are:
+
+```text
+INPUT_SERVER_RESTART_PERMISSION_OK caller=surface syscall=input_acquire status=permission_denied audits=1 handles_delta=0 sessions_delta=0
+INPUT_SERVER_RESTART_ARMED wire=BIP1 input_pid=<generation-qualified-pid> session=1 surface_session=1 epoch=1 state=active focus=launcher capture=none budget=1
+INPUT_SERVER_RESTART_GAP_READY floor=1 broker=unbound surface=alive pending=0
+INPUT_SERVER_RESTART_BACKOFF_OK attempt=1 requested_ns=30000000 timeout=1 early_spawn=0 budget=1/1
+INPUT_SERVER_REACQUIRE_OK wire=BIR1 old_pid=<generation-qualified-pid> new_pid=<generation-qualified-pid> sessions=1/2 surface_session=1 epochs=1/2 acquired=1 errors=0
+INPUT_SERVER_RESYNC_OK snapshot=1 routes=2 focus=launcher capture=none text=none floor=1 bic=6 bie=7
+INPUT_SERVER_RESTART_ROUTE_OK sequence=2-3 target=app focus=launcher/app capture=down/up final_capture=none text_delta=0
+INPUT_SERVER_RESTART_OK abi=23 protocol=1 wires=BIR1/BIP1/BIC1/BIE1 sessions=1/2 surface_session=1 epochs=1/2 restart=1 backoff=fixed-30ms budget=1/1 quarantine=host-verified broker=3/3/0/1 releases=1 unbound_drops=0 surface_reacquires=0 surface_fallback=0 processes=11/2/2/9 handles=36 endpoints=30 pairs=15 waits=9/2/7 errors=0
+BOOT_OK: M47 bounded InputServer restart, backoff, Surface resync, and permission denial verified
+```
+
+The staged checker validates pre/gap/post images, including the orange degraded
+gap and teal recovered frame. Their exact SHA-256 values and host marker are:
+
+```text
+INPUT_SERVER_RESTART_QMP_OK armed=1 permission=1 gap_ready=1 backoff=1 reacquire=1 resync=1 route=1 broker=kernel/userspace surface_session=stable pointer=136/184/move-down-up screenshots=pre-gap-post pre_sha256=9ce8c28d089417834583104bc03a8dbbf626d2a5b3ae68042e37136bcb9b1992 gap_sha256=c85fbd7ef65f5ae3b47b696b9fa25ef104bd2e692d7b20e3852e169d46985324 post_sha256=5e32917de2e20e532ea21bce31b2c42aefe62de0c682c3f295a55cf4bb714f65 markers=permission/gap/backoff/reacquire/resync/route/runtime/boot
+```
+
+The images are `target/bndroid-m47-input-server-restart-pre.ppm`,
+`target/bndroid-m47-input-server-restart-gap.ppm`, and
+`target/bndroid-m47-input-server-restart.ppm`. The current host ledger is 650
+default tests (`26/51/19/106/31/120/0/297` for
+ABI/compositor/ELF/input/ServiceManager/UI/init/kernel) plus 24 directed
+feature-filter tests (`11 ui_trace + 10 window_trace + 3 persistent`) for 674
+executed/unique host tests. The `input-server-restart-runtime` kernel profile
+has 338 tests. The dedicated M47 checker, M45/M46 isolation regressions,
+default/all-feature Clippy, and complete `./scripts/test.sh` all exit 0. The
+exact final suite marker is:
+
+```text
+BNDROID_TEST_SUITE_OK qemu_boot_profiles=5 framebuffer=1 keyboard_qmp=1 tablet_touch_qmp=1 compositor_interaction=1 userspace_surface=1 userspace_ui=1 ui_screenshot=1 process_terminate=1 app_lifecycle=1 app_crash_recovery=1 mapped_graphics=1 graphics_owner_death=1 graphics_surface_restart=1 graphics_producer_orphan=1 graphics_frame_clock=1 graphics_swapchain=1 multi_window=1 persistent_window=1 text_input=1 soft_keyboard=1 input_server=1 input_server_surface_restart=1 input_server_restart=1 storage_negative_cases=11 persistence_reboot=1 recovery=1 irq_race=1
+```
+
+M47's crash-loop quarantine is **host-verified only**. The QEMU run exercises
+exactly one authorized InputServer restart, not repeated failures or terminal
+quarantine. This is still a bounded witness rather than a general service
+supervisor or usable phone OS: there is no multi-service watchdog, dependency
+health graph, repeated-failure classification, user-visible general degraded
+mode, product IME, networking, cellular/telephony, Wi-Fi, audio, power
+management, secure boot, application sandboxing, secure update, production
+driver set, or real-device validation.
+
+## M48 historical fully verified seal
+
+M48 keeps ABI v23 and syscalls 0--41 unchanged. It adds an allocation-free,
+fixed-capacity `ServiceSupervisor` and strict canonical little-endian,
+fixed-64-byte `BSH1` health protocol. `ServiceIdentity` binds service kind,
+process generation, and generation-qualified PID; per-identity inbound and
+outbound sequences, opcodes, flags, fault classes, restart attempt/budget,
+interval, and all reserved/padding bytes fail closed before supervisor state
+advances.
+
+The independent `service-supervisor-runtime` first inherits M47's authorized
+InputServer process-exit recovery and stable Surface resynchronization. Init
+then sends `Probe` sequence 1 to the replacement; InputServer dequeues it and
+returns matching `Healthy` sequence 1 within the finite 200 ms health deadline.
+After a bounded 2 s healthy cadence, Init sends `Probe` sequence 2. The
+replacement demonstrably dequeues that exact envelope and intentionally stays
+silent. The 200 ms watchdog therefore classifies the second fault as
+`health-timeout`; restart attempt 2 exceeds the runtime budget `1/1`, so the
+supervisor enters quarantine instead of spawning again.
+
+Init emits the canonical `Quarantine` frame, terminates and reaps the unhealthy
+replacement, leaves the kernel input broker unbound, and receives the exact
+`DegradedAck`. SurfaceServer remains alive and commits frame 9/write generation
+6 with a red 32x24 degraded badge. The terminal process ledger is
+created/exited/reaped/live `11/3/3/8`; the resident topology has 31 handles, 26
+Channel endpoints/13 peer pairs, and pending object/many/array waits `8/2/6`.
+The exact source-of-truth guest markers are:
+
+```text
+SERVICE_SUPERVISOR_ARMED wire=BSH1 input_pid=<generation-qualified-pid> generation=1 session=1 epoch=1 surface_session=1 budget=1
+SERVICE_SUPERVISOR_FIRST_FAULT_OK class=process-exit attempt=1 budget=1 gap=1 broker=unbound
+SERVICE_SUPERVISOR_RESYNC_READY sessions=1/2 epochs=1/2 routes=2 floor=1 bic=6 bie=7
+SERVICE_SUPERVISOR_HEALTH_OK probes=1 healthy=1 input_pid=<generation-qualified-pid> generation=2 timeout_ns=200000000
+SERVICE_SUPERVISOR_WATCHDOG_OK probes=2 healthy=1 requested_ns=200000000 timeout=1 class=health-timeout
+SERVICE_SUPERVISOR_QUARANTINE_OK attempt=2 budget=1 reason=restart-budget-exhausted degraded=1 frame=9 generation=6
+SERVICE_SUPERVISOR_OK abi=23 protocol=1 wire=BSH1 faults=process-exit/health-timeout probes=2/1 watchdog=fixed-200ms restart=1 budget=1/1 quarantine=runtime degraded=1 broker=unbound releases=2 unbound_drops=0 surface_reacquires=0 surface_fallback=0 processes=11/3/3/8 handles=31 endpoints=26 pairs=13 waits=8/2/6 errors=0
+BOOT_OK: M48 generic ServiceSupervisor watchdog, runtime quarantine, and degraded UI verified
+```
+
+`scripts/check-service-supervisor.sh` validates four phase-specific images:
+`target/m48/service-supervisor-pre.ppm`,
+`target/m48/service-supervisor-gap.ppm`,
+`target/m48/service-supervisor-recovered.ppm`, and
+`target/m48/service-supervisor-degraded.ppm`. Their exact RGB SHA-256 values are,
+respectively,
+`9ce8c28d089417834583104bc03a8dbbf626d2a5b3ae68042e37136bcb9b1992`,
+`c85fbd7ef65f5ae3b47b696b9fa25ef104bd2e692d7b20e3852e169d46985324`,
+`5e32917de2e20e532ea21bce31b2c42aefe62de0c682c3f295a55cf4bb714f65`,
+and `32bd74c87d2cdc6ec0a2712890d3a040ec1d3609139639006cebfa7540e32fff`.
+The exact checker seal is:
+
+```text
+SERVICE_SUPERVISOR_QMP_OK armed=1 first_fault=process-exit resync=1 health=1 watchdog=health-timeout quarantine=runtime degraded=1 broker=unbound pointer=136/184/move-down-up screenshots=pre-gap-recovered-degraded pre_sha256=9ce8c28d089417834583104bc03a8dbbf626d2a5b3ae68042e37136bcb9b1992 gap_sha256=c85fbd7ef65f5ae3b47b696b9fa25ef104bd2e692d7b20e3852e169d46985324 recovered_sha256=5e32917de2e20e532ea21bce31b2c42aefe62de0c682c3f295a55cf4bb714f65 degraded_sha256=32bd74c87d2cdc6ec0a2712890d3a040ec1d3609139639006cebfa7540e32fff markers=armed/fault/resync/health/watchdog/quarantine/runtime/boot
+```
+
+The current host ledger is 670 default tests
+(`26/51/19/106/51/120/0/297` for
+ABI/compositor/ELF/input/ServiceManager/UI/init/kernel) plus 24 directed
+feature-filter tests (`11 ui_trace + 10 window_trace + 3 persistent`) for 694
+executed/unique host tests. The `service-supervisor-runtime` kernel profile has
+338 tests. Dedicated M48 QEMU, M45/M46/M47 isolation regressions, and the
+default/M48/all-feature/mixed-feature static build and Clippy matrix pass.
+The complete offline `scripts/test.sh` exits 0 with `service_supervisor=1`.
+Its exact final suite marker is:
+
+```text
+BNDROID_TEST_SUITE_OK qemu_boot_profiles=5 framebuffer=1 keyboard_qmp=1 tablet_touch_qmp=1 compositor_interaction=1 userspace_surface=1 userspace_ui=1 ui_screenshot=1 process_terminate=1 app_lifecycle=1 app_crash_recovery=1 mapped_graphics=1 graphics_owner_death=1 graphics_surface_restart=1 graphics_producer_orphan=1 graphics_frame_clock=1 graphics_swapchain=1 multi_window=1 persistent_window=1 text_input=1 soft_keyboard=1 input_server=1 input_server_surface_restart=1 input_server_restart=1 service_supervisor=1 storage_negative_cases=11 persistence_reboot=1 recovery=1 irq_race=1
+```
+
+M48 is still one bounded single-InputServer runtime witness. It does not yet
+supervise SurfaceServer and InputServer together, model service dependencies,
+propagate dependent health, or coordinate multi-service recovery. It is not a
+usable phone OS and does not add product IME, networking, cellular/telephony,
+Wi-Fi, audio, power management, secure boot, application sandboxing, secure
+updates, production drivers, or real-device validation.
+
+## M49 historical fully verified seal
+
+M49 keeps ABI v23 and syscalls 0--41 exactly unchanged. The independent
+`service-dependency-runtime` instantiates `ServiceSupervisor::<2>` and registers
+the explicit soft dependency `InputServer -> SurfaceServer`. A failed service
+is hard-blocked itself; an InputServer fault soft-degrades the still-live
+SurfaceServer, while a SurfaceServer fault does not kill or restart the live
+InputServer. The fixed-capacity dependency graph rejects stale identities,
+duplicate/self/cyclic edges, and out-of-order recovery without allocating.
+
+The QEMU run first terminates SurfaceServer generation 1 after the retained
+pointer-down checkpoint. InputServer generation 1 remains alive across the
+route gap while SurfaceServer is replaced in the same slot by generation 2,
+Surface session 2, route epoch 2, floor 3, and teal recovery frame 1. A real
+two-second finite wait keeps that frame observable. SurfaceServer then answers
+its 100 ms `BSH1` probe. InputServer generation 1 dequeues its own probe but
+deliberately emits no `Healthy`; the real 100 ms watchdog classifies
+`health-timeout`, hard-blocks InputServer, and soft-degrades SurfaceServer.
+SurfaceServer remains alive, publishes the red 32x24 route-lost badge at frame
+2, and holds it for two seconds.
+
+After the fixed 30 ms restart backoff, InputServer generation 2 reuses the same
+process slot, acquires session 2, binds route epoch 3/floor 3, and completes the
+strict BIR/BIP plus six-BIC/seven-BIE snapshot transcript. SurfaceServer then
+publishes the distinct green recovery badge at frame 3; InputServer generation
+2 returns matching `Healthy`. Both dependency impacts converge to
+`unaffected` without a restart storm. Terminal accounting is
+created/exited/reaped/live `12/3/3/9`, with 36 handles, 30 endpoints/15 pairs,
+and pending object/many/array waits `9/2/7`. The source-of-truth markers are:
+
+```text
+SERVICE_DEPENDENCY_ARMED services=2 dependency=input-soft-surface surface_pid=<generation-qualified-pid> input_pid=<generation-qualified-pid> surface_generation=1 input_generation=1 session=1 epoch=1 floor=0 budget=1
+SERVICE_DEPENDENCY_SURFACE_GAP fault=process-exit surface_generation=1 attempt=1 input_alive=1 route_epoch=2 floor=2
+SERVICE_DEPENDENCY_SURFACE_RECOVERED surface_generation=2 surface_session=2 input_generation=1 input_session=1 route_epoch=2 floor=3 frame=1
+SERVICE_DEPENDENCY_SURFACE_HEALTHY probes=1 healthy=1 surface_generation=2 timeout_ns=100000000
+SERVICE_DEPENDENCY_WATCHDOG service=input generation=1 probes=1 reads=1 healthy=0 timeout_ns=100000000 impact=input-hard/surface-soft
+SERVICE_DEPENDENCY_DEGRADED surface_alive=1 input_alive=0 phase=route-lost frame=2 write_generation=2 floor=3
+SERVICE_DEPENDENCY_INPUT_REBOUND input_generation=2 input_session=2 route_epoch=3 floor=3 bic=6 bie=7
+SERVICE_DEPENDENCY_INPUT_HEALTHY probes=1 reads=1 healthy=1 input_generation=2
+SERVICE_DEPENDENCY_STABLE cadence_ns=2000000000 restarts=1/1 impacts=unaffected/unaffected created=12 exited=3 reaped=3 live=9
+SERVICE_DEPENDENCY_OK abi=23 protocol=1 services=2 dependency=input-soft-surface health_messages=5 probes=3 probe_reads=3 healthy=2 watchdog=1/1 bir=8+3 bip=4 bic=6 bie=7 surface=1/2 input=1/2 sessions=1/2 epochs=1/2/3 floor=0/2/3 frames=1/2/3 outputs=3 restarts=1/1 impacts=unaffected/unaffected created=12 exited=3 reaped=3 live=9 reasons=exited1/killed2 handles=36 endpoints=30 pairs=15 waits=9/2/7 topology=resident final_state=ready
+BOOT_OK: M49 dependency-aware SurfaceServer and InputServer supervision verified
+```
+
+`scripts/check-service-dependency.sh` captures pre, Surface gap, Surface
+recovered, Input-degraded, and final recovered frames. Their frozen SHA-256
+values are, in that order:
+`9ce8c28d089417834583104bc03a8dbbf626d2a5b3ae68042e37136bcb9b1992`,
+`767f08eca43b7cef18684805236fb8dfdd0a6f01f8b22fb777c067eb3e516c14`,
+`5e32917de2e20e532ea21bce31b2c42aefe62de0c682c3f295a55cf4bb714f65`,
+`32bd74c87d2cdc6ec0a2712890d3a040ec1d3609139639006cebfa7540e32fff`, and
+`a251ce92f2d9e4e1fd0e76f3c267a16837520fef3f99268cae72bb4681b61d0d`.
+The checker exports `CARGO_NET_OFFLINE=true`, uses only a local Unix QMP
+socket, and launches QEMU with `-nic none`. Its frozen host seal is:
+
+```text
+SERVICE_DEPENDENCY_QMP_OK services=2 dependency=input-soft-surface surface_restart=1 input_watchdog=1 degraded=1 recovered=1 pointer=136/184/down-gap-up screenshots=pre-gap-surface-recovered-degraded-recovered pre_sha256=9ce8c28d089417834583104bc03a8dbbf626d2a5b3ae68042e37136bcb9b1992 gap_sha256=767f08eca43b7cef18684805236fb8dfdd0a6f01f8b22fb777c067eb3e516c14 surface_recovered_sha256=5e32917de2e20e532ea21bce31b2c42aefe62de0c682c3f295a55cf4bb714f65 degraded_sha256=32bd74c87d2cdc6ec0a2712890d3a040ec1d3609139639006cebfa7540e32fff recovered_sha256=a251ce92f2d9e4e1fd0e76f3c267a16837520fef3f99268cae72bb4681b61d0d markers=armed/surface-gap/surface-recovered/surface-healthy/watchdog/degraded/input-rebound/input-healthy/stable/runtime/boot
+```
+
+The exact historical M49 suite marker is:
+
+```text
+BNDROID_TEST_SUITE_OK qemu_boot_profiles=5 framebuffer=1 keyboard_qmp=1 tablet_touch_qmp=1 compositor_interaction=1 userspace_surface=1 userspace_ui=1 ui_screenshot=1 process_terminate=1 app_lifecycle=1 app_crash_recovery=1 mapped_graphics=1 graphics_owner_death=1 graphics_surface_restart=1 graphics_producer_orphan=1 graphics_frame_clock=1 graphics_swapchain=1 multi_window=1 persistent_window=1 text_input=1 soft_keyboard=1 input_server=1 input_server_surface_restart=1 input_server_restart=1 service_supervisor=1 service_dependency=1 storage_negative_cases=11 persistence_reboot=1 recovery=1 irq_race=1
+```
+
+M49 remains a bounded, single-core QEMU research witness with two fixed
+services, one soft edge, fixed windows, and scripted faults. It is not a
+production phone OS or a real-device-ready system. Arbitrary apps/windows,
+product IME/font/Unicode/multitouch, networking, cellular/telephony, Wi-Fi,
+audio, power management, secure boot, application sandboxing, secure updates,
+production drivers, and real-hardware validation remain unfinished.
+
+## M50 historical fully verified seal
+
+M50 keeps ABI v23, syscalls 0--41, the all-or-none eight-image catalog,
+process capacity 9 (`init + 8 dynamic`), and the single-core twelve-context
+profile unchanged. The independent `post-recovery-interaction-runtime` starts
+from the historical M49 recovery state: SurfaceServer and InputServer are both
+generation/session 2, route epoch 3/floor 3 is bound, and output frame 3 is
+visible. It adds no syscall, signal bit, image, or capability.
+
+QEMU first injects a down/up at screen `(16,32)`, producing physical sequences
+`4/5`. Because the coordinate is outside the phone, InputServer resolves
+`target=none`; no BWE, App Present, or output commit occurs. The armed and
+rejected screenshots are byte-identical. QEMU then injects an App contact at
+`(136,184)`, producing physical `6/7` and two strict BWE InputRoute events. App
+submits Present command/sequence 5 and local frame 3; SurfaceServer commits
+scene 10 as output frame 4/write generation 4. SurfaceServer and InputServer
+then each answer health sequence 2 and remain resident. M50 does not reuse the
+standalone M49 two-second stable phase as M50 evidence.
+
+The shared M41 prefix no longer relies on accidental cross-process scheduling:
+Launcher consumes its hidden `Presented` event before issuing the following
+commands, App consumes all three first-phase routes before its continuation,
+and a sender-authenticated private eight-byte acknowledgement closes the
+phase-two route boundary. The kernel trace independently requires App command
+3 after route 2 and App command 4 after route 3. This stabilization changes no
+ABI, public window wire, command/event count, visual result, or screenshot
+hash; the complete offline suite passed from a clean rebuild with every QEMU
+launch using `-nic none`.
+
+The guest source-of-truth markers are:
+
+```text
+POST_RECOVERY_ARMED abi=23 surface_session=2 input_session=2 route_epoch=3 floor=3 frame=3
+POST_RECOVERY_REJECTED physical=4/5 target=none routed=0 frame=3
+POST_RECOVERY_ROUTED physical=6/7 target=app events=2 capture=1
+POST_RECOVERY_PRESENTED command=5 app_frame=3 scene=10 output_frame=4 write_generation=4
+POST_RECOVERY_HEALTHY surface=2/2 input=2/2
+POST_RECOVERY_INTERACTION_OK abi=23 surface_session=2 input_session=2 route_epoch=3 rejected=4..5 physical=6..7 target=app events=2 capture=1 app_present=1 output_frame=4 health=2/2 resident=1 errors=0
+BOOT_OK: M50 post-recovery resident input-to-frame interaction verified
+```
+
+`scripts/check-post-recovery-interaction.sh` exports
+`CARGO_NET_OFFLINE=true`, uses only a local Unix QMP socket, and launches QEMU
+with `-nic none`. The armed and rejected SHA-256 values are both
+`a251ce92f2d9e4e1fd0e76f3c267a16837520fef3f99268cae72bb4681b61d0d`;
+the presented value is
+`798d5cbce5830b315444967974ad8abcbf77f19fea87063a554cfc986e149974`.
+The exact historical M50 suite marker is:
+
+```text
+BNDROID_TEST_SUITE_OK qemu_boot_profiles=5 framebuffer=1 keyboard_qmp=1 tablet_touch_qmp=1 compositor_interaction=1 userspace_surface=1 userspace_ui=1 ui_screenshot=1 process_terminate=1 app_lifecycle=1 app_crash_recovery=1 mapped_graphics=1 graphics_owner_death=1 graphics_surface_restart=1 graphics_producer_orphan=1 graphics_frame_clock=1 graphics_swapchain=1 multi_window=1 persistent_window=1 text_input=1 soft_keyboard=1 input_server=1 input_server_surface_restart=1 input_server_restart=1 service_supervisor=1 service_dependency=1 post_recovery_interaction=1 storage_negative_cases=11 persistence_reboot=1 recovery=1 irq_race=1
+```
+
+M50 is still a bounded single-core QEMU research implementation with two fixed
+services, fixed windows, one rejected contact, and one accepted App contact. It
+is not a phone system running on real hardware, a production system, or a
+truly usable mobile OS. Cellular/telephony, Wi-Fi/networking, audio, power,
+production drivers, secure boot, application sandboxing, secure updates,
+complete IME/Unicode/multitouch, arbitrary apps/windows, and the real-device
+loop remain unfinished.
+
+## M51 historical fully verified seal
+
+M51 keeps ABI v23, syscalls 0--41, the all-or-none eight-image catalog,
+process capacity 9 (`init + 8 dynamic`), and the single-core twelve-context
+profile unchanged. The opt-in `post-recovery-focus-runtime` runs the retained
+M49 recovery and M50 interaction prefixes first, so SurfaceServer and
+InputServer are generation/session 2, route epoch 3 is bound, the physical
+acquisition floor is 7, App/3 has focus, and output frame 4 is visible. It adds
+no syscall, signal bit, image, capability, or process slot.
+
+QEMU then injects Launcher down/up at screen `(80,96)` as physical sequences
+`8/9`. The down is captured by Launcher; the up is delivered to Launcher and
+releases capture. Focus moves from App/3 to Launcher/4, BIC synchronization
+advances through sequence 3, and the strict InputServer/SurfaceServer Channel
+ledger reaches eight reads and eight writes. Launcher submits Present command 6
+and local frame 4; SurfaceServer commits scene 11 as output frame 5/write
+generation 5. The exact global damage rectangle `(64,80,40,32)` contains 1280
+changed pixels. SurfaceServer and InputServer each answer health sequence 2 and
+both remain resident. The guest source-of-truth markers are:
+
+```text
+POST_RECOVERY_FOCUS_ARMED abi=23 surface_session=2 input_session=2 route_epoch=3 physical_floor=7 focus=app/3 output_frame=4
+POST_RECOVERY_LAUNCHER_CAPTURED physical=8 target=launcher events=1 focus=launcher/4 capture=1
+POST_RECOVERY_LAUNCHER_PRESENTED physical=8/9 command=6 launcher_frame=4 scene=11 output_frame=5 write_generation=5 focus=launcher/4 capture=0
+POST_RECOVERY_FOCUS_OK abi=23 surface_session=2 input_session=2 route_epoch=3 physical=8..9 target=launcher events=2 capture=0 launcher_present=1 output_frame=5 focus=launcher/4 health=2/2 resident=1 errors=0
+BOOT_OK: M51 post-recovery App-to-Launcher focus and frame verified
+```
+
+`scripts/check-post-recovery-focus.sh` exports `CARGO_NET_OFFLINE=true`, uses
+only a local Unix QMP socket, and launches QEMU with `-nic none`. The armed
+SHA-256 is
+`798d5cbce5830b315444967974ad8abcbf77f19fea87063a554cfc986e149974`;
+the presented SHA-256 is
+`cb84032b533910a88c74a767148702894336b9bf8409663fbd2f9aa49f8ec729`.
+Its frozen host seal is:
+
+```text
+POST_RECOVERY_FOCUS_QMP_OK pointer=80/96/down-captured-up target=launcher focus=app3-launcher4 output=4-5 diff_pixels=1280 damage=64/80/40/32 armed_sha256=798d5cbce5830b315444967974ad8abcbf77f19fea87063a554cfc986e149974 presented_sha256=cb84032b533910a88c74a767148702894336b9bf8409663fbd2f9aa49f8ec729 markers=m49-prefix/m50-prefix/focus-armed/launcher-captured/launcher-presented/focus/boot
+```
+
+The complete offline M51 `scripts/test.sh` exited 0. Its exact historical suite marker
+is:
+
+```text
+BNDROID_TEST_SUITE_OK qemu_boot_profiles=5 framebuffer=1 keyboard_qmp=1 tablet_touch_qmp=1 compositor_interaction=1 userspace_surface=1 userspace_ui=1 ui_screenshot=1 process_terminate=1 app_lifecycle=1 app_crash_recovery=1 mapped_graphics=1 graphics_owner_death=1 graphics_surface_restart=1 graphics_producer_orphan=1 graphics_frame_clock=1 graphics_swapchain=1 multi_window=1 persistent_window=1 text_input=1 soft_keyboard=1 input_server=1 input_server_surface_restart=1 input_server_restart=1 service_supervisor=1 service_dependency=1 post_recovery_interaction=1 post_recovery_focus=1 storage_negative_cases=11 persistence_reboot=1 recovery=1 irq_race=1
+```
+
+M51 remains a bounded single-core QEMU research implementation with a fixed
+two-window topology and one scripted focus handoff. It is not a real phone, a
+production system, or a generally usable mobile OS. There is no hardware
+networking path; cellular/telephony, Wi-Fi, audio, power management, production
+drivers, secure boot, application sandboxing, secure updates, complete
+IME/Unicode/multitouch, arbitrary apps/windows, and real-device validation
+remain unfinished.
+
+## M52 historical fully verified post-recovery focus-roundtrip seal
+
+M52 keeps ABI v23, syscalls 0--41, the all-or-none catalog of eight static
+AArch64 ELF images,
+process capacity 9 (`init + 8 dynamic`), and the single-core twelve-context
+profile unchanged. The opt-in `post-recovery-focus-roundtrip-runtime` executes
+the complete M49 recovery, M50 interaction, and M51 focus prefix first. At the
+M51 boundary, InputServer is at event 14/physical sequence 9, route sequence 4,
+and focus sequence 3; Launcher/4 owns focus, dependency progress is 7, and
+output frame/output epoch/write generation are `5/5/5`. M52 adds no syscall,
+signal bit, image, capability, process slot, or lifecycle transition; lifecycle
+focus remains 2.
+
+QEMU injects one App down/up at screen `(136,184)`. Physical sequence 10 down
+becomes BIE event 15 at compositor logical `(80,120)` and App-local `(32,40)`;
+focus changes Launcher/4 to App/5 and capture is established. BIC `SetFocus`
+sequence 4 names App window reference id 2/generation 1. Its wire ACK becomes
+BIE event 16 and advances dependency progress from 7 to 8. Physical sequence 11 up becomes BIE event 17
+and clears capture. App consumes the down/up BWE pair at command 5, scene 11,
+focus 5, then sends BWC Present command 6/frame 4 with local damage
+`(56,72,40,32)` and color `0x00844ec7`. App content generation reaches 8;
+SurfaceServer returns Presented command 6/scene 12/frame 4 and commits output
+frame/output epoch/write generation `6/6/6`. After consuming Presented, App
+sends a separate sender-authenticated private 8-byte completion ACK with magic
+`0x4d35325f4150434b`. That completion is later than the 17-bit kernel trace
+seal, whose M52-only Channel totals are exactly eight writes/eight reads.
+
+The compositor-global damage rectangle is `(104,152,40,32)`. The PPM
+framebuffer diff is deliberately different: adding the retained Surface origin
+`(56,64)` gives `(160,216,40,32)`, with exactly 1280 changed pixels. The M50,
+M51, and M52 screenshots are three distinct frames. The M52 guest markers,
+following the complete M49/M50/M51 marker blocks recorded above, are:
+
+```text
+POST_RECOVERY_FOCUS_ROUNDTRIP_ARMED abi=23 surface_session=2 input_session=2 route_epoch=3 physical_floor=9 focus=launcher/4 output_frame=5
+POST_RECOVERY_APP_CAPTURED physical=10 target=app events=1 focus=app/5 capture=1
+POST_RECOVERY_APP_PRESENTED physical=10/11 command=6 app_frame=4 scene=12 output_frame=6 write_generation=6 focus=app/5 capture=0
+POST_RECOVERY_FOCUS_ROUNDTRIP_OK abi=23 surface_session=2 input_session=2 route_epoch=3 physical=10..11 target=app events=2 capture=0 app_present=1 output_frame=6 focus=app/5 health=2/2 resident=1 errors=0
+BOOT_OK: M52 post-recovery Launcher-to-App focus roundtrip and frame verified
+```
+
+Run the independent acceptance checker with:
+
+```bash
+CARGO_NET_OFFLINE=true ./scripts/check-post-recovery-focus-roundtrip.sh
+```
+
+The checker uses only a local Unix QMP socket, starts every QEMU instance with
+`-nic none`, locks the complete M49/M50/M51 prefix, and has passed with frozen
+M50/M51/M52 SHA-256 values
+`798d5cbce5830b315444967974ad8abcbf77f19fea87063a554cfc986e149974`,
+`cb84032b533910a88c74a767148702894336b9bf8409663fbd2f9aa49f8ec729`, and
+`97807add9d09682d39e75ace000bc1ccb7548c6b5e97854bde1f3166976e6dfb`.
+Its exact host seal is:
+
+```text
+POST_RECOVERY_FOCUS_ROUNDTRIP_QMP_OK pointer=136/184/down-captured-up target=app focus=launcher4-app5 output=5-6 diffs=1280/1280 damage=64/80/40/32+160/216/40/32 m50_sha256=798d5cbce5830b315444967974ad8abcbf77f19fea87063a554cfc986e149974 m51_sha256=cb84032b533910a88c74a767148702894336b9bf8409663fbd2f9aa49f8ec729 m52_sha256=97807add9d09682d39e75ace000bc1ccb7548c6b5e97854bde1f3166976e6dfb markers=m49-prefix/m50-prefix/m51-prefix/roundtrip-armed/app-captured/app-presented/roundtrip/boot
+```
+
+The complete offline `CARGO_NET_OFFLINE=true ./scripts/test.sh` run exited 0 and
+appended `post_recovery_focus_roundtrip=1`. Its exact historical terminal line is:
+
+```text
+BNDROID_TEST_SUITE_OK qemu_boot_profiles=5 framebuffer=1 keyboard_qmp=1 tablet_touch_qmp=1 compositor_interaction=1 userspace_surface=1 userspace_ui=1 ui_screenshot=1 process_terminate=1 app_lifecycle=1 app_crash_recovery=1 mapped_graphics=1 graphics_owner_death=1 graphics_surface_restart=1 graphics_producer_orphan=1 graphics_frame_clock=1 graphics_swapchain=1 multi_window=1 persistent_window=1 text_input=1 soft_keyboard=1 input_server=1 input_server_surface_restart=1 input_server_restart=1 service_supervisor=1 service_dependency=1 post_recovery_interaction=1 post_recovery_focus=1 post_recovery_focus_roundtrip=1 storage_negative_cases=11 persistence_reboot=1 recovery=1 irq_race=1
+```
+
+M52 is still a bounded single-core QEMU research witness with a fixed
+two-window topology and one scripted return-focus roundtrip. It is not a real
+phone, a production system, or a generally usable mobile OS. It does not prove
+lifecycle-focus convergence (that ledger remains 2), arbitrary windows/apps,
+or real input hardware. Hardware networking, cellular/telephony, Wi-Fi, audio,
+power management, production drivers, secure boot, application sandboxing,
+secure updates, complete IME/Unicode/multitouch, and real-device validation
+remain unfinished.
+
+## M53 historical post-recovery lifecycle-focus convergence seal
+
+M53 keeps ABI v23, syscalls 0--41, the all-or-none catalog of eight static
+AArch64 ELF images, process capacity 9 (`init + 8 dynamic`), and the single-core
+twelve-context profile unchanged. The opt-in
+`post-recovery-lifecycle-focus-runtime` is a strict child of
+`post-recovery-focus-roundtrip-runtime`: it replays the complete immutable
+M49/M50/M51/M52 prefix and adds no syscall, signal bit, image, capability,
+process slot, QMP input event, output commit, or framebuffer change.
+
+During replacement-Surface recovery, both stable clients consume session-2
+Ready (`Ready×2`) and then App lifecycle-focus generation 1
+(`App/1×2`); Launcher and App each return a sender-authenticated private RFCK
+(`RFCK×2`). At the retained M51 physical-8 boundary both clients consume
+Launcher generation 2 (`Launcher/2×2`) and acknowledge with LFCK (`LFCK×2`). At
+the retained M52 physical-10 boundary both consume App generation 3
+(`App/3×2`) and acknowledge with AFCK (`AFCK×2`). Thus the new M53 trace counts
+BUE writes/reads `8/8` and private ACK writes/reads `6/6`, for Channel totals
+`14/14`. The already sealed M52 APCK is observed separately as boundary
+`1/1`; it is not included in M53 Channel `14/14`, and it remains outside M52's
+historical 17-bit trace and M52-only Channel `8/8`.
+
+No new physical report is injected: the complete prefix remains physical
+`1..11`, InputServer's last BIE event remains 17, and the broker remains fully
+drained. Lifecycle focus converges App/1→Launcher/2→App/3 while the independently
+versioned compositor and InputServer ledgers finish at App/5 and App/4. Output
+frame/output epoch/write generation stay `6/6/6`; the M53 trace requires zero
+new output commits. The exact guest markers are:
+
+```text
+POST_RECOVERY_LIFECYCLE_SESSION_READY surface_session=2 clients=launcher/app ready_events=2 focus=app/1 lifecycle_events=2 ack=rfck/2 channels=6/6
+POST_RECOVERY_LIFECYCLE_LAUNCHER_SYNCED physical=8 clients=launcher/app focus=launcher/2 lifecycle_events=2 ack=lfck/2 channels=10/10 compositor=launcher/4 input=launcher/3
+POST_RECOVERY_LIFECYCLE_APP_SYNCED physical=10 clients=launcher/app focus=app/3 lifecycle_events=2 ack=afck/2 channels=14/14 compositor=app/5 input=app/4
+POST_RECOVERY_LIFECYCLE_FOCUS_OK abi=23 surface_session=2 input_session=2 route_epoch=3 physical=1..11 clients=2 ready_events=2 focus_events=6 acks=rfck2/lfck2/afck2 lifecycle=app/1-launcher/2-app/3 compositor=app/5 input=app/4 channels=14/14 m52_boundary=1/1 output_frame=6 health=2/2 resident=1 errors=0
+BOOT_OK: M53 post-recovery lifecycle focus convergence verified
+```
+
+Run the independent acceptance checker with:
+
+```bash
+CARGO_NET_OFFLINE=true ./scripts/check-post-recovery-lifecycle-focus.sh
+```
+
+The checker is offline, uses only a local Unix QMP socket, and starts QEMU with
+`-nic none`. It sends exactly the eleven input events owned by the M49--M52
+prefix and proves `m53_input=0`. The frozen M52 and M53 SHA-256 values are both
+`97807add9d09682d39e75ace000bc1ccb7548c6b5e97854bde1f3166976e6dfb`; their
+PPM diff is exactly zero pixels with no damage rectangle. Its exact host seal
+is:
+
+```text
+POST_RECOVERY_LIFECYCLE_FOCUS_QMP_OK physical=1..11 m53_input=0 lifecycle=app1-launcher2-app3 clients=2 ready=2 focus_events=6 acks=rfck2/lfck2/afck2 channels=14/14 m52_boundary=1/1 compositor=app5 input=app4 output=6-6 diffs=1280/1280/0 damage=64/80/40/32+160/216/40/32+none m50_sha256=798d5cbce5830b315444967974ad8abcbf77f19fea87063a554cfc986e149974 m51_sha256=cb84032b533910a88c74a767148702894336b9bf8409663fbd2f9aa49f8ec729 m52_sha256=97807add9d09682d39e75ace000bc1ccb7548c6b5e97854bde1f3166976e6dfb m53_sha256=97807add9d09682d39e75ace000bc1ccb7548c6b5e97854bde1f3166976e6dfb markers=m49-prefix/m50-prefix/m51-prefix/m52-prefix/session-ready/launcher-synced/app-synced/lifecycle-focus/boot
+```
+
+The complete offline `CARGO_NET_OFFLINE=true ./scripts/test.sh` run exits 0 and
+appends `post_recovery_lifecycle_focus=1`. Its exact terminal line is:
+
+```text
+BNDROID_TEST_SUITE_OK qemu_boot_profiles=5 framebuffer=1 keyboard_qmp=1 tablet_touch_qmp=1 compositor_interaction=1 userspace_surface=1 userspace_ui=1 ui_screenshot=1 process_terminate=1 app_lifecycle=1 app_crash_recovery=1 mapped_graphics=1 graphics_owner_death=1 graphics_surface_restart=1 graphics_producer_orphan=1 graphics_frame_clock=1 graphics_swapchain=1 multi_window=1 persistent_window=1 text_input=1 soft_keyboard=1 input_server=1 input_server_surface_restart=1 input_server_restart=1 service_supervisor=1 service_dependency=1 post_recovery_interaction=1 post_recovery_focus=1 post_recovery_focus_roundtrip=1 post_recovery_lifecycle_focus=1 storage_negative_cases=11 persistence_reboot=1 recovery=1 irq_race=1
+```
+
+M53 remains a bounded, single-core QEMU research witness with two fixed
+clients, fixed windows, fixed recovery order, and a scripted three-generation
+lifecycle-focus transcript. It is not a real usable phone, a production mobile
+OS, or real-device evidence. The product gaps are unchanged: arbitrary
+apps/windows and service graphs, complete IME/Unicode/font shaping/multitouch,
+networking, cellular/telephony, Wi-Fi, audio, power management, production
+drivers, secure boot, application sandboxing, secure updates, packaging, and
+real-hardware validation remain unfinished.
+
+## M62 historical terminal StorageServer quarantine seal
+
+M62 is the opt-in ABI-v25 `storage-server-terminal-quarantine-runtime` child
+of M61; its exact inherited feature chain is M62 -> M61 -> M60 -> M58 -> M57
+-> M56 -> M55. One kernel-only nonrenewable proof deferral dynamically enters
+the terminal fallback after the final simulated physical failure. The fallback
+advances three steps with two `Pending` returns, records one physical error,
+reverifies terminal IRQ rollback and DMA/transport state, and only then
+publishes boot-local Offline. It consumes no policy attempt or ticket and
+exposes no EL0 control. Exact runtime, 204-case parser, 8-test pure-policy
+static seal, 771-test workspace, 353-test M62 kernel, and complete-suite
+evidence are recorded once at the top.
+
+This is deterministic simulated single-core QEMU coverage, not a hardware,
+SMP, concurrency, soak, power-cut, persistent-health, reprobe/hotplug, or
+general-runtime proof. The Offline state remains boot-local.
+
+## M61 historical fault-latched StorageServer owner-retirement seal
+
+M61 is the opt-in ABI-v25 `storage-server-owner-liveness-runtime` child of
+M60; its exact inherited feature chain is M61 -> M60 -> M58 -> M57 -> M56 ->
+M55. A fatal-completion publication arms one nonrenewable 250 ms physical-counter
+grace for the exact generation-qualified PID, broker epoch, and lease
+generation. The fixed campaign arms seven tickets: six owners exit
+cooperatively, while the epoch-6 flush owner is denied live volume close,
+blocks in a real `ObjectWait`, is marked `Killed` by the authenticated monitor,
+and is then fully retired by the ordinary reaper before recovery and epoch-7
+replacement. Exact runtime, 184-case parser, 9-test pure-policy static seal,
+763-test workspace, and complete-suite evidence is recorded once at the top.
+
+This is a fault-latched exit grace, not a general healthy heartbeat or generic
+hang detector. It covers one simulated single-core QEMU stall, not the full
+accepted/queued-session race matrix, arbitrary IRQ races, SMP, hardware, soak,
+power-cut, or phone behavior. Historical
+M60 keeps its explicit-close ABI; only M61 makes the live volume process-lifetime.
+
+## M60 historical bounded StorageServer fault-policy seal
+
+M60 is the opt-in ABI-v25 `storage-server-fault-policy-runtime` child of M58;
+its exact inherited feature chain is M60 -> M58 -> M57 -> M56 -> M55. It wraps
+the cooperative physical engine with ticketed `Healthy`/`Recovering`/`Backoff`/
+`Probation`/`Offline` policy, an attempt cap of three, two-tick base backoff with
+multiplier two, probation I/O classification, and a boot-local sticky Offline
+terminal state. The exact runtime, parser, static, 754-test workspace, 336-test
+M60 kernel, and historical complete-suite evidence is recorded once at the top of this
+file.
+
+The directed campaign keeps six transient EL0 `WRFWRF` controls and uses a
+kernel-prearmed permanent read at epoch 7. EL0 has no permanent-fault arm
+authority. The successful-commit order is rearm -> admission open -> permanent
+prearm -> broker commit -> success-ledger publication under one IRQ mask; the
+terminal publisher verifies IRQ rollback, closed admission, and terminal DMA
+state before making the ownerless broker Offline.
+
+This historical seal is bounded to a trusted, cooperative StorageServer in single-core
+QEMU. It does not itself prove owner retirement, durable Offline
+across reboot, fallback-quarantine execution, a real permanent hardware fault,
+arbitrary soak, real power-cut, concurrent faults, or real-device behavior.
+
+## M59 historical cooperative block-recovery unification seal
+
+M59 does not extend M58. Its ABI-v24 AppData child and ABI-v23 low-level
+timeout self-test are separate from the ABI-v25 StorageServer branch. All three
+cooperative consumers use the same four-phase physical engine, while their
+policy coordinators retain distinct outcomes, progress claims, and terminal
+markers. The exact historical M59 runtime and retained parser/static evidence is
+recorded once at the top of this file.
+
+The AppData ledger freezes and never replays the timed-out operation, permits
+one read-only userspace retry, and proves one timer/dual-worker/authenticated-EL0
+window before explicit admission. The timeout ledger proves all three Pending
+progress windows but deliberately publishes `el0_progress_claim=0`. This is
+recovery unification only: ordinary AppData I/O still busy-spins with IRQs
+enabled, and early/fatal synchronous resets remain.
+
+## M58 historical cooperative fail-stop StorageServer recovery seal
+
+M58 is the historical opt-in `storage-server-async-recovery-runtime` child of
+M57 and keeps ABI v25. It retains the exact bounded `WRFWRF`, suppression
+`2/2/2`, owner epoch
+7, durable generation 1, `7/6/1` recovery ledger, and request delta 6. Its four
+cooperative physical phases release the driver borrow between steps, sample the
+reset status or the generation-qualified capacity tuple at most once per step,
+and meter every short DAIF-masked driver/control section against the
+625000-tick timer period.
+
+The outer coordinator carries one attempt ID through physical completion, IRQ
+rearm, broker commit, and admission; the gate opens only after the full commit.
+Every recovery window contains real timer dispatches, both worker progress, and
+authenticated EL0 progress. The exact runtime/static/suite evidence is recorded
+once at the top of this file. M62 is the historical terminal-quarantine head
+through M61, M60, and M58; M58 continues to share the physical engine with M59, while
+M55/M56/M57 keep their synchronous physical recovery ledgers. Neither M59,
+M60, M61, nor M62 rewrites this exact historical M58 evidence.
+
+## M57 historical repeated fail-stop StorageServer recovery seal
+
+M57 is the opt-in `storage-server-repeated-recovery-runtime` child of M56 and
+keeps ABI v25. It executes exactly two serial `WRF` cycles, rotates six failed
+owners, then seals owner epoch 7 and durable generation 1. The six consumed
+driver suppressions are exactly `2/2/2`; request conservation is
+`requests = completions + 6`.
+
+Attempt 4 deliberately aborts IRQ-rearm commit and rolls back without reopening
+submission; attempt 5 is the observed successful retry. Global broker access on
+IRQ-sensitive paths is IRQ-masked, owner close during a Running request records
+`ServiceAbandoned`, and the driver-level physical submission gate remains shut
+while recovery is required. The exact runtime evidence and current commands are
+recorded once at the top of this file.
+
+This remains M57's bounded, serial historical proof. It does not establish
+concurrent fault handling, arbitrary soak, back-to-back failure without a
+healthy interval, power-cut, hotplug, a real phone storage controller, SMP, or
+IOMMU behavior. M58 changes only the newer profile's recovery execution model;
+it does not rewrite this ledger.
+
+## M56 historical fail-stop StorageServer recovery seal
+
+M56 is the historical separate opt-in `storage-server-recovery-runtime` leaf and keeps
+ABI v25. It adds no syscall or user image. The kernel remains the sole reset
+authority, and recovery is deliberately fail-stop rather than transparent:
+`OutcomeUnknown` and `RequiresReset` terminate the affected session and old
+StorageServer. Process teardown must release the three abandoned requests,
+close the old sessions, and unbind the old volume before physical recovery is
+eligible to run.
+
+For each of the three directed cases, the driver reaches virtio status 0,
+revalidates device identity, negotiated features, and capacity, rebuilds the
+queue descriptors and request slots in its still-owned DMA pages, and performs
+two-phase IRQ prepare/commit rearming. A failed reset or IRQ commit remains
+fail-closed. After success, a replacement server acquires the next owner epoch
+and remounts the durable volume. The final directed ledger is epoch 4,
+generation 1, three owner exits, three successful resets, and no invariant
+error.
+
+The fault hook suppresses one QueueNotify per operation kind. That establishes
+one read timeout classified as `RequiresReset` and one write plus one flush
+classified as `OutcomeUnknown`; it does not establish device execution of the
+suppressed mutations and does not model power loss. Run the offline acceptance
+and static authority gates with:
+
+```bash
+CARGO_NET_OFFLINE=true ./scripts/check-storage-server-recovery-runtime.sh
+./scripts/check-storage-server-recovery-static.sh
+```
+
+The exact successful recovery/runtime/BOOT markers are recorded at the top of
+this file. Their `7813/7810` request totals are a measured example; only the
+three-request delta is invariant across builds.
+
+## M55 historical standalone userspace StorageServer seal
+
+M55 is a separate opt-in `storage-server-runtime` profile. ABI v25 preserves
+the numeric syscall table and adds entries 47--52 for immutable IPC-buffer
+creation, authenticated StorageServer volume acquisition, bounded block
+submit/take, and client connect/server accept. The canonical StorageServer is
+the only image allowed to call `StorageAcquire`. Volume and session handles
+carry `READ|WRITE|WAIT` (`0x103`) and deliberately carry neither `DUPLICATE`
+nor `TRANSFER`; `StorageConnect` accepts only a non-empty subset of READ/WRITE.
+The kernel-stamped client identity and accepted session binding, rather than a
+caller-supplied principal, select the namespace. The M54 namespace syscalls
+42--46 are explicitly `Unsupported` under this profile.
+
+The raw block wire is strict `SBRQ` version 2 and exactly 4160 bytes: a 64-byte
+header plus 4096 data bytes. The little-endian `u16` sector count is at offset
+24. Read and write requests carry 1--8 sectors, every reserved byte is zero,
+and the overflow-safe range check is `relative_lba + sector_count <= 1920`.
+Read payloads must be all zero; unused write payload bytes must be zero; flush
+requires LBA zero, count zero, and an all-zero data area. The userspace server
+uses an eight-sector read-ahead cache and coalesces contiguous writes up to
+eight sectors. A batch is only a bounded transport/performance unit: the
+kernel driver still executes its sectors individually, so it is not an atomic
+multi-sector transaction.
+
+The kernel storage broker owns only capability policy and raw-sector
+mediation: unique owner/epoch, session queue, request token assignment,
+completion retrieval, bounds checking, and process-exit cleanup. The EL0
+StorageServer owns the AppData path namespace, protocol handling, and
+`bndr-appdata` volume logic. The sealed markers make this boundary auditable:
+`kernel_namespace_ops=0`, `namespace_policy=0`, and `block_driver=kernel`.
+One idle StorageServer exit followed by same-slot generation replacement,
+volume reacquisition, and client rebind is covered; this is not recovery from
+an in-flight request or a reset block device.
+
+M55 keeps the logical ARM timer at 100 Hz. After a storage completion, the
+physical compare value may be pulled forward for a one-shot interrupt without
+advancing that logical clock; the first newly runnable StorageServer/client
+context receives a one-shot preference only at the normal audited
+exception-return boundary. The proof traverses a real timer IRQ and validates
+the TrapFrame, translation context/TTBR, and stack switch
+(`trapframe_switch=1`). It does not claim that the system tick was raised above
+100 Hz.
+
+The scheduling proof uses a conservation ledger:
+`completion_scans=candidate_scans+no_candidate_scans`,
+`candidate_scans=preferred_requests+preferred_coalesced`, and
+`preferred_requests=preferred_dispatches+stale+preferred_pending`.
+At the ready seal, `stale=0` and `preferred_pending=0`, while
+`0<immediate_interrupts<=immediate_requests<=I/O completions`. A storage
+completion can arrive before its client has entered a blocking `StorageTake`,
+so that scan legitimately has no candidate waiter. Therefore the older
+`preferred_requests == all I/O completions` assumption is an invalid invariant.
+
+The three-boot storage ledger is:
+
+| boot | AppData generation / app stage | read batches / sectors | write batches / sectors | flushes | completions |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 1 | `4 / 1` | `1425 / 11400` | `289 / 2121` | 12 | 1726 |
+| 2 | `5 / 2` | `765 / 6120` | `45 / 290` | 2 | 812 |
+| 3 | `5 / 2` | `606 / 4848` | `0 / 0` | 0 | 606 |
+
+All three boots report maximum batch width 8, zero broker bounds rejection,
+zero I/O error, `namespace_policy=0`, and positive one-shot/preferred-dispatch
+evidence. The canonical virgin partition and those boots establish generation
+`0 -> 4 -> 5 -> 5`. Boot 3 leaves the AppData partition byte-for-byte equal to
+boot 2, with SHA-256
+`d105d3eecbeee5e77774c1d37f83e11406e50e020d6abd48c0b4a56f9980b089`.
+The raw 8 MiB disk is expected to differ after every boot because the separate
+`BNDROID_DATA` boot counter advances; only the `BNDROID_APPDATA` partition is
+the stable-third-boot equality witness.
+
+The dedicated acceptance command is:
+
+```bash
+CARGO_NET_OFFLINE=true ./scripts/check-storage-server-runtime.sh
+```
+
+On 2026-07-17, the complete `./scripts/test.sh` run finished successfully and
+emitted exactly one terminal status line:
+
+```text
+BNDROID_TEST_SUITE_OK qemu_boot_profiles=5 framebuffer=1 keyboard_qmp=1 tablet_touch_qmp=1 compositor_interaction=1 userspace_surface=1 userspace_ui=1 ui_screenshot=1 process_terminate=1 app_lifecycle=1 app_crash_recovery=1 mapped_graphics=1 graphics_owner_death=1 graphics_surface_restart=1 graphics_producer_orphan=1 graphics_frame_clock=1 graphics_swapchain=1 multi_window=1 persistent_window=1 text_input=1 soft_keyboard=1 input_server=1 input_server_surface_restart=1 input_server_restart=1 service_supervisor=1 service_dependency=1 post_recovery_interaction=1 post_recovery_focus=1 post_recovery_focus_roundtrip=1 post_recovery_lifecycle_focus=1 app_data_runtime=1 storage_server_static=1 storage_server_runtime_boots=3 storage_negative_cases=11 persistence_reboot=1 recovery=1 irq_race=1
+```
+
+At the M55 seal, reset-required failures remained fail-closed: the kernel ABI
+published `Status::RequiresReset = 18`, the service mapped that condition into
+its protocol status, and the broker/lower layer could latch
+`RecoveryRequired`. M56 subsequently adds the bounded session-fatal recovery
+path above; M55's idle server restart is still historical and must not be
+rewritten as that M56 proof.
+
+M55 and historical M56 remain bounded single-core QEMU research prototypes with
+`general_runtime=0`. It has no general POSIX runtime, general fd/rename/link or
+cache, encryption/authentication/anti-rollback, networking, cellular/telephony,
+Wi-Fi, audio, power-management stack, production security/update stack, real
+phone drivers, real-hardware validation, or product power-loss recovery. It is
+useful architecture evidence, not a real usable phone system.
+
+## M54 historical capability-scoped crash-safe AppData seal
+
+M54 is the opt-in `app-data-runtime` child of the complete historical M53
+prefix. It selects ABI v24 and syscalls 42--46 without changing the default or
+M53 ABI-v23 builds. `AppDataRootOpen` derives the namespace from the
+kernel-authenticated image identity: only App obtains principal 1. Init,
+Launcher, SurfaceServer generation 1, and SurfaceServer generation 2 are denied,
+so callers cannot choose or impersonate a principal. The root carries
+`READ|WRITE|DUPLICATE` (`0x07`) and no `TRANSFER`; a read-only attenuation
+cannot regain WRITE, and handle-transfer escalation is rejected.
+
+The ABI accepts canonical UTF-8 root-relative paths of at most 64 bytes and
+four non-empty components. One file is at most 4096 bytes; one principal has at
+most 32 file/directory entries and 128 KiB live file payload. File replacement
+is an atomic whole-value operation with absent/any/generation CAS, while
+directory create, unlink, full readback through immutable VMOs, and weak bounded
+directory cursors cover the deliberately small namespace. This is not a POSIX
+file-descriptor interface.
+
+`BNDROID_APPDATA` is GPT partition index 2 at LBA 128--2047 inclusive, exactly
+1920 512-byte sectors, and does not overlap the system or historical
+`BNDROID_DATA` LBA 64--127 partition. The allocation-free `bndr-appdata` core
+uses an immutable superblock, two checkpoints, and two copy-on-write snapshot
+banks. A normal mutation writes the inactive bank, flushes, writes its
+checkpoint, then flushes. All 292 mutation write/flush crash points recover the
+complete old or new snapshot and never a mixture. First format publishes an
+exact sealed intent before populating bank 0 and publishes the immutable final
+superblock last; all 965 sector-atomic format write/flush points can finish at
+generation 0. A torn first intent, torn final superblock, malformed intent, or
+polluted out-of-scope media fails closed rather than being guessed virgin.
+
+The dedicated acceptance command is:
+
+```bash
+CARGO_NET_OFFLINE=true ./scripts/check-app-data-runtime.sh
+```
+
+It has exited 0 offline, uses local Unix QMP only, and passes `-nic none` to
+every QEMU launch. Boot 1 formats generation 0 and creates directory plus v1
+file state at generation 2; boot 2 mounts generation 2 and upgrades to v2 at
+generation 3; boot 3 mounts stable generation 3 without an AppData write. A
+separate copy with the newest checkpoint corrupted falls back to intact
+generation 2 and re-upgrades to generation 3. This deterministic corruption is
+not a power-cut injection, so the exact host seal intentionally says
+`powercut_claim=0`:
+
+```text
+APPDATA_RUNTIME_QMP_OK abi=24 boots=3 phases=created-v1/upgraded-v2/stable-v2 generations=0-2-3 persistent_image=1 authority=unique prefix=m49-m53 qmp_inputs=11/11/11 screenshots=frozen disk_scope=data64-127/appdata128-2047 recovery=corrupt-newest-checkpoint/fallback-gen2/reupgrade-gen3 old_or_new=1 mixed_snapshot=0 powercut_claim=0 boot='M54 capability-scoped crash-safe AppData runtime verified'
+```
+
+The checker's four captured frames retain M50 SHA-256
+`798d5cbce5830b315444967974ad8abcbf77f19fea87063a554cfc986e149974`, M51
+SHA-256 `cb84032b533910a88c74a767148702894336b9bf8409663fbd2f9aa49f8ec729`, and
+M52/M54 SHA-256
+`97807add9d09682d39e75ace000bc1ccb7548c6b5e97854bde1f3166976e6dfb`.
+The historical M53 frame has that same third hash and remains a zero-pixel
+change from M52. Focused validation records 22 `bndr-appdata` tests, 32 ABI
+tests, and 299 M54 kernel tests. The M54 boot-monitor stack is 256 KiB; the
+historical M53 stack remains 128 KiB. These focused results and the dedicated
+checker are included in the complete offline `./scripts/test.sh` run, which has
+exited 0 with the exact terminal marker:
+
+```text
+BNDROID_TEST_SUITE_OK qemu_boot_profiles=5 framebuffer=1 keyboard_qmp=1 tablet_touch_qmp=1 compositor_interaction=1 userspace_surface=1 userspace_ui=1 ui_screenshot=1 process_terminate=1 app_lifecycle=1 app_crash_recovery=1 mapped_graphics=1 graphics_owner_death=1 graphics_surface_restart=1 graphics_producer_orphan=1 graphics_frame_clock=1 graphics_swapchain=1 multi_window=1 persistent_window=1 text_input=1 soft_keyboard=1 input_server=1 input_server_surface_restart=1 input_server_restart=1 service_supervisor=1 service_dependency=1 post_recovery_interaction=1 post_recovery_focus=1 post_recovery_focus_roundtrip=1 post_recovery_lifecycle_focus=1 app_data_runtime=1 storage_negative_cases=11 persistence_reboot=1 recovery=1 irq_race=1
+```
+
+M54 remains a single-core QEMU, single-principal, fixed-capacity research
+prototype. AppData requests execute in the kernel monitor, not an independent
+StorageServer, and there is no POSIX layer, general writable fd, rename/link,
+block/page cache, encryption, authentication, anti-rollback, multi-App
+isolation, real block controller, or phone-hardware closure. Consequently
+`general_runtime=0`; this cannot be called a real usable phone system.
+
+Feature-off and historical M53 processes enter through the versioned ABI v23
+`svc #0` interface; the opt-in M54 profile reports ABI v24 on the same entry
+mechanism and adds only syscalls 42--46. The system exercises scalar, bounded
+byte-buffer, move-only handle-transfer, process-lifecycle, and object-wait
+calls. Faultable user buffers are copied with PAN kept enabled via
+two exact `LDTRB`/`STTRB` exception-table sites; unrelated kernel faults remain
+fatal, and failed IPC copies do not publish or consume a message. User image
+pages are EL0 RX, R/NX, or RW/NX as appropriate, while each four-page EL0 RW/NX
+stack has an unmapped guard at each end. Private EL1 `svc #0xb0` is unreachable
+from EL0, and a deliberate EL0 read of kernel text is contained by faulting only
+the user task. `SCTLR_EL1.nTWI` is explicitly configured to permit one deliberate
+EL0 `WFI` in init; the periodic timer IRQ deterministically interrupts it and
+preempts back through the lower-EL path, so `lower_irq` evidence does not depend
+on build speed. `CNTKCTL_EL1` and `PMUSERENR_EL0` remain cleared. The default
+profile proves `init` plus eight fresh child instances; M33 and M35 each prove
+nine child instances because they run two App generations, while M34 proves
+ten across three App generations. Every instance validates
+rodata, initialized data, zero-filled BSS, and all four stack pages at runtime.
+
+ABI v19 retains syscalls 0--31 and adds syscalls 32--36 for mappable
+GraphicsBuffer map/unmap/queue/acquire/release. ABI-v18 syscall 31 remains
+`ProcessTerminate`. Only
+`init` may force a generation-qualified dynamic child terminal; both reserved
+arguments must be zero, and a successful `ProcessWait` reports stable reason
+`Killed` and exit code 137. Invalid/self/stale PID, nonzero flags, not-found,
+and non-init caller paths are rejected without terminating another process.
+The dedicated termination acceptance also proves waiter wake, tombstone
+consumption, reaping, and restored process/address-space resources.
+
+Kernel contexts use the boot TTBR0 root with ASID 0, while `init` uses a private
+root with ASID 1. The feature-off process table has capacity eight: `init` plus
+seven dynamic children; InputServer profiles raise it to capacity nine, while
+M66/M67 raise it to capacity ten so the ninth dynamic slot can hold their
+bounded resident graph. The first
+ServiceManager, provider, and primary client each own a
+distinct generation-qualified PID, private TTBR0 root, non-kernel ASID,
+user-frame set, guarded user stack, and page-aligned 16 KiB kernel/exception
+stack, and receive exactly one explicitly moved startup Channel. After manager
+generation 1 is reaped and generation 2 is running, M20 starts a second client
+from the same client ELF in the fourth dynamic slot and keeps both clients
+resident. The peak and final M20 service set therefore contained manager 2,
+provider, primary client, and secondary client at the same time. M30 also
+kept the standalone SurfaceServer and Launcher resident in the fifth and
+sixth dynamic slots. M31 keeps App resident in the seventh. A further
+concurrent `ProcessSpawn(startup_handle, image_id, flags=0)` returns
+`ShouldWait` before image/address-space allocation or startup-handle movement.
+Unknown image IDs and nonzero flags return `InvalidArgument`;
+selecting the non-spawnable init image returns `PermissionDenied`. All three
+rejections occur before the startup handle is consumed, and the retained handle
+is proved usable.
+After `ThreadExit`, the monitor waits until live SP and TTBR0 evidence has moved
+to a kernel context, then the profile-sized reaper tears down each address
+space. A
+generation-qualified completion tombstone retains exit-before-wait and
+non-target-reap results and prevents slot reuse until the matching wait consumes
+it. After the first manager completion is consumed, its slot is reused by the
+second manager with the PID generation advanced exactly once.
+
+The handle table stores generic `KernelObject` values: Channel, manual-reset
+Event, immutable VMO, the unit-valued system-directory capability, and the
+unique Surface capability. Channel
+messages carry up to 64 inline bytes plus one move-only object. Source handles
+become stale only at commit; failed writes or reads preserve the exact source
+or FIFO head, and dead receivers drain unread owning messages outside the
+Channel lock. Every Channel has a nonzero monotonic ID, and an owning message
+may contain another Channel only when the transport Channel is older than the
+transferred Channel. This strict ordering forms an ownership DAG and rejects
+self, equal-ID, and reverse edges before usercopy. It prevents Channel
+reference cycles, at the cost of conservatively rejecting some otherwise
+acyclic transfer topologies. VMO identity follows its shared allocation;
+directory capabilities carry no waitable signals.
+
+ABI syscall 15, `ObjectWait`, requires `Rights::WAIT` and accepts only signals
+valid for the object's type: Channel exposes `READABLE`, `WRITABLE`, and
+`PEER_CLOSED`, while Event exposes `SIGNALED`. ABI v10 retains syscalls 16--18 to create,
+signal, and clear a transferable Event. Signal/clear are idempotent and report
+whether an edge changed the manual-reset state; a rising edge wakes matching
+waiters only after relevant locks are released. The bounded single-core waiter
+records `{epoch, ProcessId raw, HandleValue raw, requested signals}` and covers
+both immediate and blocking completion without stale or lost wakeups.
+
+ABI v10 retains syscall 19, `ObjectWaitMany`, as an allocation-free, fixed two-item
+wait-any operation. Its `x0` and `x1` arguments each pack one
+generation-qualified handle with its signal mask; `x2` is a relative timeout
+in nanoseconds, where zero is a pure poll and `u64::MAX` means infinite. A
+finite duration is rounded up to an architectural-counter deadline, every item
+and right is validated before any ready item is returned, and simultaneous
+readiness deterministically selects the lowest index. The exact token includes
+both ordered items and the deadline. A single counter sample is the arbitration
+point: once a finite hard deadline has been reached, timeout wins over readiness
+or invalidation observed by that or any later scan. Signal completion and the
+100 Hz timer scan run with local IRQ serialization on the current single core,
+so timeout completion is never early but may be observed up to one timer tick
+late.
+
+ABI v10 added syscall 20, `ChannelPeek`. It requires `Rights::READ`, requires
+both reserved arguments to be zero, and reports the queued head as
+`Scalar`/`Bytes`/`Transfer` plus its logical length without consuming it or
+waking waiters. An already queued message wins over peer closure. Peek and the
+following read are deliberately not atomic; the current manager is the sole
+reader of each session endpoint, so that limitation was explicit rather than
+hidden.
+
+ABI v11 adds syscall 21, `ChannelReadEnvelope`, as the atomic generic receive
+API. Its fixed 112-byte canonical little-endian envelope carries the
+generation-qualified kernel-stamped sender PID, message kind and logical
+length, received handle, scalar fields, and a zero-padded 64-byte data area.
+The kernel stamps the actual process that enqueues the message; possession of a
+session endpoint is therefore no longer treated as writer identity. Before a
+dequeue, the kernel validates the complete destination range as writable so a
+late byte fault cannot expose a partially copied envelope. Scalar, byte, and
+handle-transfer failures preserve the exact FIFO head. Transfer receive also
+reserves the prospective destination slot before publication, so rollback
+preserves the object, rights, sender PID generation, and source ordering.
+
+ABI v12 adds syscall 22, `ObjectWaitManyArray`, without changing legacy syscall
+19. `x0` points to a canonical little-endian array of one through eight packed
+wait items, `x1` is the item count, and `x2` retains the poll/infinite/relative
+nanosecond timeout contract. Each item is exactly eight bytes, so the bounded
+PAN-on copy-in is at most 64 bytes. The kernel completes that copy and validates
+every generation-qualified handle, `WAIT` right, and object-specific signal
+mask before observing any readiness; simultaneous readiness returns the lowest
+index. A blocking token records an explicit completion kind plus epoch, PID,
+all ordered items, and the exact deadline, preventing legacy-two-item and array
+completions from aliasing. Historical M19 exercises a real eight-item block/wake through
+the signal path, alongside immediate, poll, count, bad-address, partial-copy,
+full-validation, and lowest-index cases.
+
+ABI v13 adds syscall 23, `FileOpenAt(root, path_ptr, path_len)`. Paths are
+canonical, UTF-8, root-relative byte strings of one through 64 bytes; empty,
+absolute, repeated-separator, `.`/`..`, trailing-slash, NUL, missing, and bad-
+address cases are rejected. Authority comes only from the supplied system-
+directory handle. On success the call returns a new immutable VMO handle and
+the exact file size.
+
+ABI v13 also adds syscall 24, `VmoRead(vmo, destination, packed_range)`, where
+the high and low halves of `packed_range` are 32-bit offset and requested
+length. One call copies at most 4096 bytes, truncates a valid range at EOF,
+returns both bytes copied and total VMO size, and treats exact EOF as a
+successful zero-byte read. The EL0 proof checks both complete file contents and
+digests, a partial range, EOF, offset/length bounds, bad user addresses, rights
+attenuation, a stale closed handle, and a zero-payload Channel transfer whose
+received VMO remains readable.
+
+The allocation-free `no_std` `bndr-sm` crate provides the service-discovery
+foundation: a strictly decoded, versioned 64-byte `BSM1` v1 frame, at most
+32-byte service names, and a fixed four-entry registry with
+generation-qualified, manager-epoch-namespaced instance IDs. M15 added strict
+`Unregister`/`UnregisterReply` opcodes without changing the 64-byte frame or
+protocol version. The broker runs in an independent
+EL0 ServiceManager process supervised exclusively by `init` through
+`ProcessSpawn`/`ProcessWait`. For each provider/client attachment in each
+manager generation, `init` transfers matching strict 64-byte `BSA1` v1
+`SupervisorAttachFrame` values and the two ends of a session Channel to the
+manager and that long-lived dependent. The frame attests the provider/client
+role, manager epoch, and owner PID for this bootstrap capability session; it
+is not a reusable caller credential for arbitrary later requests.
+
+Manager generation 1 registers the provider, lets the client obtain a direct
+business endpoint, completes an echo, and exits with one nonstandard code as a
+restart request. Provider and client survive, observe both manager session
+endpoints close, and are rebound to manager generation 2 in the same process
+slot with PID generation +1. The second epoch repeats registration, discovery,
+and direct echo; its namespace rejects the stale epoch-1 instance. After
+`InitReady`, init drives two additional requests with distinct transaction IDs
+`0x101` and `0x102`. Each request traverses lookup, connection-endpoint transfer,
+and direct client/provider echo before the client commits its ACK. The kernel
+accepts ACK/DONE evidence only when the init-side generation-qualified handle is
+the recorded startup peer of the expected client, manager, or provider image;
+message payloads cannot assert their own source. Across bootstrap and post-ready
+work, M14 established exactly six lookups, four connects, and four echoes.
+
+M15 then has the provider drive one bounded ten-phase lifecycle through manager
+generation 2: register, client echo, provider echo confirmation, unregister,
+client `NotFound`, re-register, reject the old instance, a second client echo,
+provider echo confirmation, and cleanup. Eight pairwise-distinct transaction
+IDs `0x201` through `0x208` bind this order; the dynamic instances are
+`0x00020002` and `0x00020003`, and the final manager/provider/client DONE reads
+produce bitmap `0x7`. Explicit provider confirmation handshakes make the
+reported `causal_order=1` a proved happens-before chain rather than an init-side
+timing assumption. At that historical M15 boundary the kernel bound only
+init's generation-qualified startup peers to expected image roles, so its
+evidence deliberately reported `writer_identity=0`; M17 supersedes that
+limitation for Channel messages with kernel-stamped sender identity.
+
+M16 removes the manager's dependency on "the Nth request". It peeks at the
+message kind, strictly decodes the BSM1 opcode, and dispatches provider
+`Register`/`Unregister` and client `Lookup` requests by kind plus opcode. After
+the complete M15 cleanup, round 1 registers instance `0x00020004` with txid
+`0x301`, performs lookup/direct echo at `0x302`, and uses an explicit provider
+confirmation to prove the causal edge. It then unregisters at `0x303`, observes
+the transferred connector peer close, and proves `NotFound` at `0x304`.
+Manager, provider, and client each publish one DONE record. The fixed-space
+transcript ends at `round=1 step=5 completed_rounds=1 errors=0 done_reads=3
+done_bitmap=0x7`; it stores no unbounded request history.
+
+M17 moves every manager ingress path to the atomic envelope receive. The
+manager records the authenticated supervisor, provider, and client PIDs during
+bootstrap, applies that allowlist to every later request, and derives registry
+ownership from the actual kernel-stamped sender rather than a payload or
+endpoint role. Its adversarial path duplicates the provider session endpoint,
+relays it through init to the client, and sends a syntactically valid provider
+request from the client. Endpoint possession is insufficient: the manager
+returns `PermissionDenied`, leaves the registry unchanged, closes the rejected
+connector, and restores the exact resident topology without a handle leak.
+`IPC_IDENTITY_OK` and `SERVICE_ACL_OK` report this result with
+`writer_identity=1`. A separate allocation-free 48-byte service-cycle reducer
+is tested across all 120 request-order permutations, all six DONE-role orders,
+wrong role/transaction/instance/round inputs, recovery after rejection, and
+1,024 completed rounds.
+
+Historical M18 added one deliberately bounded concurrent service slice. `init`
+started a second instance of the client ELF, duplicated one shared manager
+request bus to both clients, and gave each request its own moved private reply
+Channel. The fixed transcript accepted `0x501` and `0x502` in either arrival
+order, required READY/QUEUED/DONE `0xf/0x3/0xf`, then exited and reaped the
+secondary. That result remains historical evidence for authenticated overlap,
+private reply routing, cleanup, and same-image process reuse; its
+`SERVICE_MULTICLIENT_OK` line was not emitted by the M31 path and remains absent in M32.
+
+Historical M19 generalized the wait substrate rather than the service runtime.
+Syscall 22 accepts the bounded user array described above, and the
+scheduler/object-wait layer distinguishes single, legacy-many, and array
+completion kinds while comparing the complete token exactly. Its eight-item
+signal block/wake, validation, rollback, and lowest-index cases remain live M31
+regression coverage. Array finite-timeout expiry and cancellation are still not
+exercised through the wait API. The ABI-v18 termination contract, retained by
+ABI v19, proves that init-only forced
+termination abandons a blocked child's published waiter, but it is not a
+general caller-controlled cancellation facility.
+
+M20 replaces the transient shared-bus round with two independently identified,
+long-lived client sessions and keeps both Client processes resident. `init`
+binds the provider to the full generation-qualified primary and secondary PIDs,
+and each client validates manager replies against the current manager PID. A
+fixed 23-phase transcript first attaches secondary lease 1 and deliberately
+stalls its transaction `0x601` after provider acceptance. Primary transaction
+`0x602` completes while that secondary is stalled. Manager and secondary then
+revoke lease 1, the provider aborts `0x601`, and primary transaction `0x603`
+completes while the secondary session is detached. The same secondary process
+reattaches as lease 2; both manager and client reject a stale lease-1 revoke,
+then transaction `0x604` completes and manager/provider return to their exact
+idle waits. The kernel-authenticated result is `phase=23 errors=0`, with
+attach counts `2/2`, revoke/stale-revoke/primary-progress bitmaps `0x3/0x3/0x3`,
+provider accept/echo/abort counts `4/3/1`, one secondary echo, and final idle
+bitmap `0x3`. M29 historically added one orthogonal Surface capability without
+changing this 16-endpoint/eight-pair core Channel graph.
+
+Only manager 1 exits and is reaped. Manager 2, provider, primary client,
+secondary client, SurfaceServer, Launcher, and App deliberately remain resident
+beside init. `ResidentChildren`
+in init and `ResidentState` in each service keep the registry and raw handles
+reachable from userspace. The M20 core graph still contains 16 unique Channel
+endpoints in eight peer pairs. In
+`init-manager/init-provider/init-client/manager-provider/manager-client/provider-client`
+order, its cross-image pair census is `1/1/2/2/2/0`. M30 historically added one
+UI pair between SurfaceServer and Launcher; M31 adds the App pair, so the final
+graph is 20 endpoints/ten pairs. Every live endpoint has `CHANNEL_DEFAULT` rights. At
+startup convergence, manager 2 publishes an infinite four-item array wait over
+only its core startup/provider/primary/secondary endpoints; provider publishes
+an infinite two-item array wait, and both clients publish infinite two-item
+legacy wait-many tokens. SurfaceServer publishes a three-item array wait over
+its Surface and two UI Channels, while Launcher and App each publish one
+single-object Channel wait. Every item requests mask `0x5`
+(`READABLE|PEER_CLOSED`). Init keeps one `ProcessWait` targeting manager 2;
+M32's retained App/server GraphicsBuffer handles raise the per-image vector to
+`4/5/3/4/4/1/2` (23 total), while pending
+object/legacy-many/array slots are `7/2/3`. The complete
+wait-token fingerprints, process/handle/graph/queue
+vectors, retained M14–M17 transcripts, M19 wait-array evidence, and M20
+multi-session transcript form the exact startup convergence proof. The
+continuing monitor checks the structural graph, handles, exclusive
+SurfaceServer ownership,
+processes, heaps, and frames; it does not falsely require the SurfaceServer to
+remain blocked while it is legitimately draining input or presenting a frame.
+
+This is deliberately bounded evidence. M20 proves progress for one primary
+while one secondary is stalled or detached, one secondary lease
+revoke/reattach, stale-generation rejection, and exact cleanup back to a
+two-client idle graph. It uses fixed roles, exactly two client sessions, and a
+scripted control order; provider work remains bounded and there is no arbitrary
+process-crash recovery, owner-exit cleanup, product authorization policy,
+fairness guarantee, or open-ended request loop. The marker therefore reports
+`process_crash_restart=0 general_runtime=0`. It is not a complete
+memory-ownership or long-term leak proof, and the 16-bit supervisor epoch must
+never repeat.
+
+Historical M21 established discovery, feature negotiation, permanent ownership
+of two DMA frames, and serial polling reads through one modern virtio-mmio v2
+read-only device. M22 leaves the complete M20 syscall, service transcript,
+resident process, handle, Channel graph, queue, and wait-token ledger unchanged
+while replacing that polling completion boundary with a real hard-IRQ path.
+It resolves QEMU's raw `0/47/1` GIC specifier to edge-rising INTID 79, programs
+GICv2, publishes sector 0 and 1 together in distinct request slots at descriptor
+heads 0 and 3, ACKs and drains the device before EOI, and completes both through
+one generation-qualified tracker. At that historical boundary, two fixture
+reads totaled 1024 bytes and a request at the exact capacity boundary was
+rejected before queue publication.
+
+M23 preserves that IRQ/DMA ownership model and the full M20 service ledger,
+but replaces the old two-sector-only acceptance boundary with an 8 MiB,
+16384-sector GPT/FAT16 fixture. A fixed-space block reader validates the
+protective MBR, both GPT headers and arrays, the selected `BNDROID_SYS`
+partition, mirrored FAT16 metadata, two directory levels, exact file contents,
+and VFS path confinement. Its 142 parser reads plus the two initial reads yield
+144 requests/completions/IRQ completions while the same two DMA frames remain
+owned.
+
+The dedicated timeout build suppresses queue notification, reaches one physical-
+counter timeout, uses a fresh deadline for reset, invalidates both old tokens,
+ACKs one simulated post-reset late interrupt as spurious without double
+completion, and then proves recovery with another two-sector IRQ read against
+the M23 fixture. Its BOOT marker deliberately remains the M22 recovery marker
+because that feature isolates the transport race rather than running GPT/FAT16/
+VFS, DATA persistence, or publishing the M24 catalog/root capability. The
+unchanged M25 storage layer reports `writes=1 partitions=2 filesystem=1 vfs=1 persistence=1
+flush=1 readback=1 el0_storage=1 catalog_files=2 catalog_bytes=68
+runtime_disk_io=0 mapped=0 shared_memory=0 filesystem_write=0
+crash_consistency=0 general_runtime=0`.
+
+Exactly three normal-path `ShouldWait` returns are intentional: the
+capacity-overflow dynamic concurrent spawn, the post-`BadAddress` empty-queue check, and the
+bounded
+dynamic-lifecycle empty-connector probe. None is a polling retry loop;
+the emitted `PROCESS_WAIT_OK spawn_retries=1` accounts for the deliberate
+capacity probe, while the residual diagnostic is `ready_retries=1`.
+
+## Prerequisites
+
+- `rustup` (the repository pins Rust and its required components in
+  `rust-toolchain.toml`)
+- `qemu-system-aarch64` 10.x or a compatible version
+
+## Build, run, and test
+
+```bash
+./scripts/build-kernel.sh
+./scripts/build-storage-image.sh
+./scripts/run-qemu.sh
+./scripts/test.sh
+```
+
+The historical fully verified M42 ABI-v20 seal has 500 default workspace tests
+(`20/41/19/31/99/0/290`) plus 23 feature-gated tests for 523 unique host tests
+and 313 unique kernel tests. The sealed M43 ABI-v21 code ledger has 522
+default tests: 21 ABI, 44 `bndr-compositor`, 19 ELF, 31 ServiceManager, 111
+`bndr-ui`, 0 init, and 296 default kernel tests
+(`21/44/19/31/111/0/296`). Suite feature filters add 11 `ui_trace`, 10
+`window_trace`, and 3 `persistent_window_trace` tests for 546 unique host
+tests; the complete text-input kernel feature build has 321 tests. The hardened
+M43 QEMU checker passes twice consecutively, the M42 profile passes again under
+ABI-v21, and default/all-feature AArch64 Clippy pass. The complete M43
+`./scripts/test.sh` now exits 0 with the exact final marker
+`BNDROID_TEST_SUITE_OK qemu_boot_profiles=5 framebuffer=1 keyboard_qmp=1 tablet_touch_qmp=1 compositor_interaction=1 userspace_surface=1 userspace_ui=1 ui_screenshot=1 process_terminate=1 app_lifecycle=1 app_crash_recovery=1 mapped_graphics=1 graphics_owner_death=1 graphics_surface_restart=1 graphics_producer_orphan=1 graphics_frame_clock=1 graphics_swapchain=1 multi_window=1 persistent_window=1 text_input=1 storage_negative_cases=11 persistence_reboot=1 recovery=1 irq_race=1`.
+The historical M42 ABI-v20 500-default/523-unique seal remains unchanged.
+The historical M44 head has 549 default workspace tests
+(`21/51/19/19/31/112/0/296`), 28 feature-filtered additions and therefore 577
+unique host tests; `soft-keyboard-runtime` has 324 kernel tests. Its dedicated
+QEMU checker, three screenshot validations, and complete `./scripts/test.sh`
+matrix pass; the exact M44 suite marker is recorded in its historical seal
+above. The historical M45 head has 599 default workspace tests
+(`26/51/19/64/31/112/0/296`) plus 24 directed feature-filter tests
+(`11 ui_trace + 10 window_trace + 3 persistent`) for 623 executed/unique host
+tests; its input-server kernel build has 334 tests. The dedicated checker,
+three M45 screenshots, and complete suite pass with `input_server=1`; the exact
+guest, QMP, and suite markers are recorded in the historical M45 seal above.
+The historical M46 head has 626 default workspace tests
+(`26/51/19/82/31/120/0/297`) plus the same 24 directed feature-filter tests for
+650 executed/unique host tests; its restart profile has 335 kernel tests. The
+staged restart checker, three phase screenshots, unchanged M45 checker, and
+complete suite pass with `input_server_surface_restart=1`; the exact recovery
+ledger and image hashes are recorded in the historical M46 seal above. The
+historical M47 ABI-v23 head has 650 default workspace tests
+(`26/51/19/106/31/120/0/297`) plus 24 directed feature-filter tests for 674
+executed/unique host tests; its InputServer-restart profile has 338 kernel
+tests. Dedicated pre/gap/post QMP, M45/M46 isolation regressions, and the full
+suite pass with `input_server_restart=1`; the exact ledger and image hashes are
+recorded in the historical M47 seal above. The historical M48 ABI-v23 head has
+670 default workspace tests (`26/51/19/106/51/120/0/297`) plus 24 directed
+feature-filter tests for 694 executed/unique host tests; its
+ServiceSupervisor profile has 338 kernel tests. Dedicated four-phase M48 QMP,
+M45/M46/M47 isolation regressions, and the complete static matrix pass.
+The complete offline `scripts/test.sh` passes with `service_supervisor=1`; its
+exact marker is recorded in the historical M48 seal above. The historical M49
+ABI-v23 seal keeps syscalls 0--41 unchanged and adds the independently checked
+two-service dependency run: SurfaceServer generation 1--2 recovery, then an
+InputServer 100 ms health-timeout, fixed 30 ms restart backoff, generation 2
+rebound, and final green recovery without a restart storm. Its exact marker,
+five screenshot hashes, offline checker, and `-nic none` boundary are recorded
+in the historical M49 seal above. The historical M50 seal then proves the
+outside-phone rejection, accepted App input-to-frame path, output frame 4,
+second health replies, and resident topology without changing ABI or capacity.
+The historical M51 seal adds the fixed Launcher `(80,96)` down/up, App/3 to
+Launcher/4 focus handoff, output frame 5, exact damage, and resident health
+proof without changing ABI or capacity. The historical M52 seal then returns
+focus Launcher/4 to App/5 with physical `10/11`, commits output frame 6, and
+locks the compositor/PPM damage-coordinate distinction without changing ABI or
+capacity. The historical M53 seal authenticates session-2 Ready and lifecycle
+focus App/1→Launcher/2→App/3 across both clients without another input report,
+output commit, or framebuffer change. The historical opt-in M54 seal retains
+that entire prefix and adds the capability-scoped AppData evidence described
+above. M58, and now M60 through M58, extend the separate M55 -> M56 -> M57
+storage-focused profile only and do not replay the M49--M54 UI transcript.
+Historical M59's AppData child instead inherits the M54/M53 prefix, while its
+ABI-v23 timeout ledger is an independent M32 low-level self-test.
+The default M32 UI baseline has 24
+inputs and 13 commits: four legacy
+Launcher commits plus nine buffer-backed App commits. The deterministic,
+default-disabled `ui-stale-present-evidence` run has 36 inputs/18 commits; App
+frame 10 is read at generation 8, cancelled at generation 9, retried at
+generation 10, and followed by Home at generation 11. The
+three Settings buffer generations are `76/151/226`; the final RGB SHA-256 is
+`62b15db5e54d3bbca7bd23e74a60e7fc66d2566e2094be7718e7c8f1a0ebc5dd`,
+with scene/scanout digests `0xf38fcac0ca9b43a5/0x9ea54989d1a75b09`
+and 13 colors. The historical complete M39 `./scripts/test.sh` exits 0 with the dedicated
+graphics-surface-restart, graphics-producer-orphan, and graphics-frame-clock checks, five normal QEMU profiles,
+framebuffer/keyboard/tablet/compositor/UI screenshot, the
+ABI-v19 termination check, the M33 lifecycle check, the M34 crash-recovery
+check, the M35 mapped-graphics check, the M36 graphics-owner-death check, the
+M37 graphics-surface-restart check, the M38 graphics-producer-orphan check, the
+M39 graphics-frame-clock check, all
+retained negative/rollback/fault checks, 11 storage negatives,
+persistence/recovery, and the storage IRQ race. It ends with
+`BNDROID_TEST_SUITE_OK qemu_boot_profiles=5 framebuffer=1 keyboard_qmp=1 tablet_touch_qmp=1 compositor_interaction=1 userspace_surface=1 userspace_ui=1 ui_screenshot=1 process_terminate=1 app_lifecycle=1 app_crash_recovery=1 mapped_graphics=1 graphics_owner_death=1 graphics_surface_restart=1 graphics_producer_orphan=1 graphics_frame_clock=1 storage_negative_cases=11 persistence_reboot=1 recovery=1 irq_race=1`.
+The complete M32 interactive matrix remains the certified default-runtime
+evidence; `scripts/check-app-lifecycle.sh` is the separate M33-profile
+acceptance, and `scripts/check-app-crash-recovery.sh` is the dedicated
+M34-profile acceptance. `scripts/check-mapped-graphics.sh` is the dedicated
+M35-profile acceptance, `scripts/check-graphics-owner-death.sh` is the
+dedicated M36-profile acceptance, and
+`scripts/check-graphics-surface-restart.sh` is the dedicated M37-profile
+acceptance, and `scripts/check-graphics-producer-orphan.sh` is the dedicated
+M38-profile acceptance checker. `scripts/check-graphics-frame-clock.sh` is the
+dedicated M39-profile acceptance checker, `scripts/check-graphics-swapchain.sh`
+is the dedicated M40-profile acceptance checker, and
+`scripts/check-multi-window.sh` is the strict M41-profile acceptance checker,
+`scripts/check-persistent-window.sh` is the hardened M42-profile checker, and
+`scripts/check-text-input.sh` is the hardened M43 keyboard/text-editor checker;
+`scripts/check-soft-keyboard.sh` is the M44 tablet soft-keyboard, visibility,
+hidden-hit rejection, and focus-preserving editor checker; and
+`scripts/check-input-server.sh` is the M45 broker-only physical-input,
+generation-qualified route, IME-ownership, and three-screenshot checker.
+`scripts/check-input-server-surface-restart.sh` is the independent M46 staged
+pointer-down/restart/gap-release checker with frozen and reacquired scanout
+validation. `scripts/check-input-server-restart.sh` is the independent M47
+permission-denial/InputServer-restart/backoff/reacquire/resync checker with
+pre/gap/post scanout validation. `scripts/check-service-supervisor.sh` is the
+independent M48 authenticated-health/watchdog/quarantine checker with
+pre/gap/recovered/degraded scanout validation.
+M31 remains historical lower-layer evidence.
+The focused
+QEMU acceptance scripts `scripts/check-framebuffer.sh` and
+`scripts/check-input.sh` retain the headless baseline-frame and exact keyboard
+event proofs; `scripts/check-compositor.sh` retains the historical
+seven-event/three-sample cursor interaction, while `scripts/check-ui.sh` proves
+the userspace-owned 24-sample/13-frame M32 buffer baseline, drag capture,
+full-frame comparison, and a deterministic cancellation/retry run selected
+only for checker evidence by the default-disabled `ui-stale-present-evidence`
+feature. It reaches 36 normalized inputs and 18 contiguous global commits,
+with App-local frame 10 read at generation 8, cancelled at generation 9,
+retried at generation 10, and followed by Home at generation 11. Interactive
+`scripts/run-qemu.sh` starts ramfb with both the virtio keyboard and tablet.
+Historical M25/M26/M27/M28/M29 full runs completed 269/283/297/323/337 host
+tests respectively; they remain lower-layer evidence rather than substitutes
+for the sealed ABI-v20/M42 runtime ledger. That seal has 500 default workspace
+tests, 23 feature-gated trace tests, and 523 unique host tests. M43's sealed
+522-default/546-unique ledger, dedicated evidence, and complete matrix are
+verified as described above. M44 retains its historical
+549-default/577-unique ledger and 324-test soft-keyboard kernel build. M45
+retains its historical 599 default + 24 directed = 623 executed/unique host
+tests with a 334-test input-server kernel build. M46 retains its historical
+626 default + 24 directed = 650 executed/unique host ledger and 335-test
+restart-profile kernel build. M47 retains its historical 650 default + 24
+directed = 674 executed/unique host ledger and 338-test kernel profile. M48
+historically advanced that head to 670 default + 24 directed = 694 executed/unique
+host tests with a 338-test kernel profile; the M48 dedicated checker,
+M45/M46/M47 regressions, phase screenshots, static matrix, and complete offline
+repository-wide suite pass with `service_supervisor=1`.
+The scheduler no-switch injection is now armed only after the longer storage
+probe has published its baseline, preventing early timer IRQs from consuming
+the one-shot fault before the checker can observe the storage contract. The
+M42 seal did not freeze an immutable kernel image or run
+the 16-way same-image stress suite.
+The deterministic 8 MiB fixture is 16384 512-byte sectors and has
+SHA-256
+`6cdca2781345e712a2a0d94d4b1327ed7f971c0a971cfd7d5c5f78b8b6d2e838`;
+that data-fixture checksum is not an immutable-kernel-image claim.
+For historical comparison only, M17 froze a 995920-byte Debug image with SHA-256
+`4163687084f13ff35c14664e8ac93851aef55830051d77dbc0970b46e6b56ded`, and M16
+used a 901712-byte Debug image with SHA-256
+`ee3d46e5a59f6c8e33809bc6a6e61a435818d11930729d027ee8033eb900516e`;
+neither artifact is reused as M42 seal evidence. Historical M19 and M20 also
+completed their own 183-test full matrices, while M21 completed its 199-test
+matrix, M22 completed its 208-test matrix, and M23 completed its 226-test
+matrix, while M24 completed its 248-test matrix; those results remain
+historical rather than substitutes for M35.
+
+The accepted M20 Channel transcript remains unchanged inside both runtime
+profiles. The current default checker fixes the M32 runtime syscall dispatches
+at `599/462/136`, copy-in/out
+calls at `198/198` with `7835/17487` bytes, Channel pairs at 48, duplicate/stale
+close counts at `190/74`, and transfer writes/reads at `65/64`. `ObjectWait` is
+fixed at 455 calls/seven pending slots; wait-array is 57 calls/three pending
+slots. The final eight-process topology has 23 handles, split by image as
+`4/5/3/4/4/1/2`. At the boot observation point, `GRAPHICS_BUFFER_OK` fixes
+create/write/present to `1/1/0`, write bytes to `4`, and two handles to the same
+slot/allocation generation with App/server rights `0x0f/0x09`. `UI_RUNTIME_OK`
+proves distinct SurfaceServer/Launcher/App PIDs, two dedicated UI pairs,
+server-only Surface ownership, handle counts `4/1/2`, dual clients, focus
+routing, the cancelled pre-focus handle handshake, and residency. The default
+boot reaches `BOOT_OK: M32 transferable graphics buffers, M25 durable data records, and M20 multi-session services verified`. The dedicated M33 boot instead
+reaches `BOOT_OK: M33 app lifecycle and generation-safe window replacement verified`
+after its exact 35-message `ALC1`, 14-message `USC1`, two-App-generation, and
+26-endpoint topology checks. The dedicated M34 boot reaches
+`BOOT_OK: M34 app owner-death cleanup and generation-safe crash restart verified`
+after its exact 46-message `ALC1`, 19-message `USC1`, three-App-generation,
+owner-death, killed-waiter, and same exact 26-endpoint topology checks.
+
+The following aggregate ABI and wait counters are the retained M29 ledger,
+included only as historical evidence rather than M32, M33, or M34 evidence. In M29,
+the retained M24 EL0 storage proof kept the init aggregate ABI
+ledger to `588` syscall dispatches: `455` completed successfully, `132`
+returned errors, and one resident `ProcessWait` remains pending. It creates 46
+Channel pairs and six Events, performs 142 Channel writes and 142 reads, and
+completes 126 atomic envelope reads split as
+scalar/bytes/transfer `65/27/34`. The 15 envelope preservation checks remain
+`5/5/5`. Duplicate/close/stale-close/rights-denial counters are
+`189/269/69/18`; byte writes/reads are `47/47`; transfer writes/reads are
+`63/62`, with 30 read rollbacks and five self/five reverse-order rejections.
+Copy-in/copy-out calls are `185/189` with `7415/16479` bytes, `14/11` faults,
+one range rejection, and 25 exact fixups. File opens succeed/call `2/6`; VMO
+reads succeed/call `5/10` and copy 105 bytes; one zero-payload VMO transfer is
+written and received.
+
+That M29 run had 437 `ObjectWait` calls and four final occupied slots. Legacy
+`ObjectWaitMany` has 37 calls, five polls, five timeout wakes, two pending
+tokens, and the schedule-independent conservation
+`immediate + signal_wakes = 25`. The M29 array path participated in the service
+runtime: 54 calls, one poll, two pending tokens, no timeout/cancel/early
+completion, and `immediate + signal_wakes = 51`; invalid-count/bad-address/
+full-validation rejections remain `2/2/1`, with maximum item count 8 and one
+lowest-multi-ready proof. Events retain create/signal-calls/signal-edges/
+clear-calls/clear-edges `6/16/11/16/11`. Child syscalls are `1216`. The process
+ledger is `capacity=5 dynamic=4 created=6 exited=1 reaped=1 live=5 peak_live=5`.
+The exact resident topology is 16 endpoints/eight pairs, cross-image
+`1/1/2/2/2/0`, handles by image `4/6/3/4` (17 total), manager wait items `5`, and pending
+ObjectWait/legacy-many/array slots `4/2/2`. M32's verified boot ledger is instead
+`capacity/dynamic/created/exited/reaped/live=8/7/9/1/1/8`, 20 endpoints/ten
+pairs, handles by image `4/5/3/4/4/1/2`, and pending
+object/legacy-many/array slots `7/2/3`; its exact cumulative counters are the
+M32 values above, not inferences from M29 through M31.
+
+M19 historically isolated oversized cold failure diagnostics. M20 additionally
+split the post-wait success validation/printing body into an out-of-line frame;
+both preserved the then-64 KiB monitor-stack canary. M30 expanded only the
+boot-monitor stack to 128 KiB for the larger Debug verification frame; worker
+and EL0 exception stacks remain 16 KiB in M32 and canary/fail-stop checks remain strict.
+
+The current M32 graphics-buffer evidence builds on the retained M31 App/focus,
+M30 split-process, and M29 userspace
+surface, M27
+compositor/tablet, M26 framebuffer/keyboard, and M25 storage
+and M20 service evidence. M23/M24 remain historical lower-layer evidence. The
+following larger M16 block is retained strictly as historical regression shape.
+The following was the authoritative M29 ownership boundary and remains
+historical protocol evidence, not the M31 process-topology marker:
+
+```text
+SURFACE_ACQUIRE_OK owner=kernel-fallback pid=... session=1 handle=... rights=0x00000103 unique=1 duplicate=0 transferable=0 input_capacity=64
+SURFACE_HANDOFF_OK from=kernel-fallback to=userspace-bound caller=el0 pid=... session=1 frame_id=1 scene_digest=0x6ef9c2b7d15fde25 scanout_digest=0x6ef9c2b7d15fde25
+USER_SURFACE_COMMIT_OK owner=userspace pid=... session=1 frame_id=1 commit=1 mode=full rects=4 ... input_pending=0 input_coalesced=0 cursor_preserved=1 dma_barrier=1
+USER_INPUT_READ_OK owner=userspace pid=... session=1 sequence=1 x=... y=... pressed=... pending=0 enqueued=1 dequeued=1 high_water=1 coalesced=0
+USERSPACE_UI_OK qemu=1 transport=ramfb input=virtio-tablet abi=14 surface_owner=userspace ... input_sequence=1..21 frame_sequence=1..13 commits=13 ... final_view=home degraded=0
+```
+
+For historical comparison, in the M28 kernel-owned lines below,
+`1..8` and `>0` denote the accepted scheduler-dependent ranges:
+
+```text
+UI_READY protocol=1 owner=kernel view=home targets=3 phone=72/132/176/72 messages=72/220/176/72 settings=72/308/176/72 home=128/448/64/24 gesture=tap capture=1 hit_test=1 surface=opaque-scene surface_generation=0 damage_commit=1 userspace_surface=0
+UI_EVENT_OK protocol=1 gesture=tap target=settings from=home to=settings reports=6 samples=6 taps=1 transitions=1 generation=1 pixel_x=160 pixel_y=342 press=1 release=1 capture=1 hit_test=1
+SURFACE_COMMIT_OK owner=kernel surface=settings format=XRGB8888 generation=1 damage=56/64/208/368 written=76544 composition=56/64/208/368 restored=76544 blended=122 scene_digest=0xf79f5bb3582452a5 scanout_digest=0xa2b4da7c5f306a09 cursor_preserved=1 dma_barrier=1 userspace=0
+UI_INTERACTION_OK input=virtio-tablet events=14 samples=6 target=settings view=settings generation=1 completions=14 delivered=14 recycled=14 buffered=0 max_buffered=1..8 avail_idx=22 used_idx=14 irq_entries=>0 queue_irqs=>0 config_irqs=0 spurious=0 dropped=0 invalid=0 gesture=tap hit_test=1 surface_commit=1 damage=1 cursor_preserved=1
+UI_SCREENSHOT_OK qemu=1 transport=ramfb input=virtio-tablet qmp_commands=6 events=14 samples=6 target=settings view=settings generation=1 damage=56/64/208/368 written=76544 restored=76544 blended=122 diff_pixels=53760 diff_bbox=56/64/263/379 baseline_sha256=0adbceee84974eaee5af0d0105020417cbce2c71a7cc46e0f56885239c9b45ac after_sha256=70720db4523aa6eb33746b76fcac314a99039b79d3aaee85422edb839bc2ee76 colors=13 scene_digest=0xf79f5bb3582452a5 scanout_digest=0xa2b4da7c5f306a09 max_buffered=1..8 irq_entries=>0 queue_irqs=>0 completions=14 delivered=14 recycled=14 avail_idx=22 used_idx=14 dropped=0 invalid=0 gesture=tap hit_test=1 cursor_preserved=1 full_frame_capture=1 userspace_surface=0 navigation_qmp_commands=15 navigation_events=35 total_events=49 total_samples=21 targets=3 home_returns=3 transitions=6 final_view=home
+COMPOSITOR_READY layers=2 scene=opaque cursor=alpha scene_bytes=614400 scanout_bytes=614400 scene_address=... scanout_address=... page_aligned=1 scene_digest=0x6ef9c2b7d15fde25 scanout_digest=0x6ef9c2b7d15fde25 cursor_hidden=1 dirty_rect=1 dynamic_redraw=1 input_bound=0
+VIRTIO_POINTER_OK transport=mmio version=2 device_id=18 base=0x000000000a003a00 queue=8 status_queue=present event_bytes=8 dma_frames=1 dma_coherent=1 mode=interrupt irq_enabled=1 irq=77 spec=0/45/1 trigger=edge-rising name_bytes=18 name_digest=0xc193f384ee1e1bac key_bitmap_bytes=43 abs_bitmap_bytes=1 abs_x=0/32767 abs_y=0/32767 btn_left=1 btn_touch=1 writable_buffers=8 completions=0 recycled=0 dropped=0 invalid=0
+POINTER_READY device=tablet queue=8 buffers=8 abs_x=0/32767 abs_y=0/32767 btn_touch=330 qmp_injection_supported=1
+POINTER_EVENT_OK device=tablet sequence=abs_x/abs_y/syn/touch_down/syn/touch_up/syn events=7 raw_x=1234 raw_y=23456 pixel_x=12 pixel_y=342 touch_down=1 touch_up=1 syn=3 samples=3 completions=7 delivered=7 recycled=7 buffered=0 max_buffered=7 avail_idx=15 used_idx=7 irq_entries=3 queue_irqs=3 config_irqs=0 spurious=0 dropped=0 invalid=0 descriptor_reuse=1
+COMPOSITOR_UPDATE_OK layers=2 updates=3 dirty=12/342/12/22 restored=264 blended=122 boot_digest=0x6ef9c2b7d15fde25 pressed_digest=0x61880733dfa7cfb1 final_digest=0x09f8448817d7a8e1 digest_changed=1 press_feedback=1 cursor_visible=1 cursor_pressed=0 alpha=1 dirty_rect=1 input=touch
+COMPOSITOR_INTERACTION_OK qemu=1 transport=ramfb input=virtio-tablet qmp_commands=3 events=7 samples=3 redraws=3 dirty=12/342/12/22 restored=264 blended=122 diff_pixels=122 diff_bbox=12/342/21/363 baseline_sha256=0adbceee84974eaee5af0d0105020417cbce2c71a7cc46e0f56885239c9b45ac after_sha256=f24699248bcdfe5069fa13a40ef7990ba7a647cfe0ac818c04f671047e748f82 colors=11 boot_digest=0x6ef9c2b7d15fde25 pressed_digest=0x61880733dfa7cfb1 final_digest=0x09f8448817d7a8e1 max_buffered=7 irq_entries=3 queue_irqs=3 completions=7 delivered=7 recycled=7 avail_idx=15 used_idx=7 dropped=0 invalid=0 alpha=1 press_feedback=1 full_frame_capture=1
+FRAMEBUFFER_OK transport=ramfb fw_cfg=mmio fw_cfg_base=0x0000000009020000 fw_cfg_bytes=24 features=0x3 dma=1 dma_ops=3 directory_files=11 selector=0x0025 width=320 height=480 stride=1280 format=XRGB8888 bytes=614400 address=... page_aligned=1 digest=0x6ef9c2b7d15fde25 configured=1
+VIRTIO_INPUT_OK transport=mmio version=2 device_id=18 base=0x000000000a003c00 queue=8 event_bytes=8 dma_frames=1 dma_coherent=1 mode=interrupt irq_enabled=1 irq=78 spec=0/46/1 trigger=edge-rising key_a=1 key_enter=1 writable_buffers=8 completions=0 recycled=0 dropped=0 invalid=0
+INPUT_READY device=keyboard queue=8 buffers=8 key_code_a=30 qmp_injection_supported=1
+INPUT_EVENT_OK device=keyboard sequence=a_down/syn/a_up/syn events=4 key_code=30 down=1 up=1 syn=2 completions=4 delivered=4 recycled=4 buffered=0 avail_idx=12 used_idx=4 dropped=0 invalid=0 descriptor_reuse=1
+FDT_VIRTIO_OK nodes=32 coherent=32 irq_specifiers=32 active_blocks=1
+VIRTIO_IRQ_OK controller=gicv2 spec=0/47/1 irq=79 trigger=edge-rising target_cpu=0 enabled=1
+VIRTIO_BLK_OK transport=mmio version=2 queue=8 request_slots=2 request_stride=536 dma_frames=2 dma_coherent=1 mode=interrupt irq_enabled=1 irq=79 capacity_sectors=16384 device_read_only=0 flush_supported=1 system_policy=read_only data_policy=bounded_write
+BLOCK_IRQ_OK requests=2 completions=2 irq_completions=2 sectors=0/1 bytes=1024 avail_idx=2 used_idx=2 statuses=0/0 digest0=0xbebd264b8c14cd72 digest1=0x8294de399174037c batch_width=2 max_outstanding=2 distinct_heads=1 irq_observed=1 poll_fallbacks=0 out_of_range_rejected=1 timeouts=0 resets=0 stale_completions=0 queue_reused=1
+BLOCK_LAYER_OK sector_size=512 device_sectors=16384 parser_reads=273 requests=282 completions=282 read_requests=280 write_requests=1 flush_requests=1 bytes_read=143360 bytes_written=512 successful_flushes=1 irq_completions=282 poll_fallbacks=0 timeouts=0 dma_frames=2
+GPT_OK protective_mbr=1 primary_crc=1 backup_crc=1 entry_crc=1 entries=128 entry_bytes=128 primary_entries_lba=2 backup_entries_lba=16351 partition_index=0 partition_lba=2048-16350 partition_sectors=14303 name=BNDROID_SYS
+DATA_GPT_OK partition_index=1 partition_lba=64-127 partition_sectors=64 name=BNDROID_DATA type=private system_overlap=0
+FAT16_OK bytes_per_sector=512 sectors_per_cluster=1 reserved_sectors=1 fats=2 fat_sectors=56 root_entries=64 clusters=14186 first_data_lba=2165 mirror_verified=1
+VFS_OK mount=/system root_file=/system/HELLO.TXT root_bytes=28 root_digest=0xdd2f71342016eede nested_file=/system/SYSTEM/BUILD.TXT nested_bytes=40 nested_digest=0xe57ce4ce9f1b4ec0 read_only=1 traversal_rejected=1 mount_escape_rejected=1
+DATA_PERSIST_OK format=1 format_epoch_bound=1 partition_lba=64-127 slots=2 initial_generation=0 committed_generation=1 initial_slot=0 committed_slot=1 valid_slots=1 rejected_slots=1 reads=5 writes=1 flushes=1 write_completion=1 flush_completion=1 readback_verified=1 old_slot_preserved=1 system_write_rejected=1 out_of_data_rejected=1 rejected_request_unchanged=1 raw_sector_write=1 filesystem_write=0 crash_consistency=0 qemu_reboot_proof=0
+STORAGE_LIMITS writes=1 partitions=2 filesystem=1 vfs=1 persistence=1 flush=1 readback=1 el0_storage=1 catalog_files=2 catalog_bytes=68 runtime_disk_io=0 mapped=0 shared_memory=0 filesystem_write=0 crash_consistency=0 general_runtime=0
+PROCESS_IMAGE_OK abi=14 init=1 spawn_sequence=2/3/4/2/4 manager_reused=1 client_image_reused=1 distinct_catalog=1
+SYSCALL_OK abi=14 calls=588 successes=455 errors=132 unknown=1 private_svc=1 should_waits=3 pan_fail=0
+COPYIO_OK max=64 in_calls=185 out_calls=189 in_bytes=7415 out_bytes=16479 in_faults=14 out_faults=11 range_rejects=1 fixups=25 misses=0 ...
+HANDLE_OK channel_pairs_created=46 events_created=6 duplicated=189 close_syscalls=269 stale_close_rejected=69 instrumented_rights_denials=18 init_handles=4
+IPC_IDENTITY_OK abi=14 atomic_envelope=1 envelope_size=112 reads=126 kinds=65/27/34 preserved_rejections=15 too_small=5 bad_address=5 table_full=5 identity_reads=2 errors=0 provider_pid=0x0000000100000003 client_pid=0x0000000100000004 generation_qualified=1 writer_identity=1
+EL0_STORAGE_OK abi=14 root_capability=1 files=2 bytes=68 opens=2/6 vmo_reads=5/10 read_bytes=105 vmo_transfers=1/1 runtime_disk_reads=0 mapped=0 shared_memory=0 writes=0 persistence=0
+SERVICE_ACL_OK manager_pid=0x0000000200000002 provider_pid=0x0000000100000003 client_pid=0x0000000100000004 authenticated_attach=1 owner_from_sender=1 malformed_rejected=4 manager_resilient=1 delegated_endpoint_denied=1 registry_unchanged=1 connector_closed=1 handle_leaks=0 acl_reads=1 errors=0 writer_identity=1
+SERVICE_MANAGER_OK protocol=1 supervisor=1 daemon=1 supervised=1 bootstrap_identity=1 registry_capacity=4 registry_state_reachable=1 resident_roles=3 resident_processes=4 resident_clients=2 serving_loop=1 dynamic_lifecycle=1 dynamic_registration_loop=1 multi_session_round=1 general_runtime=0
+SERVICE_MULTISESSION_OK phase=23 clients=2 resident_clients=2 manager_pid=0x0000000200000002 primary_pid=0x0000000100000004 secondary_pid=0x0000000100000005 manager_attaches=2 client_attaches=2 revoke_bitmap=0x3 stale_revoke_bitmap=0x3 primary_progress_bitmap=0x3 provider_accepts=4 provider_echoes=3 provider_aborts=1 secondary_echoes=1 final_idle_bitmap=0x3 sender_authenticated=1 generation_qualified=1 independent_sessions=2 secondary_lease_generations=2 errors=0 process_crash_restart=0 general_runtime=0
+WAIT_ARRAY_OK max_items=8 item_bytes=8 calls=54 immediate=... blocks=... wakes=... signal_wakes=... poll_timeouts=1 timeout_wakes=0 invalid_counts=2 bad_address=2 validation_rejected=1 lowest_multi_ready=1 scheduler_max_items=8 cancels=0 early=0 pending=2 latest_epoch=... canonical_le=1 full_validation=1 generation_qualified=1
+SERVICE_WAIT_TOPOLOGY_OK endpoints=16 pairs=8 cross_links=1/1/2/2/2/0 unique=1 rights=1 queues_empty=1 manager_items=5 provider_items=2 primary_items=2 secondary_items=2 wait_mask=0x5 infinite_deadlines=1 ...
+RESIDENT_STABILITY_OK ... init_handles=4 total_handles=17 handles_by_image=4/6/3/4 ... object_wait_slots=4 wait_many_slots=2 wait_array_slots=2 supervisor_waits=1 completions_pending=0 contexts=4 kernel_stacks=4 aspace_live=5 live_processes=5 live_images=1/1/1/2
+ELF_RUNTIME_OK ro_read=1 data_init=1 data_write=1 bss_zero=1 bss_write=1 stack_pages_touched=4 child_fresh=5 simultaneous=4 distinct_images=4 resident_children=4 client_instances=2 simultaneous_clients=2 transient_clients=0
+BOOT_OK: M25 durable data records, M24 EL0 storage VMOs, and M20 multi-session services verified
+```
+
+The timeout/reset/late-IRQ build emits its own mutually exclusive recovery
+contract before reaching the M22 self-test boot marker:
+
+```text
+STORAGE_IRQ_RACE_OK timeout_requests=2 timeouts=1 resets=1 reset_tokens_invalidated=2 simulated_late_irq=1 spurious_acked=1 recovered_requests=2 recovered_completions=2 double_completions=0 dma_frames_before=2 dma_frames_after=2 digest0=0xbebd264b8c14cd72 digest1=0x8294de399174037c
+BOOT_OK: M22 storage IRQ timeout/reset self-test recovered and M20 multi-session services verified
+```
+
+```text
+FRAME_OK managed=32768 unavailable=... free_before=... free_after=... allocated=0 recycled=1 unique=3
+VM_OK maps=3 unmaps=3 remaps=1 tlbi=6 table_alloc=1 table_free=1 alias_checks=5 stale=0 duplicate_map=1 missing_unmap=1
+MEMORY_OK: M1 reclaiming-frame and per-page-mapping foundation is alive
+HEAP_OK start=0x0000000102000000 bytes=262144 backing_pages=64 table_frames=1 maps=64 frame_alloc_before=0 frame_alloc_after=65 free_before=262144 free_after=262144 allocations=4 deallocations=4 aligned=1 whole=1 checksum=0x3d5b7904a2c18e5a
+HEAP_IRQ_OK irq_before=0 irq_after=0 allocations=1 deallocations=1 free_before=262144 free_after=262144
+SCHED_OK dispatches=96 switches=96 monitor_selected=32 t0_selected=32 t0_observed=32 ... reg_fail=0 epoch_fail=0 stack_fail=0
+SLEEP_CTX id=0 request=97 block=97 duration=12 deadline=109 ready=110 resume=110 ctr_request=... ctr_deadline=... ctr_ready=... ...
+SLEEP_CTX id=1 request=97 block=97 duration=6 deadline=103 ready=104 resume=104 ctr_request=... ctr_deadline=... ctr_ready=... ...
+SLEEP_OK requests=2 blocks=2 wakes=2 returns=2 queue_peak=2 overlap_ticks=6 queue_left=0 period=625000 early=0 blocked=0 svc_fail=0
+USER_MAP_OK code=0x0000000200000000 entry=0x0000000200000000 code_end=... code_bytes=... code_pa=0x... stack=0x00000002001fb000 stack_end=0x00000002001ff000 stack_pages=4 stack_pa=0x... guard_low=0x00000002001fa000 guard_high=0x00000002001ff000 guards_unmapped=2 mapped_pages=... unique_frames=... leafs_verified=...
+ELF_LOAD_OK elf=1 segments=3 load_pages=L rx_pages=R ro_pages=O rw_pages=W bss_bytes=... elf_bytes=... file_bytes=... memory_bytes=... wx=0
+ASPACE_OK kernel_root=0x... user_root=0x... asid=1 private_tables=4 boot_user_unmapped=1 heap_shared=1 tlbi=1
+USER_IMAGE_CATALOG_OK count=4 distinct=1 init_bytes=... manager_bytes=... provider_bytes=... client_bytes=... init_digest=0x... manager_digest=0x... provider_digest=0x... client_digest=0x...
+PROCESS_IMAGE_OK abi=10 init=1 spawn_sequence=2/3/4/2 manager_reused=1 distinct_catalog=1
+SYSCALL_OK abi=10 calls=381 successes=289 errors=91 unknown=1 private_svc=1 should_waits=3 pan_fail=0
+COPYIO_OK max=64 in_calls=92 out_calls=90 in_bytes=4373 out_bytes=4373 in_faults=9 out_faults=9 range_rejects=1 fixups=18 misses=0 ... writes=39 reads=39 rollbacks=2 too_small=1 zero_len=2 roundtrip=1 pan_fail=0 uao_supported=... uao_fail=0
+HANDLE_OK created=72 duplicated=149 closed=204 stale=48 rights_denied=13 left=3
+IPC_OK channels=34 writes=85 reads=85 peeks=14 peek_kinds=0/11/3 tag=... payload=... startup_queues_drained=1 resident_heap=1
+HANDLE_TRANSFER_OK startup_moves=4 channel_writes=43 channel_reads=42 read_rollbacks=24 self_rejected=4 order_rejected=4 write_badaddr_rollback=8 denied_rollback=4 rights_preserved=8 table_full_rollback=8 unread_dropped=1 init_handles=3
+PROC_LIFECYCLE_OK capacity=4 dynamic=3 created=5 exited=1 reaped=1 live=4 peak_live=4 spawn_waits=1 capacity_rejected=1 startup_moves=4 child_syscalls=876 child_selections=... manager_v1_pid=0x0000000100000002 provider_pid=0x0000000100000003 client_pid=0x0000000100000004 manager_v2_pid=0x0000000200000002 child_asid=2 root_isolated=1 child_frames_isolated=1 reaped_frame_restored=1 frame_delta=1 reaped_heap_restored=1 nonstandard_exits=1 non_target_reaps=0 distinct_slots=1 distinct_asids=1 distinct_roots=1 distinct_frames=1 retire_tlbi=1 aspace_tlbi=6 child_handle_isolated=1 exit_fail=0 monitor_asid=0
+PROC_CAPACITY_OK capacity=4 dynamic=3 peak_live=4 full_rejected=1 startup_preserved=1 distinct_slots=1 distinct_asids=1 distinct_roots=1 distinct_frames=1 frame_delta=1 manager_pid=0x0000000100000002 provider_pid=0x0000000100000003 client_pid=0x0000000100000004
+SERVICE_RESTART_OK requests=1 restarts=1 sessions_rebound=2 dependents_survived=2 peer_close_acks=4 slot_reused=1 generation_advanced=1 stale_pid_rejected=1 stale_instance_rejected=1 old_pid=0x0000000100000002 new_pid=0x0000000200000002 old_instance=0x00010001 new_instance=0x00020001
+PROCESS_WAIT_OK calls=3 completed=1 blocks=... wakes=... immediate=... stale=1 pending=1 supervisor_target=0x0000000200000002 spawn_retries=1 ready_retries=1
+OBJECT_WAIT_OK calls=309 blocks=... wakes=... immediate=... cancels=0 pending=3 latest_epoch=... protocol_retries=1
+WAIT_MANY_OK items=2 calls=38 immediate=... blocks=... wakes=... signal_wakes=... finite_signal_wakes=... poll_timeouts=4 timeout_wakes=4 cancels=0 early=0 pending=2 latest_epoch=...
+EVENT_OK created=4 signal_calls=12 signal_edges=8 clear_calls=12 clear_edges=8 signal_denied=4 waits=8 blocks=... wakes=... transfer_writes=4 transfer_reads=4 init_handles=3
+SERVICE_MANAGER_OK protocol=1 supervisor=1 daemon=1 supervised=1 bootstrap_identity=1 concurrent=1 registry_capacity=4 registrations=5 unregisters=3 duplicate_rejected=2 role_denied=2 lookups=11 unknown=4 connects=7 echoes=7 owner_bound=1 stale_instance_rejected=2 registry_state_reachable=1 resident_roles=3 serving_loop=1 dynamic_lifecycle=1 dynamic_registration_loop=1
+SERVICE_LOOP_OK post_ready_requests=2 distinct_txids=2 client_echo_commits=2 manager_done_rounds=2 provider_done_rounds=2 done_commits=2 transcript_errors=0 reentrant=1
+SERVICE_DYNAMIC_OK provider_driven=1 causal_order=1 startup_peer_bound=1 writer_identity=0 register=2 unregister=2 reregister=1 stale_rejected=1 gap_not_found=1 availability=2 phase=10 done_bitmap=0x7 old_instance=0x00020002 new_instance=0x00020003 txids=0x201/0x202/0x203/0x204/0x205/0x206/0x207/0x208 transcript_errors=0 idle_wait_graph=1 reusable=1
+SERVICE_REUSE_OK round=1 step=5 completed_rounds=1 errors=0 instance=0x00020004 txids=0x301/0x302/0x303/0x304 done_reads=3 done_bitmap=0x7 register=1 lookup_echo=1 causal_confirm=1 unregister=1 not_found=1 cleanup=1 exact_idle_topology=1 constant_space=1 bounded_reuse=1 general_runtime=0 startup_peer_bound=1 writer_identity=0
+SERVICE_WAIT_TOPOLOGY_OK endpoints=12 pairs=6 cross_links=1/1/1/2/1/0 unique=1 rights=1 queues_empty=1 manager_items=2 provider_items=2 client_items=1 wait_mask=0x5 infinite_deadlines=1 manager_epoch=... provider_epoch=... client_epoch=... token_stable=1 supervisor_target=0x0000000200000002
+RESIDENT_STABILITY_OK stable_ticks=4 first_manager_heap_restored=1 first_manager_frames_restored=1 frame_delta=1 heap_baseline=... heap_now=... allocated_frames=... init_handles=3 total_handles=12 handles_by_image=3/4/3/2 service_graph=1 all_queues_empty=1 wait_topology=1 object_wait_slots=3 wait_many_slots=2 supervisor_waits=1 completions_pending=0 contexts=3 kernel_stacks=3 aspace_live=4 live_processes=4 live_images=1/1/1/1
+EL0_OK selections=... lower_irq=... post_irq_svc=1 preserved=1 stack_rw=1 faults=0 sync_fault_dispatches=0 mode=0 pan=... user_asid=1 monitor_asid=0
+ELF_RUNTIME_OK ro_read=1 data_init=1 data_write=1 bss_zero=1 bss_write=1 stack_pages_touched=4 child_fresh=4 simultaneous=3 distinct_images=4 resident_children=3
+BOOT_OK: M16 post-cleanup dynamic service reuse verified
+```
+
+Exit an interactive QEMU session with `Ctrl-A`, then `X`.
+
+ELF page counts are profile- and role-dependent. Every catalog member is
+verified independently, with `L == R + O + W` and
+`mapped_pages == L + 4`; no cross-role page count is a fixed gate.
+
+`SCHED_OK` is accepted only after at least 96 dispatches forming complete fair
+rounds. Both the busy and sleep checkpoints wait for each worker's `observed`
+count to catch its `selected` count before freezing the snapshot; an
+intermediate selection that executes zero worker instructions may therefore be
+coalesced without weakening the checkpoint. A common sample is 96 dispatches
+with monitor, worker 0, and worker 1 selected 32 times each.
+
+For the retained M16 sample above, `OBJECT_WAIT_OK` accepts either scheduling
+order: calls are 309 and
+`blocks + immediate == 309`. The exact block/immediate split varies, while the
+final three occupied object-wait slots are fixed. Its
+shared waiter-slot epoch is nonzero and no greater than
+`OBJECT_WAIT_OK.blocks + WAIT_MANY_OK.blocks`; the exact `blocks`, `immediate`,
+and `latest_epoch` values vary at runtime. Cancellation remains zero and the
+bounded protocol diagnostic is `protocol_retries=1`; the three slots comprise manager, provider, and client, with
+two-item tokens for manager and provider.
+
+`protocol_retries` is the emitted runtime value of
+`should_wait_returns.saturating_sub(1 + spawn_waits)`, not a constant
+label. M16 accounts for one deliberate post-`BadAddress`
+empty-queue check, one bounded dynamic-lifecycle empty-connector probe, and one
+capacity rejection from the fourth concurrent spawn. Thus M16 expects
+`should_waits=3`; because `spawn_waits=1`, `protocol_retries=1`. Any extra return fails
+validation.
+
+`WAIT_MANY_OK` permits the timer to land in a small set of equivalent protocol
+states: two items and 38 calls. The exact block/immediate and signal-wake split
+is schedule-dependent; `finite_signal_wakes` never exceeds `signal_wakes`.
+Four calls are poll timeouts and four wakes are hard-deadline timeouts. The
+conserved relations are
+`calls == immediate + poll_timeouts + blocks`,
+`wakes == signal_wakes + timeout_wakes + cancels`, and
+`immediate + signal_wakes == 28`.
+Cancellation and early completion remain zero; pending is exactly two for the
+manager and provider idle waits. The shared epoch is nonzero and no greater than the combined
+single- and two-item block count.
+
+`EVENT_OK` separately requires `waits=8`, `blocks == wakes`, `blocks <= waits`,
+four successful transfer writes and reads, while init deliberately retains
+three reachable handles in the resident topology.
+`PROC_CAPACITY_OK`, `SERVICE_RESTART_OK`, `SERVICE_MANAGER_OK`,
+`SERVICE_LOOP_OK`, `SERVICE_DYNAMIC_OK`, `SERVICE_WAIT_TOPOLOGY_OK`, and
+`SERVICE_REUSE_OK`, and `RESIDENT_STABILITY_OK` carry the M16 process/service
+assertions. Manager 1 is
+the only exited/reaped child; the exact wait block/immediate split remains
+schedule-dependent, but the exact six-pair Channel graph, manager two-item
+wait-many, provider two-item wait-many, client single wait, one `ProcessWait`,
+and continuously monitored complete-token/resource stability are fixed. The marker is followed by
+continued monitor/reaper execution. It does not claim a complete ownership or
+long-duration leak proof.
+
+## Implemented kernel foundation
+
+- AArch64 raw-image boot, BSS clearing, kernel/SP0 scratch stacks, and
+  EL2-to-EL1 normalization
+- PL011 UART logging and panic diagnostics
+- flattened device tree validation, RAM discovery, reserved-memory parsing,
+  and two-pass allocation-free discovery of one enabled GICv2 controller plus
+  up to 32 enabled direct-root virtio-mmio ranges. The parser handles
+  `compatible` string lists and arbitrary property order, root address/size
+  cells, `status`, `dma-coherent`, exact `reg`, node/root `interrupt-parent`,
+  GICv2 phandles and three-cell interrupt specifiers
+- strict, unique direct-root discovery of `qemu,fw-cfg-mmio`, including exact
+  `reg` decoding and rejection of duplicate or malformed nodes; QEMU fw_cfg
+  signature/feature validation and bounded big-endian DMA directory/config
+  transfers
+- fixed-metadata reclaiming physical-frame allocation with reserved-range
+  exclusion, non-copying ownership tokens, exhaustion/reuse accounting, and
+  invalid/double-release rejection
+- 4 KiB/2 MiB/1 GiB identity page tables with per-page kernel W^X permissions;
+  the early Debug-kernel page window covers the first 6 MiB of RAM. M32 adds a
+  third L3 table for the two static graphics slots without relaxing W^X
+- IRQ-serialized 4 KiB dynamic map/query/unmap in the 4--8 GiB kernel VA arena;
+  four permanent L2 tables are shared by every translation root, while runtime
+  mappings allocate, roll back, invalidate, and reclaim only L3 tables. Unmap
+  is explicitly unsafe because callers must prove that no live reference still
+  depends on the page
+- a 256 KiB first-fit global kernel heap backed by 64 owned dynamic pages;
+  local IRQ masking prevents timer re-entry, allocations use 16-byte minimum
+  split units, adjacent releases coalesce, and `Box`/`Vec`/page-aligned layouts
+  are exercised in QEMU
+- AArch64 exception vectors with shared complete GPR and SIMD/FP TrapFrame
+  save/restore for IRQ, private current-EL SVC, and isolated lower-EL SVC/fault
+  paths
+- QEMU `virt` GICv2 support, including per-SPI ICFGR trigger and ITARGETSR CPU
+  target programming, and a 100 Hz ARM generic physical timer
+- one modern virtio-mmio v2 coherent-DMA block device discovered before
+  scheduling. Normal M25 boots require a writable device and negotiate
+  `VERSION_1|FLUSH`; only the M22 timeout/reset race build uses `VERSION_1|RO`.
+  The driver uses a size-8
+  single-page split ring and two 536-byte-stride request slots in a separate
+  DMA page, reads a stable configuration-generation-protected capacity, and
+  publishes/acquires DMA through AArch64 barriers. A generation-qualified
+  tracker supports two outstanding descriptor chains at heads 0 and 3; the
+  hard-IRQ path ACKs and drains used entries before GIC EOI. Physical-counter
+  timeout, reset with an independent deadline, token invalidation, late-spurious
+  IRQ isolation, out-of-range rejection, queue reuse, and permanent ownership
+  of both DMA frames are covered
+- a bounded block/parser/VFS layer over a deterministic 8 MiB image:
+  protective MBR, CRC32-checked primary and backup GPT metadata, one bounded
+  read-only `BNDROID_SYS` partition, one private 64-sector `BNDROID_DATA`
+  partition, mirrored FAT16 tables, strict 8.3 root/subdirectory
+  lookup, `/system` mounting, exact reads of `HELLO.TXT` and `SYSTEM/BUILD.TXT`,
+  and rejection of traversal or mount escape. The M25 normal proof performs
+  273 parser reads and ends at 282 requests/completions/IRQ completions:
+  280 reads, one 512-byte write, and one flush, without allocating an unbounded
+  cache
+- an immutable two-entry boot catalog populated only after the M23 FAT16 proof.
+  Its fallible custom-reference-count VMOs hold exactly 68 bytes and support
+  bounded zero-copy kernel ranges. ABI-v13 `FileOpenAt` resolves canonical
+  capability-root-relative paths, while `VmoRead` performs bounded copy-out,
+  partial and EOF reads without another disk access or a 4 KiB kernel-stack
+  buffer. The init directory is move-only `READ|TRANSFER`; returned VMOs are
+  `READ|DUPLICATE|TRANSFER` and explicitly non-writable, non-mappable,
+  non-executable, and non-waitable
+- a kernel-owned DATA record transaction with a GUID-bound 16-byte format
+  epoch, two CRC-protected sectors, adjacent-generation validation, inactive-
+  slot write, ordered FLUSH, and two-slot readback. System/out-of-DATA writes
+  are rejected without ledger mutation; two real QEMU boots prove `0→1→2`
+  and corrupt-newest recovery proves fallback/recommit
+- a page-aligned 320×480 XRGB8888 QEMU ramfb occupying exactly 614400 bytes/150
+  pages. The kernel renders a deterministic nine-color static splash and
+  configures it through three fw_cfg DMA operations; headless QMP screendump
+  validates all 153600 pixels, nine colors/samples, and the exact pixel digest
+- one modern coherent virtio-input keyboard at MMIO `0x0a003c00`/SPI 78. Its
+  size-8 event queue and eight writable event buffers use one DMA page; config
+  name/key bitmap validation requires A and Enter, and hard-IRQ delivery,
+  descriptor recycling and the exact four-event QMP A sequence are verified
+- eleven schedulable contexts: three fixed EL1 contexts, EL0 `init`, and seven
+  dynamic EL0 process contexts. Every live context owns an independent,
+  page-aligned 16 KiB kernel/exception stack protected by a bottom canary,
+  while each EL0 address space also has a dedicated guarded user stack
+- timer-driven preemptive context switching with fixed round-robin selection;
+  automated cross-preemption checks hold `x19`, `x22`, `q8`, FPCR/FPSR,
+  resume epochs, stack ownership, and stack canaries across switches
+- `RUNNING`, `RUNNABLE`, `SLEEPING`, and generation-bound `WAITING`
+  transitions plus a fixed-capacity, physical-counter-deadline-ordered timer
+  wait queue; kernel workers block
+  synchronously via SVC and the timer IRQ performs deadline wakeup without
+  allowing delayed IRQ accounting to shorten the requested duration
+- logical timer ticks account for every elapsed hardware period even when an
+  interrupt is serviced late. Scheduler acceptance treats zero-instruction
+  selections as legal under host oversubscription, proves overlapping sleeps
+  with queue ownership and wrap-safe counter intervals, and requires eventual
+  post-deadline progress without inventing a fixed IRQ-sample or resume-tick
+  bound
+- a shared `no_std` ABI crate at ABI v19 with register-only calls plus bounded
+  64-byte Channel reads/writes and `ChannelWriteTransfer`/`ChannelReadTransfer`,
+  explicit `BadAddress`/`BufferTooSmall` status values,
+  `ProcessSpawn`/`ThreadExit`/`ProcessWait`, syscall 15 `ObjectWait`, and syscalls
+  16--18 `EventCreate`/`EventSignal`/`EventClear`, plus syscall 19's packed,
+  fixed-two-item `ObjectWaitMany`, syscall 20's non-consuming `ChannelPeek`,
+  and syscall 21's atomic canonical 112-byte `ChannelReadEnvelope` with a
+  kernel-stamped generation-qualified sender PID. Syscall 22 adds a canonical
+  little-endian one-to-eight-item `ObjectWaitManyArray` copied from at most 64
+  user bytes. Syscall 23 adds `FileOpenAt` with a bounded root-relative path,
+  and syscall 24 adds `VmoRead` with a packed 32-bit offset/length and a 4096-
+  byte per-call maximum. Syscalls 25--27 add unique Surface acquire, exact
+  64-byte Present, and register-returned normalized input; opaque 32-bit handles,
+  object-specific `ObjectSignals`, `Rights::WAIT`/`Rights::SIGNAL`,
+  rights attenuation, and strict rejection of unknown syscall numbers and the
+  private kernel SVC immediate. M30 historically added spawnable
+  `SurfaceServer=5` and `Launcher=6`; M31 added `App=7`. ABI v17 added syscalls
+  28--30 for fixed-geometry GraphicsBuffer create, bounded write, and
+  SurfaceServer-only buffer present. ABI v18 retained that surface and added
+syscall 31 `ProcessTerminate`: an init-only, zero-flags operation on one
+generation-qualified dynamic child whose completion is reported by
+  `ProcessWait` as `Killed`/137. ABI v19 adds syscalls 32--36 for mappable
+  GraphicsBuffer map/unmap/queue/acquire/release, with producer/server role,
+  rights, mapping, generation, and state validation
+- a separate 32-slot, 8-bit-slot/24-bit-generation handle table per process;
+  stale ABA reuse retires before wrap and duplicate can only reduce rights.
+  Move-only `OwnedHandle` transactions reserve source/destination slots,
+  preserve the exact raw source handle on rollback, advance its generation only
+  at commit, and return ownership intact if a destination is full. Close uses
+  the same rollback discipline around object-specific teardown. Handle slots
+  own generic `KernelObject` values: Channel, Event, immutable VMO, the
+  system-directory capability, Surface, and generation-qualified
+  `GraphicsBuffer`
+- fallibly allocated, fixed-capacity Channel IPC with two FIFO directions,
+  peer-close semantics, one typed FIFO for scalar, up-to-64-byte, or up-to-
+  64-byte-plus-one-handle messages, transactional enqueue/dequeue callbacks,
+  owning pop/push-front rollback, and lock-safe dead-receiver queue draining.
+  Nonzero monotonic Channel IDs impose a strict older-transport-to-newer-source
+  ownership DAG; self/equal/reverse transfers are rejected before usercopy.
+  `ProcessSpawn(startup_handle, image_id, flags=0)` performs an explicit
+  startup-handle move and catalog selection, enabling a real parent/child
+  bootstrap without implicit handle inheritance. Unknown IDs, init selection,
+  and nonzero flags are rejected before the source handle is consumed
+- manual-reset Events with idempotent signal/clear edges, `SIGNALED`,
+  `EVENT_DEFAULT` rights, fallible creation, generic handle transfer, read/write
+  rollback, unread-message destruction, and direct blocking-wakeup evidence
+- object-specific Channel `READABLE`/`WRITABLE`/`PEER_CLOSED` and Event
+  `SIGNALED` level signals, polled by `ObjectWait` under `Rights::WAIT`; invalid
+  cross-type signal masks are rejected before waiter publication. Eight
+  bounded user-context slots carry exact epoch/PID/handle/signal tokens. The
+  ABI-v10 legacy wait-any form binds two ordered items and an optional absolute deadline,
+  validates the complete set before readiness, supports poll/infinite/rounded-up
+  finite timeouts, and returns the lowest ready index. ABI v12 retains those
+  rules for a canonical one-to-eight-item user array and distinguishes its
+  completion kind from single and legacy-many tokens. Write/read/close/reaper
+  commit paths and Event rising edges scan only after dropping object/table
+  locks; the timer IRQ samples finite deadlines without early expiry on the
+  current IRQ-serialized single-core implementation
+- an allocation-free `no_std` ServiceManager protocol/registry crate with
+  strict 64-byte `BSM1` v1 requests and strict 64-byte `BSA1` v1 supervisor
+  attach frames, bounded names, stable status values, a four-entry registry,
+  and manager-epoch-namespaced instance IDs. An independent EL0 manager is
+  supervised by init-only spawn/wait; provider and client survive its first
+  deliberate exit, observe peer-close, rebind to the generation-advanced
+  replacement, and complete direct echo in both epochs. Bootstrap role/PID
+  attestation is scoped to the transferred session capability, not a general
+  caller identity or ACL
+- an M20 fixed-space two-session lifecycle: primary and secondary clients remain
+  independently identified and resident; secondary lease 1 can stall, be
+  revoked and reattached as lease 2 without exiting its process; stale lease-1
+  control is rejected; and primary traffic completes while the secondary is
+  stalled and detached. The exact 23-phase transcript and final four-token wait
+  core graph remain continuously monitored with `general_runtime=0`
+- an M32 dual-client UI runtime: a standalone SurfaceServer uniquely owns the
+  non-duplicable/non-transferable Surface capability; standalone Launcher and
+  App clients are denied direct acquire; and two dedicated Channel pairs carry
+  canonical frames, controls, and server events between kernel-authenticated
+  PIDs. `BUC1` v1 provides client-only App endpoint attach and Launcher-only
+  focus transfer. Present v2/64-byte uses focus generations and
+  `PresentCancelled` same-frame retry, while pointer routing captures a client
+  from down through release. M32 adds one two-slot static GraphicsBuffer pool,
+  the 64-byte `BUP1` transaction, attenuated App→SurfaceServer handle transfer,
+  generation/scrub rules, failure-atomic copy present, and real App-side pixel
+  raster. The final resident shape is eight processes, 20 Channel endpoints/ten
+  pairs, 23 handles, and seven object-wait tokens
+- an M33 dedicated lifecycle runtime using canonical 64-byte `ALC1`, `UBP1`,
+  and `USC1` v1 protocols. Seven correlated transactions and two App
+  generations prove launch, activate, suspend, resume, graceful terminate,
+  same-slot PID-generation reuse, old endpoint/buffer retirement, and
+  replacement-window activation. Its exact terminal shape is
+  created/exited/reaped/live `10/2/2/8`, 29 handles, 26 Channel endpoints/13
+  pairs, and eight wait tokens split `2` legacy-many + `6` array. This
+  `app-lifecycle-runtime` profile is separate from the default M32 interactive
+  path and remains a bounded scripted scenario
+- an M34 dedicated crash-recovery runtime extending that scenario to ten
+  transactions and three App generations. Init terminates blocked App2,
+  `ProcessWait` reports `Killed`/137, SurfaceServer converts the peer close into
+  one authenticated `USC1 OwnerDied`, retires the exact dead endpoint/buffer
+  and focus/capture identity, and App3 reuses slot 8 at PID generation 3. The
+  exact terminal shape is created/exited/reaped/live `11/3/3/8`, reasons
+  `2/0/1`, 29 handles, 26 endpoints/13 pairs, eight wait tokens, and abandoned
+  waits `0/0/1`. This `app-crash-recovery-runtime` profile is also scripted;
+  its checker does not yet inject input or establish a general restart policy
+- an M35 dedicated mapped-graphics runtime spanning two App generations. App
+  and SurfaceServer map the same 75-page backing RW and RO in distinct
+  address spaces; BBM+ASID TLBI flips producer leaves RO on Queue and RW on
+  release. Four Queue/Acquire cycles, volatile EL0 consumer samples, two
+  explicit releases, two mapped presents, and exact unmap/pin accounting prove
+  the shared data plane with zero legacy copy writes. This remains a single-slot,
+  single-CPU queue and does not yet compose with the M34 crash profile
+- an M36 dedicated graphics-consumer owner-death runtime. Mapping metadata pins
+  remain authoritative after SurfaceServer's handles are dropped; stopped-ASID
+  teardown removes its consumer alias before producer BBM RO-to-RW restoration
+  and generation-safe release. The exact QEMU scenario exercises Acquired
+  owner death, a nonzero waiter wake, an all-page EL0 rewrite, explicit producer
+  unmap/close/exit, and zero final graphics mappings or handles. Queued owner
+  death is covered by host tests. The Surface remains Degraded: this profile
+  does not restart or rebind SurfaceServer
+- an M37 dedicated SurfaceServer restart/rebind runtime. One generation-1
+  server is killed after Acquire; stopped-consumer teardown and producer wake
+  precede an atomic session `1→2` reacquire by generation 2. Launcher and the
+  resident mapped App replace peer-closed UI endpoints, then App transfers and
+  the new server presents generation 2 as frame 1. This proves one scripted
+  crash/rebind only, with no watchdog, retry backoff, restart budget, repeated
+  crash handling; producer-orphan/two-slot-reuse proof belongs to M38
+- an M38 dedicated producer-orphan reclamation runtime. App maps and transfers
+  both static slots, queues one frame for SurfaceServer Acquire, then Init
+  terminates and waits for App before terminating and waiting for SurfaceServer.
+  Producer-orphan release, mapping teardown, last-reference full-backing scrub,
+  generation advance, two-slot reallocation, 307200-byte zero verification per
+  slot, and third-allocation `OutOfMemory` converge with no remaining graphics
+  mappings, surfaces, or handles. This proves bounded ownership recovery and
+  reuse, not a frame-paced multi-buffer swapchain
+- bounded faultable copy-in/copy-out that never creates a Rust reference to
+  user memory: two linker-retained read-only exception-table entries whitelist
+  only byte `LDTRB`/`STTRB`, validate EL1h/ESR/FAR/WnR/ASID/IRQ/PAN/UAO and the
+  active range, and return `BadAddress` without swallowing other current-EL
+  aborts. Copy-in clears its kernel buffer on failure; Channel write publishes
+  only after a complete copy, Channel read consumes only after a complete
+  copy-out, and VMO read prevalidates the destination before copying directly
+  from an immutable borrowed range
+- a safe, heap-free `no_std` ELF parser that accepts only bounded ELF64 little-
+  endian System V, AArch64 static `ET_EXEC` images; it rejects dynamic loading,
+  executable stacks, W+X, page overlap, malformed ranges, bad entry points, and
+  unsupported program headers, with 19 host positive/negative tests
+- seven standalone Rust `no_std` executables for the feature-off default: init,
+  ServiceManager, echo provider, echo client, SurfaceServer, Launcher, and App.
+  M45--M54 input profiles add a separately linked InputServer as the eighth
+  image. Every active image is build-time verified as a static AArch64
+  `ET_EXEC`, and the build rejects any byte-identical pair. Each profile-sized
+  kernel catalog is all-or-none; no partial external override is accepted. The
+  kernel build script registers every active external override ELF path with
+  Cargo `rerun-if-changed`, so an in-place content update rebuilds and re-embeds
+  that image; empty, partial, and byte-identical override sets remain rejected
+- a bounded multi-segment ELF loader that accepts at most 256 load pages,
+  validates an ordered VMA plan, clears every recycled frame, copies exact
+  per-page file intersections, keeps BSS/padding zero, synchronizes executable
+  pages, and publishes exact RX, R/NX, or RW/NX leaves transactionally. The
+  current image adds a four-page RW/NX stack and two unmapped guard pages; all
+  image and stack leaves are owned and independently verified
+- private four-table user hierarchies (root/L1/L2/L3) at the 8 GiB user window;
+  `init` receives ASID 1 and the first-fit allocator assigns seven distinct
+  non-kernel ASIDs to the peak seven simultaneously live dynamic children. Each
+  root shares permanent kernel
+  subtrees, while the ASID-0 boot root has no user leaves; scheduler commits
+  TTBR0/ASID with the selected context and retirement performs ASID-scoped TLBI
+  before later reuse
+- generation-tagged PIDs and a deliberately profile-bounded process table:
+  default has `init` plus seven dynamic children, InputServer profiles have
+  eight, and M66/M67 have nine. The peak manager/provider/two-service-client/
+  SurfaceServer/Launcher/App set
+  proves distinct slots, PIDs, TTBR0 roots, ASIDs, user-frame sets, guarded user
+  stacks, kernel stacks, fresh data/BSS state, and no implicit handle
+  inheritance. A further dynamic concurrent spawn is rejected with `ShouldWait`
+  before allocations or startup-handle movement; the retired manager slot is
+  reused only after its exact completion is consumed, with PID generation +1.
+  The M33 profile applies the same rule to App: generation 1 exits and is
+  consumed before generation 2 reuses slot 8. M34 then kills and consumes
+  generation 2 before generation 3 reuses the same slot, still leaving eight
+  live processes
+- a generation-safe blocking `ProcessWait`: IRQ-masked waiter publication
+  prevents lost wakeups for a live child, monitor-side reaping wakes only the
+  matching PID generation, and each dynamic slot owns a one-shot completion
+  tombstone for exit-before-wait or non-target reaping. A retained completion
+  prevents slot reuse until the exact PID generation is consumed
+- terminal `Zombie` and `Faulted` user states. The single-core monitor reaps a
+  child only after the exception return path has switched to a kernel context
+  and live SP/TTBR0 evidence no longer references it. The seven-slot reaper can
+  consume every terminal child in one monitor pass; each teardown releases
+  all image and stack frames, VMA/mapping metadata, private four-level tables,
+  16 KiB exception stack, boxed HandleTable, and Process `Box`, with an exact
+  per-address-space frame-destroy delta and restored heap evidence. Large spawn
+  metadata and the 32-slot handle table are constructed fallibly in place on
+  the heap rather than overflowing the fixed exception stack
+- the fully verified M42 seal of 500 default workspace tests (20 ABI + 41
+  `bndr-compositor` + 19 ELF + 31 ServiceManager + 99 `bndr-ui` + 0 init + 290
+  default kernel), plus 23 feature-gated trace tests for 523 unique host tests
+  and 313 unique kernel tests; the hardened M42 QEMU checker 3/3, M41 regression,
+  seven-image AArch64 construction,
+  default/all-features Clippy, five normal QEMU profiles, all retained
+  negative/storage/persistence/race checks, the interactive M32
+  screenshot/cancellation matrix, ABI-v19 process termination, M33 lifecycle,
+  M34 crash recovery, M35 mapped graphics, M36 graphics consumer cleanup, M37
+  SurfaceServer restart/rebind, M38 producer-orphan/two-slot reuse, M39 software
+  frame-clock gating, M40 resident swapchain scheduling, M41 userspace
+  two-window policy, and M42 persistent window session. The complete M42
+  suite exits 0 with
+  `process_terminate=1 app_lifecycle=1
+  app_crash_recovery=1 mapped_graphics=1 graphics_owner_death=1
+  graphics_surface_restart=1 graphics_producer_orphan=1 graphics_frame_clock=1
+  graphics_swapchain=1 multi_window=1 persistent_window=1`. No
+  immutable-kernel-image or
+  16-way stress claim is
+  made. Cold failure
+  diagnostics and the post-wait validator remain out of line; the current
+  boot-monitor stack is 128 KiB while worker/EL0 exception stacks remain 16 KiB
+- the sealed M43 text-input slice: ABI-v21 preserves syscalls 0--37, adds the
+  `KEY_READY` object-signal bit 5 and register-only syscall 38
+  `SurfaceReadKey`, and exposes a capacity-32 per-surface key FIFO. The
+  dedicated `text-input-runtime` checker passed twice consecutively, the M42
+  persistent-window transcript passed again under ABI-v21, and default plus
+  all-features Clippy passed. Its sealed host ledger is 522 default tests
+  (`21/44/19/31/111/0/296`), plus 24 feature-filtered tests
+  (`11 ui_trace + 10 window_trace + 3 persistent`) for 546 unique host tests;
+  the text-input kernel configuration has 321 tests. The complete M43
+  `./scripts/test.sh` exits 0 with `text_input=1`; the historical M42
+  ABI-v20/523 matrix above remains preserved as the prior seal
+- the historical M44 soft-keyboard slice: ABI remains v21 with no syscall or
+  process delta; the `no_std` `bndr-input` engine lives in SurfaceServer and
+  drives a trusted non-focusable compositor overlay. Dedicated QEMU verifies
+  `A`/Backspace/Enter, `show-hide-show`, a hidden-coordinate no-op, final
+  committed `aa`, 21 messages, frames 14--21, and three screenshots. Host
+  evidence is 549 default + 28 feature-filtered = 577 unique tests, with 324
+  soft-keyboard kernel tests. The complete `./scripts/test.sh` exits 0 with
+  `soft_keyboard=1` immediately after `text_input=1`
+- the historical M45 dedicated InputServer slice: ABI-v22 preserves syscalls
+  0--38, reuses `READABLE`/`PEER_CLOSED`, and adds register-only syscalls 39 `InputAcquire`
+  and 40 `InputReadEvent`. A unique non-duplicable/non-transferable
+  `READ|WAIT` InputCapability binds the capacity-64 kernel broker to the live
+  InputServer. Strict 64-byte `BIC1`/`BIE1` routes all 47 pointer and 12 key
+  events through the service while Surface FIFO reads remain zero. The input
+  profile has eight ELFs, capacity 9/8, 12 contexts, process `10/1/1/9`, 36
+  handles, 30 endpoints/15 pairs, and waits `9/2/7`. Host evidence is 599
+  default + 24 directed = 623 executed/unique tests and 334 input-profile
+  kernel tests; dedicated QEMU, three screenshots, and the full suite pass
+  with `input_server=1`
+- the historical M46 InputServer/SurfaceServer recovery slice: ABI-v22 and
+  syscalls 0--40 remain unchanged. The independent leaf reconstructs the M41
+  semantic checkpoint without injecting that fixture into the physical
+  broker, then routes three real events through InputServer across one
+  SurfaceServer restart. Together, `BIR1` traffic and strict fixed-64-byte
+  `BSR1` traffic advance route epoch and Surface session `1->2`, reject the one
+  gap release as stale, cancel App capture/contact, and rebind Launcher/App to a
+  same-slot,
+  generation-`+1` replacement. Broker accounting is `3/3/0/1`, Surface FIFO
+  and legacy reads remain zero, and process/wait accounting is
+  `11/2/2/9` and `9/2/7`. Host evidence is 626 default + 24 directed = 650
+  executed/unique tests and 335 restart-profile kernel tests; staged QMP,
+  three phase screenshots, the M45 regression checker, and the full suite pass
+  with `input_server_surface_restart=1`
+- the historical M47 InputServer-restart slice: ABI-v23 preserves syscalls 0--40
+  and adds register-only syscall 41 `InputSessionInfo`. Strict 64-byte
+  `BIR1`/`BIP1`/`BIC1`/`BIE1` traffic advances InputServer session and route
+  epoch `1->2` while Surface session remains 1. One audited Surface
+  `InputAcquire` denial leaves handle/session deltas at zero; the authorized
+  restart uses an exact 30 ms timeout and budget `1/1`. Broker accounting is
+  `3/3/0/1` with one release and zero unbound drops; process/topology/wait
+  accounting is `11/2/2/9`, 36 handles, 30 endpoints/15 pairs, and `9/2/7`.
+  Host evidence is 650 default + 24 directed = 674 executed/unique tests and
+  338 restart-profile kernel tests; staged pre/gap/post QMP, M45/M46 isolation
+  regressions, and the full suite pass with `input_server_restart=1`.
+  Crash-loop quarantine is host-verified only; QEMU proves exactly one
+  authorized restart
+- the historical M48 ServiceSupervisor slice: ABI-v23 and syscalls 0--41 remain
+  unchanged. Strict fixed-64-byte `BSH1` binds a `ServiceIdentity` made of
+  service kind, process generation, and PID. The replacement InputServer
+  dequeues Probe 1 and returns Healthy 1, then after the 2 s cadence dequeues
+  Probe 2 and deliberately stays silent until the finite 200 ms watchdog
+  classifies `health-timeout`. Attempt 2 exceeds budget `1/1`; runtime
+  quarantine terminates/reaps the replacement, leaves the broker unbound,
+  commits the red 32x24 degraded badge at frame 9/generation 6, and completes
+  `DegradedAck`. Terminal accounting is `11/3/3/8`, 31 handles, 26
+  endpoints/13 pairs, and waits `8/2/6`. Host evidence is 670 default + 24
+  directed = 694 executed/unique tests and 338 M48-profile kernel tests;
+  dedicated four-phase QMP, M45/M46/M47 isolation regressions, and the static
+  matrix pass. The complete offline suite passes with `service_supervisor=1`
+- the historical M49 dependency-aware supervision slice: ABI-v23 and syscalls
+  0--41 remain unchanged. `ServiceSupervisor::<2>` supervises SurfaceServer and
+  InputServer with an explicit `InputServer -> SurfaceServer` soft edge. QEMU
+  proves Surface generation 1--2 while Input generation 1 survives, then a
+  real 100 ms Input health-timeout, fixed 30 ms backoff, Input generation 2
+  rebound, red-to-green degraded recovery, and no restart storm. Five frozen
+  screenshots, offline Unix-QMP checking, and `-nic none` close this bounded
+  emulator witness
+- the historical M50 post-recovery interaction slice: ABI-v23/syscalls 0--41,
+  eight images, capacity 9, and twelve contexts remain unchanged. QEMU rejects
+  `(16,32)` as physical `4/5` with no route/frame change, then routes App
+  `(136,184)` as physical `6/7` through two BWE events, Present sequence 5/frame
+  3, output frame 4/write generation 4, health `2/2`, and resident services
+- the historical M51 post-recovery focus slice: after the M49/M50 prefixes, QEMU
+  injects Launcher `(80,96)` as physical `8/9`, moves focus App/3 to Launcher/4,
+  reaches BIC sequence 3 and Channel `8/8`, then commits Launcher command
+  6/frame 4 as scene 11, output frame 5/write generation 5. Exact damage is
+  `(64,80,40,32)`/1280 changed pixels; health is `2/2` and both services remain
+  resident
+- the historical M52 post-recovery focus-roundtrip slice: after the complete
+  M49/M50/M51 prefix, QEMU injects App `(136,184)` as physical `10/11`, maps
+  the down to compositor `(80,120)`/App-local `(32,40)`, moves focus Launcher/4
+  to App/5 with authenticated BIC sequence 4, and commits App command 6/frame 4
+  as scene 12/output frame 6/write generation 6. The M52 Channel ledger is
+  `8/8`; compositor damage `(104,152,40,32)` maps to framebuffer PPM damage
+  `(160,216,40,32)`/1280 changed pixels
+- the historical M53 post-recovery lifecycle-focus slice: the M52 prefix remains
+  physical `1..11`/BIE event 17 and output frame 6. Both clients authenticate
+  session-2 Ready plus App/1→Launcher/2→App/3 with RFCK/LFCK/AFCK, yielding BUE
+  `8/8` + ACK `6/6` = Channel `14/14`; M52 APCK stays a separate boundary
+  `1/1`. Compositor/InputServer finish at App/5 and App/4, and the M53/M52
+  framebuffer diff is exactly zero
+- the historical opt-in M54 AppData slice: ABI-v24 syscalls 42--46 expose only App
+  principal 1 with a non-transferable `READ|WRITE|DUPLICATE` root. A persistent
+  GPT index-2 volume proves generation `0→2→3`, a write-free stable generation
+  3 mount, and corrupt-newest-checkpoint fallback `3→2→3`, while retaining the
+  exact M53 UI prefix and framebuffer
+- the historical opt-in M55 StorageServer slice: a separate eight-image ABI-v25
+  profile embeds a standalone StorageServer, makes syscalls 42--46 unsupported,
+  and uses syscalls 47--52 plus non-duplicable/non-transferable volume/session
+  capabilities. Strict v2 batches carry at most eight sectors in an exact
+  4160-byte wire; three persistent boots prove `0→4→5→5`, with zero AppData
+  writes/flushes and an unchanged AppData partition on the third boot
+- the historical opt-in M56 recovery slice: ABI v25 is unchanged; three
+  session-fatal QueueNotify-suppression cases rotate the StorageServer owner,
+  reset/revalidate/rebuild/rearm exclusively in the kernel, and require each
+  replacement owner to remount the durable volume before continuing
+- the historical opt-in M57 repeated-recovery slice: two serial `WRF` cycles,
+  six consumed driver suppressions, one injected IRQ-commit rollback followed
+  by a real successful retry, and final attempts/commits/rollbacks `7/6/1`
+- the historical M58 StorageServer cooperative-recovery slice: the same M57 fault ledger,
+  seven four-phase physical recoveries with inter-phase driver release, short
+  DAIF timing, attempt-qualified rearm/broker/admission commit, gate-closed
+  acquire waits, and timer/dual-worker/authenticated-EL0 progress in every window
+- the historical M59 unification milestone: an ABI-v24 AppData child with one
+  read-notification loss, no original-operation replay, one read-only retry and
+  zero mutation retries, plus an independent ABI-v23 timeout self-test with
+  three timer/dual-worker progress windows and no EL0-progress claim
+- the historical M60 bounded StorageServer fault-policy slice: the exact
+  M60 -> M58 -> M57 -> M56 -> M55 feature closure, ticketed recovery with
+  probation, attempt cap 3, `2x2` backoff policy, six transient `WRFWRF`
+  controls, one kernel-prearmed simulated permanent read fault, boot-local
+  sticky Offline, an authenticated Offline denial, and terminal IRQ/DMA proof
+- the historical M61 fault-latched owner-retirement slice: the exact
+  M61 -> M60 -> M58 -> M57 -> M56 -> M55 closure, a nonrenewable 250 ms
+  physical-counter grace armed only by fatal completion, exact
+  PID/epoch/lease-generation targeting, six cooperative retirements and one
+  monitor-forced epoch-6 flush retirement through real ObjectWait abandonment
+  and the ordinary reaper before epoch-7 recovery
+- the historical M62 terminal-quarantine slice: the exact
+  M62 -> M61 -> M60 -> M58 -> M57 -> M56 -> M55 closure, one kernel-only
+  nonrenewable proof deferral, a three-step/two-Pending fallback with one
+  simulated physical error, reverified IRQ/DMA terminal state, zero policy
+  attempt/ticket consumption, and zero EL0 controls before boot-local Offline
+- the historical M63 persistent-health slice: the exact
+  M63 -> M62 -> M61 -> M60 -> M58 -> M57 -> M56 -> M55 kernel closure, a
+  double-slot 80-byte unclosed-boot hint, legacy upgrade, two boots of one
+  persistent image, fresh current-device reprobe, full flush/readback, no
+  persisted or record-derived Offline, and no EL0 control
+- the historical M64 clean-shutdown slice: the exact
+  M64 -> M63 -> M62 -> M61 -> M60 -> M58 -> M57 -> M56 -> M55 kernel
+  closure, an exact in-memory open-session generation capability, durable
+  open-to-closed transition with flush/full readback/old-slot preservation,
+  pre-EL0 storage-admission and IRQ sealing, no later storage mutation, no
+  EL0 control, and no hardware-poweroff or full-userspace-shutdown claim
+- the historical M65 shutdown-orchestration slice: ABI v26 syscall 53 is
+  init-only; exact `Prepare→StorageServer flush/readback/exit/reap→InitReady→Commit`
+  closes process/storage admission, consumes the AppData generation, invokes
+  M64 durable close, seals the shutdown/storage/IRQ gates, and proves two
+  persistent boots without claiming full resident-service shutdown, hardware
+  poweroff, real power-cut, SMP, or a general runtime
+- the historical M66 resident-platform shutdown slice: ABI v27 syscall 54 binds
+  eight exact PID/image/node identities to a kernel-inspected 10-process,
+  19-pair dependency topology; three reverse-topological waves retire all
+  children before StorageServer drain, durable close, IRQ/storage/shutdown
+  seals, opaque platform-token validation, and two status-0 QEMU semihosting
+  exits. It is emulator-only and makes no PSCI, hardware-poweroff, power-cut,
+  SMP, or general-runtime claim
+- the historical M67 unified-product slice: ABI v28 adds no syscall; the M45 real
+  UI/InputServer path converges before an authenticated QMP power-key event
+  enters the M66 AppData/shutdown closure. Two boots require the same exact
+  final screenshot, generation-6 AppData, generation-4 closed health state,
+  DATA/AppData-only disk changes, and guest-requested status-0 QEMU exits.
+  It explicitly records `general_runtime=0` and `real_phone_claim=0`
+- the historical M68 bounded product-service-liveness slice: ABI v29 adds no
+  syscall; one StorageServer follows BSH1 Healthy→withheld, a real 100 ms
+  timeout and 30 ms backoff, one init-authorized killed retirement, same-slot
+  generation + 1 replacement, unchanged AppData mount generation, and
+  replacement Healthy before the complete M67 closure. This is one injected
+  hang and one restart, not a general watchdog, and it records
+  `general_runtime=0 real_phone_claim=0`
+- the historical M69 bounded two-service dependency-liveness slice: ABI v30 adds
+  no syscall; fixed StorageServer and App nodes use one hard
+  `StorageServer -> App` edge, three 40 ms cadence waits, one 100 ms timeout,
+  one 30 ms backoff, exact block/resume acknowledgements, same-slot
+  next-generation StorageServer replacement, and final Healthy replies before
+  the full M68 closure. It is one injected fault over one fixed edge, not an
+  arbitrary dependency graph or long-running watchdog, and records
+  `general_runtime=0 real_phone_claim=0`
+- the historical M70 QEMU PSCI shutdown slice: ABI v31 adds no syscall; strict
+  direct-root `/psci` discovery, compatible/method validation,
+  `PSCI_VERSION`, a kernel-only sealed descriptor, and HVC `SYSTEM_OFF` replace
+  semihosting for this profile. Two release boots self-exit, while
+  `hardware_poweroff_claim=0 pmic_claim=0 real_phone_claim=0` explicitly
+  excludes real-device claims
+- a no-switch fault-injection image proving that scheduler bookkeeping without
+  a real TrapFrame/stack switch is rejected. Its one-shot injection is armed
+  only after boot-time IRQ users, including the longer M23 storage probe, have
+  published their baselines
+- a blocked-run fault image proving that a context still held in the timer
+  queue cannot execute while its accounting pretends it is asleep
+- an intentional kernel-text write test proving that W^X faults through the
+  synchronous exception path
+- an unmapped-read hardware fault plus no-reclaim and bookkeeping-only-unmap
+  injections proving that the memory evidence rejects fake reclamation/PTEs
+- a suppressed heap release and a page-17 initialization failure proving that
+  heap accounting rejects fake reclamation and partial mappings fully roll
+  back before a successful retry
+- an EL0 kernel-text read test proving AP permission denial, precise ESR/FAR
+  capture, user-only termination, and continued timer/worker execution
+
+## Current engineering milestone
+
+M80 extends historical M79 with the matched ABI-v41
+`unified-product-maintenance-plan-runtime` and adds no syscall. It retains the
+M77 authorization audit, M78 aggregate-completion ledger, and M79
+maintenance-step journal, and adds the two-slot 424-byte `BNDRMPL1` plan
+ledger at `BNDROID_DATA` relative sectors 11 and 12.
+
+Each of the three bounded resident operations now has a durable
+`PREPARED -> APPLYING -> CONFIRMED` phase chain with an exact plan ID,
+operation-instance ID, idempotency key, effect digest, authorization binding,
+and previous-chain binding. `PREPARED -> COMPENSATED` is the only cancellation
+transition and is allowed only before apply. The release gate proves the
+normal nine-transition plan, prepared/applying/effect interruption recovery,
+result-unknown and effect-observed reconciliation, pre-apply compensation,
+corrupt-newest fallback/repair, and terminal-plan-chain inclusion in the
+aggregate completion digest.
+
+This is QEMU-disk evidence for three fixed, kernel-observed, idempotent
+resident effects. It does not provide exactly-once external side effects,
+arbitrary instruction resume, physical power-cut behavior, a trusted
+monotonic backend, or real-phone evidence. Next local work is to make the
+bounded plan itself signed/data-driven and expand multi-sequence,
+cancellation-race, effect-divergence, corruption, and nondeterministic-soak
+coverage. Hardware work still requires a user-selected, explicitly authorized
+target before implementing or operating its BSP, boot chain, controllers, or
+PMIC.
+
+- [x] M38 producer-death orphan reclamation and two-slot scrub/reuse proof
+
+- [x] M39 ABI-v20 software frame clock and grant-gated mapped-present contract
+
+- [x] M40 resident two-buffer software-paced swapchain ownership and scheduling proof
+
+- [x] M41 bounded userspace multi-window compositor with z-order, occlusion, damage, and input-routing proof
+
+- [x] M42 persistent event-driven window session with strict logical-phone bounds, peer-close cleanup, and generation-safe recreation
+
+- [x] M43 focus-scoped hardware keyboard input plus a bounded UTF-8 text-editor slice
+
+- [x] M44 touch-driven three-key soft keyboard, trusted non-focusable overlay, hidden-hit rejection, and focus-preserving text input
+
+- [x] M45 ABI-v22 dedicated InputServer, unique kernel-broker capability, broker-only physical routing, server-owned focus/capture/text-context/IME, and zero Surface FIFO fallback
+
+- [x] M46 SurfaceServer restart route epoch/rebind, sequence-gap recovery, and capture cancellation
+
+- [x] M47 ABI-v23 InputServer restart/reacquire, route resynchronization, exact 30 ms backoff, one-restart budget, audited permission denial, and host-verified crash-loop quarantine policy
+
+- [x] M48 generic ServiceSupervisor/watchdog, strict fixed-64-byte BSH1 health protocol, runtime health-timeout quarantine, user-visible degraded mode, and multi-fault QEMU coverage (historical seal)
+
+- [x] M49 dependency-aware SurfaceServer + InputServer supervision, `InputServer -> SurfaceServer` soft dependency, 100 ms health watchdog, 30 ms restart backoff, and coordinated degraded-to-recovered QEMU proof
+
+- [x] M50 post-recovery outside-phone rejection, App input-to-frame present, output frame 4/write generation 4, service health 2/2, and resident QEMU proof (historical seal)
+
+- [x] M51 post-recovery Launcher capture, App/3→Launcher/4 focus handoff, output frame 5/write generation 5, exact damage, service health 2/2, and resident QEMU proof
+
+- [x] M52 post-recovery App capture, Launcher/4→App/5 authenticated focus roundtrip, output frame 6/write generation 6, compositor/PPM exact damage, and resident QEMU proof
+
+- [x] M53 recovered-session Ready and App/1→Launcher/2→App/3 lifecycle-focus convergence across both clients, zero new input/frame, independent M52 APCK boundary, and zero-diff framebuffer proof
+
+- [x] M54 opt-in ABI-v24 capability-scoped AppData root, atomic file replacement/CAS, directory create/list/unlink, generation `0→2→3`, corrupt-newest fallback/re-upgrade, 292 mutation and 965 first-format crash points, and offline `-nic none` QEMU proof
+
+- [x] M55 opt-in ABI-v25 standalone EL0 StorageServer, syscalls 47--52, non-duplicable/non-transferable volume and session capabilities, strict v2 4160-byte sector batches up to 8, 100 Hz logical plus one-shot physical scheduling, idle restart/rebind, and persistent AppData generation `0→4→5→5` with a zero-write stable third boot
+
+- [x] M56 opt-in ABI-v25 fail-stop StorageServer recovery: session-fatal read/write/flush timeout classification, old-owner release before kernel-only reset, identity/features/capacity revalidation, queue-DMA rebuild, two-phase IRQ rearm, and epoch-advanced durable remount
+
+- [x] M57 opt-in ABI-v25 repeated fail-stop recovery: serial `WRFWRF`, driver suppression `2/2/2`, six owner rotations, IRQ-safe broker access, Running-owner `ServiceAbandoned`, physical submission gate, and injected IRQ-commit rollback followed by a successful retry
+
+- [x] M58 opt-in ABI-v25 cooperative fail-stop recovery: four physical phases release the driver between steps, each step samples reset status or generation-qualified capacity at most once, one coordinator ID spans rearm/broker/admission, the gate opens only after full commit, all seven windows prove timer/dual-worker/authenticated-EL0 progress, masked polling is zero, and neither instrumented driver/control section reaches the timer period
+
+- [x] M59 historical cooperative recovery unification: independent ABI-v24 AppData and ABI-v23 timeout ledgers share the M58 four-phase engine; AppData freezes outcomes, retries only one zero-output read, never retries a mutation, and proves timer/dual-worker/authenticated-EL0 progress, while the timeout self-test proves three timer/dual-worker windows with `el0_progress_claim=0`; all policy coordinators explicitly reopen admission and the final suite carries all three M59 seals
+
+- [x] M60 bounded StorageServer fault policy: exact M60 -> M58 -> M57 -> M56 -> M55 closure, ticketed probation, attempt cap 3, base-two/multiplier-two backoff, dynamic probation-I/O `RequiresReset`, kernel-prearmed permanent fault authority, boot-local sticky Offline, authenticated Offline denial, and terminal IRQ/DMA fail-closed proof
+
+- [x] M61 fault-latched StorageServer owner retirement: exact M61 -> M60 -> M58 -> M57 -> M56 -> M55 closure, fatal-completion-only nonrenewable 250 ms physical-counter grace, exact generation-qualified PID/epoch/lease ticket, six cooperative retirements, one monitor-forced Killed epoch-6 flush owner with live-volume-close denial and real ObjectWait abandonment, ordinary reaping, recovery, and epoch-7 replacement
+
+- [x] M62 terminal StorageServer quarantine fallback: exact M62 -> M61 -> M60 -> M58 -> M57 -> M56 -> M55 closure, one kernel-only nonrenewable proof deferral, three cooperative steps/two Pending returns/one simulated physical error, reverified IRQ/DMA terminal boundary, zero policy attempt/ticket consumption, and zero EL0 controls
+
+- [x] M63 kernel-only persistent device-health hint: 80-byte versioned payload, legacy upgrade, fresh current-device reprobe, two persistent boots, and no persisted/record-derived Offline or EL0 control
+
+- [x] M64 kernel-only exact-session durable close: inactive-slot write, flush/full readback/old-slot preservation, pre-EL0 admission and IRQ seal, two persistent closes, and no later storage mutation
+
+- [x] M65 ABI-v26 init-only shutdown orchestration: syscall 53 `Prepare/Commit`, client authority rejection, post-Prepare spawn rejection, StorageServer final flush/readback/normal exit/reap, M64 durable close, shutdown/storage/IRQ seal, and two persistent boots
+
+- [x] M66 ABI-v27 authenticated resident shutdown: eight nodes, ten real dependency edges, kernel-inspected 38 Channel endpoints/39 handles, three reverse-topological waves, order-denial probe, full child reap, StorageServer/durable close seals, opaque platform token, and two guest-requested status-0 QEMU exits
+
+- [x] M67 ABI-v28 unified product runtime: real M45 UI/InputServer convergence, authenticated QMP power key 116, Launcher/App AppData, final StorageServer, M66 graph shutdown, exact two-boot screenshot/disk evidence, and two guest-requested status-0 QEMU exits; no new syscall and no real-phone claim
+
+- [x] M68 ABI-v29 bounded product-service liveness: BSH1 probes/Healthy/withheld `3/2/1`, real 100 ms timeout, real 30 ms backoff, restart budget 1, one killed retirement, same-slot generation + 1 replacement, unchanged AppData mount generation, replacement Healthy, and two complete QEMU self-exits
+
+- [x] M69 ABI-v30 bounded two-service dependency liveness: fixed StorageServer+App, one hard edge, BSH1 probes/Healthy/withheld `8/7/1`, three real 40 ms cadence waits, exact App hard-block/resume acknowledgements, one 100 ms timeout and 30 ms backoff, same-slot next-generation replacement, final Healthy round, and two complete QEMU self-exits; no new syscall
+
+- [x] M70 ABI-v31 FDT-validated QEMU PSCI shutdown: strict `/psci` parser, `arm,psci-1.0`/`arm,psci-0.2`, `hvc`/`smc`, `PSCI_VERSION`, opaque kernel seal, HVC `SYSTEM_OFF`, no semihosting, and two complete QEMU self-exits; no new syscall and no hardware-poweroff claim
+
+- [x] M71 ABI-v32 five-service continuous supervision: transactional 5-service/4-edge catalog, transactional probe batches, 21 cadence rounds with 16 additional healthy rounds, simultaneous two-service transient misses recovered within tolerance, one escalated StorageServer replacement, and two complete PSCI QEMU self-exits; no new syscall, `arbitrary_soak_claim=0`
+
+- [x] M72 ABI-v33 immutable product-manifest supervision: init-only syscall 55, kernel-validated/read-only BMF1 VMO, transactional bounded parser, non-legacy manifest order, four resident bindings, manifest-driven StorageServer spawn/replacement, strict bad-argument probe, two complete PSCI QEMU self-exits, and full-suite regression; `arbitrary_service_set_claim=0`
+
+- [x] M73 ABI-v34 event-driven product supervision: init-only syscall 56, read-only UI-convergence query, kernel-authenticated process ledger, multi-channel loop until external power, two clean F5-requested StorageServer rotations, stable-health restart-budget rearm, four-response cancellation/drain, zero process termination/kills, and two complete same-disk PSCI QEMU self-exits
+
+- [x] M74 ABI-v35 verified product manifest: external 512-byte BMS1, pinned fixture RSA-2048 PKCS#1 v1.5 SHA-256 verification, static rollback floor, and pre-publication signature/old-index rejection; no new syscall and no production-key or hardware-rollback claim
+
+- [x] M75 ABI-v36 persistent rollback floor: pre-EL0 signature-to-ledger ordering, two bound CRC-protected QEMU-disk slots, first-boot advance, second-boot redundancy repair, third-boot read-only steady state, and bad-signature/valid-old rejection without slot mutation; no new syscall and no RPMB/eFuse, host-rollback, erase, tamper, hardware-power-cut, or real-phone claim
+
+- [x] M76 ABI-v37 fixture key rotation: ordered key ids/epochs 2/2→3/3→4/4, persisted `BNDRKEY1` floor/active-anchor/keyring-policy binding, two authenticated transitions, redundancy repair/read-only steady state, bad-signature and valid-retired-key pre-EL0 rejection without slot mutation, and public-only split-signing assembly; no new syscall and no production HSM/RPMB/eFuse/host-resistance/hardware/real-phone claim
+
+- [x] M77 ABI-v38 signed maintenance authorization: init-only syscall 57, signature-first BMA1 verification with exact manifest/key-policy/device/maintenance bindings, double-slot `BNDRMAU1` exact-sequence hash-chain audit with write/flush/readback, one boot-local session gating mutating supervisor reports while UI queries stay read-only, six positive and three pre-EL0 negative QEMU boots, and public-only split signing; no trusted monotonic backend, production HSM/RPMB/eFuse/hardware, or real-phone claim
+
+- [x] M78 ABI-v39 durable maintenance execution: no new syscall, independent double-slot `BNDRMEX1` completion ledger, predecessor-completion admission, exact-binding read-only resume from `audit2/execution1`, kernel-validated completion to `audit2/execution2`, completed-replay rejection, and host-interruption/negative QEMU evidence; no exactly-once, arbitrary-resume, trusted-monotonic, hardware-power-cut, or real-phone claim
+
+- [x] M79 ABI-v40 durable maintenance-step journal: no new syscall, double-slot 376-byte `BNDRMST1` at relative sectors 9/10, fixed rotation/rotation/drain effects, exact authorization/effect/hash-chain binding, M78 migration anchor, read-only restart reconciliation, three post-step host cut points, corrupt-newest fallback/repair, and terminal-chain binding into aggregate completion; no external-effect exactly-once, arbitrary-resume, trusted-monotonic, physical-power-cut, or real-phone claim
+
+- [x] M80 ABI-v41 durable maintenance-plan state machine: no new syscall, double-slot 424-byte `BNDRMPL1` at relative sectors 11/12, three exact operation-instance IDs and idempotency keys, nine ordered prepare/apply/confirm transitions, result-unknown and effect-observed reconciliation, pre-apply compensation, prepared/applying/effect host cuts, corrupt-newest fallback/repair, and terminal-plan-chain binding into aggregate completion; no external-effect exactly-once, arbitrary-resume, trusted-monotonic, physical-power-cut, or real-phone claim
+
+- [ ] Make the bounded maintenance plan signed/data-driven, then cover repeated authorization/rotation sequences, all legal cancellation races, unexpected effect divergence, wider dual-slot corruption, and longer nondeterministic soak
+
+- [ ] With an explicitly selected and authorized target, implement and validate its BSP, boot chain, controllers, and PMIC path. Emulator evidence is not hardware evidence
+
+- [ ] Product-grade InputServer/IME completion: Unicode grapheme/font shaping, locale/candidate UI, multipoint input, and physical-device input stack
+
+Historical M53 remains an independent bounded extension of the frozen M41 capacity-2,
+solid-retained-layer, two-output-slot proof; it does not replay or combine the
+M42--M45 physical transcripts.
+Its kernel extension ledger is a bounded witness; canonical traffic after the
+witness relies on userspace command/event trackers. Peer-close cleanup removes
+window state but is not automatic client restart. There is no DMA-BUF,
+IOMMU-backed device sharing, hardware scanout ownership transfer, arbitrary
+window manager, arbitrary Unicode keyboard path, or complete text/IME stack.
+Its nominal 50 Hz opportunity is software timer pacing and
+`release=post-copy`, not hardware vblank or page-flip completion.
+M37 covers one acquired-frame SurfaceServer death and one successful
+replacement/rebind; M38 separately covers one producer-first death ordering;
+M46 covers one exact InputServer-mediated capture-gap ordering; M47 covers one
+authorized InputServer replacement with a fixed restart budget and backoff;
+M48 covers the same InputServer's process-exit followed by one silent health
+probe, runtime quarantine, and degraded UI; M49 adds exactly one two-node soft
+  dependency graph and one ordered Surface-then-Input recovery; M50--M52 add only
+  fixed post-recovery contacts and a scripted two-window focus roundtrip, while
+  M53 adds only a scripted three-generation lifecycle-focus transcript. M54
+adds only one fixed AppData principal and kernel-monitor request path; M55
+separately moves that bounded namespace policy to one standalone userspace
+StorageServer while retaining a kernel raw-sector broker; M56 adds three
+session-fatal kernel-reset owner rotations, M57 repeats the three-kind cycle
+serially and exercises one fail-closed retry, and M58 makes those seven physical
+recoveries cooperative while preserving the same ledger. Historical M59 separately adds
+one read-only AppData fault proof and one low-level timeout ledger on the shared
+engine; it does not add a dynamic mutation-fault case. M60 adds one bounded
+StorageServer-only permanent-fault campaign and boot-local policy. M61 adds
+only the fault-latched 250 ms retirement grace and one forced-retirement case;
+M62 adds one simulated terminal-proof deferral and cooperative quarantine
+fallback. Neither is a general service heartbeat or hang detector. None
+combines the full M34 App-crash sequence or proves an arbitrary production
+service graph.
+Press-to-release capture has no timeout, movement slop,
+higher-level gesture cancel/arbitration, or robust recognizers; ramfb has no
+hardware vblank/page-flip path. The separate InputServer is not product-grade:
+  M49 proves only one fixed two-service dependency and ordered recovery, while
+  M50--M52 prove only scripted post-recovery routing and focus; M53 converges
+  only the fixed lifecycle focus sequence App/1→Launcher/2→App/3.
+There is no complete text rendering
+stack, full IME/composition, candidate/locale system, font shaping, arbitrary
+Unicode, or multipoint input. QEMU exposes only `A`, Enter, and Backspace for this
+witness; touch is demonstrated only through QEMU's absolute tablet rather than
+a physical touchscreen controller, and no physical phone keyboard is claimed.
+
+M25's historical/default storage boundary also remains deliberately narrow. One kernel-owned boot
+counter is updated only inside `BNDROID_DATA`, and EL0 can open exactly two
+boot-cached immutable VMOs. Its marker remains
+`filesystem_write=0 crash_consistency=0 general_runtime=0`. Historical M54
+independently added a bounded writable AppData ABI through the kernel monitor.
+M66 is the historical M55/M56/M57/M58/M60/M61/M62/M63/M64/M65 standalone
+StorageServer/shutdown branch head; M67 is the historical unified-product
+child, M68 is the historical bounded product-service-liveness child, and M69
+is the current bounded two-service dependency-liveness child.
+Historical M59
+independently hardens AppData and the low-level timeout path on the shared
+engine. M60's Offline state is boot-local, its permanent fault is simulated,
+and M62's terminal fallback is a single deterministic simulated entry. These paths still cover
+only one bounded AppData slice over a kernel block driver; this is not a general filesystem,
+POSIX API, block/page cache, authenticated or anti-rollback store, multi-App
+isolation boundary, production controller recovery path, or power-loss proof.
+Phone hardware, telephony/cellular service, Wi-Fi, audio, hardware networking, power
+management, production hardware drivers, secure boot/sandbox/security updates,
+and a usable product UX are all still absent.
+This does not narrow the long-term mobile-OS roadmap. M49--M53 harden one exact
+two-service recovery, three fixed post-recovery interactions, and one fixed
+lifecycle-focus convergence transcript; M54/historical M59 cover bounded kernel-monitor
+AppData, while M55--M65 cover the separate StorageServer branch. General service
+hardening still needs arbitrary dependency graphs, concurrent fault policies,
+broader dependent failure propagation and coordinated recovery, broader
+malformed/duplicate/reverse-arrival coverage, durable audit records, fair
+dispatch, and a capacity model beyond two clients. Later work needs a general process/thread
+runtime with TLS and VMA-pinned user memory, cancellation, wait-all and
+higher-resolution timers, followed by graphics, input, networking, audio,
+power management, telephony, security policy, packaging and updates. The
+resident services, M34 lifecycle/recovery, M35 mapped graphics, M36 consumer
+cleanup, M37 one-crash SurfaceServer recovery, M38 one-orphan/two-slot reuse,
+M48 single-service supervision, and storage exercises remain bounded
+self-tests rather than product services. This is useful driver, isolation,
+lifecycle, and IPC evidence, not a deployable application model or a usable
+phone system.
+
+EL0 uses `svc #0`; `svc #0xb0` remains a private current-EL validation path.
+Pointer-bearing ABI paths are the bounded 64-byte Channel copy/transfer calls,
+the fixed 112-byte atomic receive envelope, syscall 22's at-most-64-byte
+canonical wait-item array, syscall 23's at-most-64-byte file path, and syscall
+24's at-most-4096-byte VMO destination, syscall 26's exact 64-byte canonical
+`Present`, syscall 29's at-most-4096-byte GraphicsBuffer source, and syscall
+30's exact 64-byte `BufferPresent`. Syscall 31 `ProcessTerminate` is
+register-only and accepts a generation-qualified PID plus two mandatory-zero
+arguments. ABI-v19 syscalls 32--36 keep mapped-buffer control in registers;
+ABI-v20 syscall 37 `SurfaceFrameAcquire` is also register-only and returns the
+granted epoch/boundary. ABI-v21 preserves all of those entries, adds object
+signal bit 5 `KEY_READY`, and adds register-only syscall 38
+`SurfaceReadKey`, which returns a packed Linux key code,
+release/press/repeat state, and monotonic sequence. Pointer input is returned
+in registers by syscall 27. ABI-v22 preserves syscalls 0--38, reuses the
+level-triggered `READABLE`/`PEER_CLOSED` signals, and adds register-only syscalls 39
+`InputAcquire` and 40 `InputReadEvent`; none of these input syscalls carries a
+user pointer. ABI-v23 preserves syscalls 0--40 and adds register-only syscall
+41 `InputSessionInfo`; it accepts an InputCapability handle plus two
+mandatory-zero reserved arguments and returns the session/acquisition-floor
+evidence without a user pointer.
+It validates the currently scheduled user translation context and masks IRQ
+for a bounded byte loop, but has no VMA pin or concurrent-unmap lifetime
+protocol, so it cannot simply be scaled to general mappings or SMP. The new
+wait-any deadline stays inside the exact generation-qualified object token and
+is sampled by the periodic IRQ; the older kernel-worker sleep queue still uses
+context-only entries, so neither path is yet a generic dynamic-thread timer or
+IPC-timeout facility.
+
+The frame allocator still covers only the first DTB RAM bank intersected with
+the early 1 GiB identity map; it has no contiguous/buddy allocation. Dynamic
+kernel mapping currently supports owned Normal RW/NX leaves in the shared
+4--8 GiB arena, while user RX, R/NX, and RW/NX leaves live in per-process
+private hierarchies.
+There is no general block splitting, protect/seal operation, SMP TLB shootdown,
+or MMIO alias API yet. The current ELF profile is intentionally a fixed static
+three-segment image with a kernel-created four-page stack; the generic loader
+is bounded to 256 load pages and nine VMAs. There are no argc/argv/env/auxv,
+relocations, PIE, dynamic linking, storage-backed executable loading, or
+runtime map/protect/unmap syscall yet.
+
+Storage support is restricted to QEMU `virt`'s modern virtio-mmio v2 transport
+and one `dma-coherent` block device. Normal M25 requires writable+FLUSH; the
+separate M22 race device is read-only. It has one size-8 split queue,
+exactly two request slots, and only the QEMU GICv2 SPI route has been verified;
+there is no general asynchronous block API, dynamic request pool, multi-queue,
+SMP completion domain, cancellation API, or real-hardware interrupt evidence.
+The GPT/FAT16/VFS path is a fixed-capacity parser for one deterministic 8 MiB
+image, one read-only system partition, one private DATA partition, strict 8.3
+names, and two expected files. M24 adds
+only a fixed two-entry immutable boot catalog and capability-scoped
+`FileOpenAt`/`VmoRead`; this is not a general FAT implementation, open-ended
+filesystem runtime, or product file service. M25 adds exactly one raw-sector
+DATA record update with flush/readback and reboot recovery; after catalog
+publication EL0 still has `runtime_disk_reads=0 mapped=0 shared_memory=0
+writes=0 persistence=0`. There is no general file write, discard, block/page
+cache, exactly-once contract, authentication, anti-rollback, durable filesystem
+metadata, hotplug, multiple-device policy, non-coherent cache maintenance, or
+real-hardware validation.
+
+The heap remains a fixed single-core first-fit arena, but its evidence-locked
+size is profile-specific: 1 MiB for M67, 512 KiB for M66, and 256 KiB for
+older profiles. Its lock masks local IRQ and scans a linear free list, so
+fragmentation can translate into interrupt latency; it has no growth,
+size-class slab, per-CPU cache, quarantine, or SMP lock yet.
+
+Each process handle table has 32 slots and permanently retires a slot at 24-bit
+generation exhaustion. Channel messages are either two `u64` scalars, at most
+64 bytes, or at most 64 bytes plus one move-only handle. Process exit, one
+Channel/Event, two register-packed legacy wait-any items, or one through eight
+canonical array items can block. Both wait-many ABIs support poll, infinite,
+and relative finite timeout, but the array path has not yet run a finite-timeout
+expiry or explicit-cancel case. ABI-v18 forced termination abandons the killed
+process's published waiter, but there is no general wait cancel API, wait-all,
+high-resolution wakeup,
+quota, audit hook, or SMP-safe lock ordering. The waiter is deliberately
+profile-bounded on one core: M66/M67 allow `init + 9` dynamic children,
+InputServer profiles allow `init + 8`, and default allows `init + 7`, with one
+thread per process. Signal/timeout arbitration remains inside a single-core
+local-IRQ serialization domain. The monotonic-ID Channel ownership DAG prevents
+Channel reference cycles, but its
+strict older-to-newer rule is conservative and is not a general cycle collector
+for future object types. The bounded child creation path is fallible, but the
+system still has no global memory-pressure or OOM policy.
+
+The ServiceManager is an independent, allocation-free EL0 process with a
+four-entry registry and `serving_loop=1`, but only inside a bounded,
+fixed-trusted-catalog self-test. Manager 2 remains resident with the provider
+and both clients. M17 authenticates ingress with kernel-stamped senders and a
+  fixed role allowlist; a delegated provider-session endpoint still cannot
+  authorize a client writer. M28 retains M20's two independent resident
+  sessions, a
+two-generation secondary lease, revoke/reattach, stale-revoke rejection, and
+primary progress while the secondary is stalled or detached. Its fixed
+transcript ends at phase 23 and reports `process_crash_restart=0
+general_runtime=0`.
+
+This is not a resilient arbitrary-client service runtime. The path supports
+exactly two clients, fixed identities and scripted control order; spontaneous
+process crash, unexpected peer close or malformed traffic can still fail-stop
+the bounded protocol. There is no owner-exit cleanup, fair general dispatch,
+product identity policy, list API, persistence, restart notification, audit
+trail, or long-running service-runtime model, and the 16-bit manager epoch must
+never repeat.
+It is a Bndroid protocol prototype, not Android Binder or an Android driver/API
+compatibility layer. The fixed-fixture AndroidBox DEX-0, Activity-0, and
+Resources-1 interpreters do not change that conclusion.
+
+Kernel/exception stacks, including up to seven dynamically owned child stacks, do not
+yet have unmapped MMU guard pages (EL0 user stacks do). Boot also has a
+narrow platform contract: the primary CPU affinity is zero, entry is EL1 or
+EL2, and firmware leaves the MMU/caches disabled. This is not arbitrary phone
+firmware support.
+
+`IMPLEMENTATION_STATUS.md` is the source of truth for current progress.
+`Bndroid_OS_30000.md` is the most useful long-term requirements index; the
+larger blueprint is mostly templated planning material.

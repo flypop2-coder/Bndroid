@@ -1,0 +1,32 @@
+[package]
+name = "bndr-androidbox"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = []
+androidbox-multiaction3 = []
+androidbox-apk-envelope4 = ["androidbox-multiaction3", "dep:miniz_oxide"]
+androidbox-manifest-catalog3 = ["androidbox-apk-envelope4"]
+androidbox-icon-resources5 = ["androidbox-manifest-catalog3"]
+androidbox-density-icons7 = ["androidbox-icon-resources5"]
+androidbox-dex-methods8 = ["androidbox-density-icons7"]
+androidbox-dex-instance9 = ["androidbox-dex-methods8"]
+androidbox-activity-fields10 = ["androidbox-dex-instance9"]
+androidbox-activity-state11 = ["androidbox-activity-fields10"]
+androidbox-string-text12 = ["androidbox-activity-state11"]
+androidbox-string-builder13 = ["androidbox-string-text12"]
+androidbox-layout-row14 = ["androidbox-string-builder13"]
+androidbox-layout-weight15 = ["androidbox-layout-row14"]
+androidbox-layout-spacing16 = ["androidbox-layout-weight15"]
+androidbox-layout-directional17 = ["androidbox-layout-spacing16"]
+androidbox-layout-size18 = ["androidbox-layout-directional17"]
+androidbox-layout-mixed19 = ["androidbox-layout-size18"]
+
+[dependencies]
+bndr-sm = { path = "../bndr-sm" }
+miniz_oxide = { version = "=0.8.9", default-features = false, optional = true }

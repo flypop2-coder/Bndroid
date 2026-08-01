@@ -1,0 +1,15 @@
+[package]
+name = "bndr-compositor"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = []
+mobile-ui-runtime = ["bndr-ui/mobile-ui-runtime"]
+
+[dependencies]
+bndr-ui = { path = "../bndr-ui" }
