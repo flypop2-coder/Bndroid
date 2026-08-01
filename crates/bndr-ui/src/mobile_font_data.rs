@@ -1,7 +1,7 @@
 // Rasterized, subsetted font data derived from Fira Sans.
 // This modified font data is licensed under the SIL Open Font License 1.1.
 // It is named Bndroid Sans Raster; the reserved font name is not used.
-// See licenses/OFL-1.1-Bndroid-Sans-Raster.txt.
+// See LICENSES/OFL-1.1-Bndroid-Sans-Raster.txt.
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct RasterGlyph {
