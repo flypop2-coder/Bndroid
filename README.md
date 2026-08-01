@@ -1,56 +1,45 @@
 # Bndroid OS
 
-[中文](README.zh-CN.md) | English
+Bndroid OS 是一个实验性的 Rust-first 操作系统项目，用来探索在非 Linux
+发行版架构上实现 Android 应用兼容体验的可能性。
 
-Bndroid OS is an experimental Rust-first operating system project that explores
-Android application compatibility without becoming a Linux distribution.
+当前仓库包含自研 AArch64 内核、受监督的服务模型、存储与 UI 子系统，以及
+AndroidBox：一个用于可验证 APK 摄取、资源解析、DEX 解释、Activity/UI 投影、
+生命周期监督和确定性证据测试的兼容层。
 
-The repository currently contains a custom AArch64 kernel, a supervised service
-model, storage and UI subsystems, and AndroidBox: a compatibility layer for
-verifiable APK ingestion, resource parsing, DEX interpretation, Activity/UI
-projection, lifecycle supervision, and deterministic evidence-driven tests.
+这是研究软件。它还不是 Android 的直接替代品，不是通用 APK 运行时，也尚未
+准备好用于生产设备。
 
-This is research software. It is not a drop-in Android replacement, not a
-general-purpose APK runtime, and not ready for production devices.
+## 当前内容
 
-## What Is Here
+- 面向 QEMU `virt` AArch64 平台的小型 Rust 内核。
+- 基于能力边界的内核对象、句柄、VMO、通道、事件和受监督进程。
+- 带恢复测试的存储、包管理、图形、输入和应用数据服务。
+- AndroidBox 里程碑已覆盖受控 Android SDK/D8/AAPT2 fixture 的布局尺寸解析
+  与 scene 投影。
+- 离线 UI 字体数据 Bndroid Sans Raster。
 
-- A small Rust kernel for the QEMU `virt` AArch64 platform.
-- Capability-oriented kernel objects, handles, VMOs, channels, events, and
-  supervised processes.
-- Storage, package, graphics, input, and application-data services with
-  recovery-oriented tests.
-- AndroidBox milestones through layout size parsing and scene projection for
-  controlled Android SDK/D8/AAPT2 fixtures.
-- Offline UI font data bundled as Bndroid Sans Raster.
-
-## Quick Start
+## 快速开始
 
 ```sh
 ./scripts/build-kernel.sh
 ./scripts/check-qemu-boot.sh
 ```
 
-The focused roadmap lives in [TODO.md](TODO.md). The detailed historical
-milestone log that used to live on this page is preserved in
-[PROJECT_MILESTONES.md](PROJECT_MILESTONES.md).
+项目的聚焦路线图见 [TODO.md](TODO.md)。原先首页上的详细历史里程碑已经保留在
+[PROJECT_MILESTONES.md](PROJECT_MILESTONES.md)。
 
-## Documents
+## 文档
 
-- [README.zh-CN.md](README.zh-CN.md): Chinese project overview.
-- [WHITEPAPER.md](WHITEPAPER.md): short project whitepaper and technical
-  positioning.
-- [WHITEPAPER.zh-CN.md](WHITEPAPER.zh-CN.md): Chinese whitepaper translation.
-- [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md): implementation status
-  notes.
-- [PROJECT_MILESTONES.md](PROJECT_MILESTONES.md): long-form AndroidBox and OS
-  milestone archive.
+- [WHITEPAPER.md](WHITEPAPER.md)：项目白皮书与技术定位。
+- [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md)：实现状态记录。
+- [PROJECT_MILESTONES.md](PROJECT_MILESTONES.md)：AndroidBox 和 OS 的长篇里程碑归档。
 
-## License
+## 许可证
 
-Source code is licensed under the Apache License, Version 2.0. Font assets named
-Bndroid Sans Raster remain under the SIL Open Font License 1.1 because they are
-derived from OFL-licensed font software.
+源代码采用 Apache License, Version 2.0。名为 Bndroid Sans Raster 的字体资产
+源自 OFL 授权字体软件，因此继续使用 SIL Open Font License 1.1。
 
-See [LICENSE](LICENSE), [NOTICE](NOTICE), and [.reuse/dep5](.reuse/dep5) for the
-repository-level license map.
+仓库级许可证映射见 [LICENSE](LICENSE)、[NOTICE](NOTICE) 和
+[.reuse/dep5](.reuse/dep5)。其中 `LICENSE` 与 `LICENSES/` 中的许可证文本为
+权威法律文本；本文档中的中文说明仅用于阅读辅助。
