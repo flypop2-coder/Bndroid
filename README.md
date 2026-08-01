@@ -32,8 +32,20 @@ AndroidBox：一个用于可验证 APK 摄取、资源解析、DEX 解释、Acti
 ## 文档
 
 - [WHITEPAPER.md](WHITEPAPER.md)：项目白皮书与技术定位。
+- [CONTRIBUTING.md](CONTRIBUTING.md)：贡献流程、优先方向和不接受的内容。
+- [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)：社区行为准则。
+- [SECURITY.md](SECURITY.md)：安全问题报告流程。
 - [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md)：实现状态记录。
 - [PROJECT_MILESTONES.md](PROJECT_MILESTONES.md)：AndroidBox 和 OS 的长篇里程碑归档。
+
+## 项目边界与协作
+
+Bndroid OS 是 Android 兼容体验和 Rust-first 操作系统架构的研究项目。项目不以
+破坏、规避、攻击或滥用任何现有平台为目标，也不接受用于恶意用途的代码、文档或
+讨论。
+
+外部贡献默认通过 fork 和 Pull Request 进入。`main` 分支应保持受保护状态：禁止
+直接 push、禁止 force push、禁止删除，并要求审核通过后合并。
 
 ## 许可证
 
