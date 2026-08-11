@@ -12,7 +12,7 @@ AndroidBox：一个用于可验证 APK 摄取、资源解析、DEX 解释、Acti
 
 ## 项目展示
 
-![Bndroid mobile UI overview](docs/assets/bndroid-mobile-ui-overview.png)
+![Bndroid mobile UI home screen](docs/assets/bndroid-mobile-ui-home.png)
 
 上图来自本仓库 `scripts/check-mobile-ui-runtime.sh` 在本地 QEMU 中生成的
 720x1600 mobile UI 运行截图。
