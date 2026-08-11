@@ -10,6 +10,13 @@ AndroidBox：一个用于可验证 APK 摄取、资源解析、DEX 解释、Acti
 这是研究软件。它还不是 Android 的直接替代品，不是通用 APK 运行时，也尚未
 准备好用于生产设备。
 
+## 项目展示
+
+![Bndroid mobile UI overview](docs/assets/bndroid-mobile-ui-overview.png)
+
+上图来自本仓库 `scripts/check-mobile-ui-runtime.sh` 在本地 QEMU 中生成的
+720x1600 mobile UI 运行截图。
+
 ## 当前内容
 
 - 面向 QEMU `virt` AArch64 平台的小型 Rust 内核。
