@@ -16,6 +16,15 @@ bounded AndroidBox profiles:
   `findViewById`, `setOnClickListener`, `onClick(View)`, and
   `TextView.setText(int)` path.
 
+The latest opt-in child `androidbox-layout-mixed19` keeps that bounded scene
+but admits a horizontal row whose direct children mix exact-width, zero-weight
+Buttons with `0dp`, integer-weight Buttons. No new wire field or authority is
+added: ABI69 retains `BNDAPC14` v14 and the v5 24-byte descriptor. Every
+horizontal child must be either `Button + Exact + weight0` or
+`Button + Zero + weight1..8`; all other shapes fail closed. Its complete
+parser, geometry, process and QEMU contract is documented in
+`../../ANDROIDBOX_LAYOUT_MIXED_19.md`.
+
 With feature `androidbox-manifest-catalog3`, callers may additionally inspect
 an SDK binary Manifest as a fixed-capacity directory of at most 16 components
 and 16 requested permissions:

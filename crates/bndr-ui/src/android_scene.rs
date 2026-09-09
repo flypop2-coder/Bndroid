@@ -593,6 +593,15 @@ impl AndroidInstalledActivitySceneNode {
         self.text.as_str()
     }
 
+    /// Geometry, identity and callback ownership must stay equal before a
+    /// text-only scene delta can reuse the previous raster layout.
+    pub(crate) fn same_structure(self, other: Self) -> bool {
+        Self {
+            text: other.text,
+            ..self
+        } == other
+    }
+
     pub const fn callback_registered(self) -> bool {
         self.callback_registered
     }

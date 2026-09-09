@@ -599,6 +599,7 @@ if len(preview) != 1:
     raise SystemExit(f"expected one mobile preview marker, found {len(preview)}")
 for name, expected in {
     "profile": "local-qemu",
+    "abi": "24",
     "width": "720",
     "height": "1600",
     "design_width": "360",
@@ -607,15 +608,86 @@ for name, expected in {
     "aspect": "20:9",
     "ui_client_control_version": "8",
     "ui_server_event_version": "6",
-    "buffer_present_version": "2",
+    "buffer_present_version": "6",
     "network": "disabled",
     "validation_scope": "ui-preview",
+    "buffers": "4",
+    "write_calls": "0",
+    "write_bytes": "0",
+    "presents": "1",
+    "copy_path": "mapped-double-buffer",
+    "rows_per_write": "0",
+    "writes_per_frame": "0",
+    "client_buffers_per_producer": "2",
+    "frame_transaction_depth": "2",
+    "transition_scheduling": "async-one-ahead",
+    "stale_prepared_policy": "server-discard",
+    "maps": "8",
+    "map_successes": "8",
+    "queues": "5",
+    "queue_successes": "5",
+    "acquires": "5",
+    "acquire_successes": "5",
+    "release_calls": "4",
+    "release_successes": "4",
+    "releases": "5",
+    "mapped_presents": "1",
     "android_gesture_claim": "0",
     "background_execution_claim": "0",
+    "frame_pacing": "software",
+    "logical_timer_hz": "100",
+    "software_frame_rate_hz": "50",
+    "frame_divider": "2",
+    "frame_acquires": "1",
+    "frame_acquire_successes": "1",
+    "frame_epoch": "1",
+    "timer_pacing": "1",
+    "hardware_vsync_claim": "0",
+    "fps_claim": "0",
     "real_phone_claim": "0",
 }.items():
     if field(preview[0], name) != expected:
         raise SystemExit(f"preview boundary {name} changed")
+if field(preview[0], "frame_pending") not in {"0", "1"}:
+    raise SystemExit("preview frame clock escaped its Waiting/Ready quiescent boundary")
+
+address_spaces = all_lines("ASPACE_OK ")
+if len(address_spaces) != 1 or field(address_spaces[0], "private_tables") != "14":
+    raise SystemExit("AndroidBox DEX-0 preview did not use the mapped mobile address-space shape")
+user_maps = all_lines("USER_MAP_OK ")
+if len(user_maps) != 1 or field(user_maps[0], "stack_pages") != "8" \
+        or field(user_maps[0], "guards_unmapped") != "2":
+    raise SystemExit("AndroidBox DEX-0 stack workspace or two-guard contract changed")
+
+created_buffers = all_lines("GRAPHICS_BUFFER_CREATE_OK ")
+if len(created_buffers) != 4 or any(field(line, "mapped") != "1" for line in created_buffers):
+    raise SystemExit("AndroidBox DEX-0 did not create exactly four mapped buffers")
+maps = all_lines("GRAPHICS_BUFFER_MAP_OK ")
+if len(maps) != 8 or {field(line, "pages") for line in maps} != {"1125"}:
+    raise SystemExit("AndroidBox DEX-0 mapped buffer geometry changed")
+if [field(line, "role") for line in maps].count("producer") != 4 \
+        or [field(line, "role") for line in maps].count("consumer") != 4:
+    raise SystemExit("AndroidBox DEX-0 producer/consumer mapping shape changed")
+if {field(line, "address") for line in maps} != {
+    "0x0000000200400000", "0x0000000200880000",
+    "0x0000000200d00000", "0x0000000201180000",
+}:
+    raise SystemExit("AndroidBox DEX-0 mapped buffer addresses changed")
+
+double_buffer = all_lines("MOBILE_DOUBLE_BUFFER_RUNTIME_OK ")
+if len(double_buffer) != 1:
+    raise SystemExit(f"expected one asynchronous double-buffer marker, found {len(double_buffer)}")
+for name, expected in {
+    "format": "1", "client_buffers_per_producer": "2", "producer_count": "2",
+    "transaction_depth": "2", "scheduling": "async-one-ahead",
+    "stale_prepared_policy": "server-discard", "counter_overflowed": "0",
+}.items():
+    if field(double_buffer[0], name) != expected:
+        raise SystemExit(f"AndroidBox double-buffer boundary {name} changed")
+if int(field(double_buffer[0], "peak_queued")) < 2 \
+        or int(field(double_buffer[0], "peak_in_flight")) < 2 \
+        or int(field(double_buffer[0], "dual_in_flight_publications")) < 1:
+    raise SystemExit("AndroidBox transition never held two bounded frames in flight")
 
 profiles = all_lines("ANDROIDBOX_DEX0_PROFILE_OK ")
 if len(profiles) != 1:
@@ -793,6 +865,179 @@ if not (
     raise SystemExit("AndroidBox readiness/execution ordering changed")
 
 commits = all_lines("USER_SURFACE_BUFFER_COMMIT_OK ")
+frame_acquires = all_lines("SURFACE_FRAME_ACQUIRE_OK ")
+frame_commits = all_lines("SURFACE_FRAME_COMMIT_OK ")
+if len(frame_acquires) != len(commits) or len(frame_commits) != len(commits):
+    raise SystemExit(
+        "every accepted AndroidBox buffer commit must own exactly one software-frame grant"
+    )
+previous_boundary = 0
+damage_commits = 0
+visible_damage_commits = 0
+damage_pixels_total = 0
+max_damage_pixels = 0
+min_visible_damage_pixels = None
+previous_scene_digest = None
+
+def verified_damage(line):
+    try:
+        count = int(field(line, "damage_rects"))
+        raw = [tuple(map(int, field(line, f"damage{index}").split("/")))
+               for index in range(2)]
+        global_rect = tuple(map(int, field(line, "global_damage").split("/")))
+        composition = tuple(map(int, field(line, "composition").split("/")))
+    except ValueError as error:
+        raise SystemExit("AndroidBox emitted malformed multi-region damage") from error
+    if count not in (1, 2) or any(len(rect) != 4 for rect in raw):
+        raise SystemExit("AndroidBox emitted an invalid damage-region count")
+    if count == 1 and raw[1] != (0, 0, 0, 0):
+        raise SystemExit("AndroidBox single-region commit exposed a nonzero second slot")
+    rects = raw[:count]
+    for x, y, width, height in rects:
+        if width <= 0 or height <= 0 or x < 0 or y < 0 \
+                or x + width > 720 or y + height > 1600:
+            raise SystemExit("AndroidBox buffer damage escaped the physical surface")
+    if rects != sorted(rects, key=lambda rect: (rect[1], rect[0], rect[3], rect[2])):
+        raise SystemExit("AndroidBox damage regions are not canonically ordered")
+    if count == 2:
+        ax, ay, aw, ah = rects[0]
+        bx, by, bw, bh = rects[1]
+        if ax < bx + bw and bx < ax + aw and ay < by + bh and by < ay + ah:
+            raise SystemExit("AndroidBox damage regions overlap")
+    left = min(rect[0] for rect in rects)
+    top = min(rect[1] for rect in rects)
+    right = max(rect[0] + rect[2] for rect in rects)
+    bottom = max(rect[1] + rect[3] for rect in rects)
+    bounds = (left, top, right - left, bottom - top)
+    pixels = sum(rect[2] * rect[3] for rect in rects)
+    if global_rect != bounds:
+        raise SystemExit("AndroidBox global damage is not the exact region-set bound")
+    if int(field(line, "damage_pixels")) != pixels \
+            or int(field(line, "raster_writes")) != pixels:
+        raise SystemExit("AndroidBox raster writes do not equal the disjoint damage pixels")
+    cx, cy, cw, ch = composition
+    if cw <= 0 or ch <= 0 or cx < 0 or cy < 0 \
+            or cx + cw > 720 or cy + ch > 1600 \
+            or cx > left or cy > top or cx + cw < right or cy + ch < bottom:
+        raise SystemExit("AndroidBox compositor evidence does not contain the damage regions")
+    composition_rects = int(field(line, "composition_rects"))
+    composition_pixels = int(field(line, "composition_pixels"))
+    if composition_rects not in (count, count + 1) \
+            or not pixels <= composition_pixels <= pixels + 12 * 22:
+        raise SystemExit("AndroidBox cursor-preserving composition accounting changed")
+    return field(line, "mode"), bounds, pixels
+
+for number, (line, acquire, frame_commit) in enumerate(
+    zip(commits, frame_acquires, frame_commits, strict=True), 1
+):
+    boundary = int(field(acquire, "boundary"))
+    if int(field(acquire, "epoch")) != number or int(field(frame_commit, "epoch")) != number:
+        raise SystemExit("AndroidBox software-frame epochs are not contiguous")
+    if boundary <= previous_boundary or (previous_boundary and boundary - previous_boundary < 2):
+        raise SystemExit("AndroidBox commits crossed fewer than two 100 Hz logical ticks")
+    if any(
+        field(evidence, name) != field(line, name)
+        for evidence in (acquire, frame_commit)
+        for name in ("pid", "session")
+    ):
+        raise SystemExit("AndroidBox frame evidence escaped its SurfaceServer session")
+    if field(frame_commit, "frame_id") != field(line, "frame_id"):
+        raise SystemExit("AndroidBox frame commit identified a different global frame")
+    if field(frame_commit, "client_buffer_slot") != field(line, "client_buffer_slot"):
+        raise SystemExit("AndroidBox frame commit identified a different client slot")
+    if not lines.index(acquire) < lines.index(line) < lines.index(frame_commit):
+        raise SystemExit("AndroidBox frame grant/commit publication ordering changed")
+    mode, (x, y, width, height), damage_pixels = verified_damage(line)
+    if mode == "full":
+        if (x, y, width, height) != (0, 0, 720, 1600) \
+                or damage_pixels != 720 * 1600:
+            raise SystemExit("AndroidBox full frame did not cover the complete surface")
+    elif mode == "damage":
+        if damage_pixels >= 720 * 1600 // 2:
+            raise SystemExit(
+                f"AndroidBox damage was not component-tight: pixels={damage_pixels} "
+                f"bounds={x}/{y}/{width}/{height}"
+            )
+        damage_commits += 1
+        damage_pixels_total += damage_pixels
+        max_damage_pixels = max(max_damage_pixels, damage_pixels)
+        if previous_scene_digest is not None \
+                and field(line, "scene_digest") != previous_scene_digest:
+            visible_damage_commits += 1
+            min_visible_damage_pixels = (
+                damage_pixels
+                if min_visible_damage_pixels is None
+                else min(min_visible_damage_pixels, damage_pixels)
+            )
+    else:
+        raise SystemExit(f"unknown AndroidBox buffer-present mode {mode}")
+    if number == 1 and mode != "full":
+        raise SystemExit("AndroidBox initial committed frame must establish a full base")
+    previous_boundary = boundary
+    previous_scene_digest = field(line, "scene_digest")
+if damage_commits == 0:
+    raise SystemExit("AndroidBox interaction never exercised a real damage transaction")
+if visible_damage_commits == 0:
+    raise SystemExit("AndroidBox damage transactions never changed the committed UI scene")
+if min_visible_damage_pixels is None or min_visible_damage_pixels > 100_000:
+    raise SystemExit(
+        "no visible AndroidBox interaction used a component-sized damage rectangle"
+    )
+
+acquisitions = all_lines("GRAPHICS_BUFFER_ACQUIRE_OK ")
+discard_releases = all_lines("GRAPHICS_BUFFER_RELEASE_OK ")
+if len(acquisitions) != len(commits) + len(discard_releases):
+    raise SystemExit("every AndroidBox buffer acquisition must commit or explicitly discard")
+allocation_slots = {}
+for line in created_buffers:
+    allocation_slots.setdefault(field(line, "producer_pid"), []).append(
+        int(field(line, "slot"))
+    )
+if len(allocation_slots) != 2 or any(len(slots) != 2 for slots in allocation_slots.values()):
+    raise SystemExit("AndroidBox Launcher and App must each own two allocation identities")
+for producer, slots in allocation_slots.items():
+    observed = [
+        int(field(line, "allocation_slot"))
+        for line in acquisitions
+        if field(line, "producer_pid") == producer
+    ]
+    if not observed or any(slot not in slots for slot in observed):
+        raise SystemExit("an AndroidBox acquisition escaped its producer's two slots")
+    if any(left == right for left, right in zip(observed, observed[1:])):
+        raise SystemExit("an AndroidBox producer did not alternate acquisition slots")
+
+pending = None
+for index, line in enumerate(lines):
+    if line.startswith("GRAPHICS_BUFFER_ACQUIRE_OK "):
+        if pending is not None:
+            raise SystemExit("AndroidBox began a second acquisition before completing the first")
+        pending = (index, line)
+    elif line.startswith("GRAPHICS_BUFFER_RELEASE_OK "):
+        if pending is None:
+            raise SystemExit("AndroidBox discard release had no matching acquisition")
+        acquire_index, acquire = pending
+        for name in ("consumer_pid", "producer_pid", "allocation_slot",
+                     "allocation_generation", "buffer_generation"):
+            if field(acquire, name) != field(line, name):
+                raise SystemExit(f"AndroidBox discard changed acquired {name}")
+        if any(candidate.startswith("SURFACE_FRAME_ACQUIRE_OK ")
+               for candidate in lines[acquire_index + 1:index]):
+            raise SystemExit("AndroidBox discarded frame consumed a display-frame grant")
+        pending = None
+    elif line.startswith("USER_SURFACE_BUFFER_COMMIT_OK "):
+        if pending is None:
+            raise SystemExit("AndroidBox visible commit had no matching acquisition")
+        _, acquire = pending
+        if field(acquire, "producer_pid") != field(line, "producer_pid") \
+                or field(acquire, "buffer_generation") != field(line, "buffer_generation"):
+            raise SystemExit("AndroidBox commit changed its acquired producer or generation")
+        slots = allocation_slots[field(line, "producer_pid")]
+        logical_slot = slots.index(int(field(acquire, "allocation_slot")))
+        if logical_slot != int(field(line, "client_buffer_slot")):
+            raise SystemExit("AndroidBox client slot selected the wrong allocation")
+        pending = None
+if pending is not None:
+    raise SystemExit("AndroidBox final buffer acquisition was left incomplete")
 launcher_commits = [
     line for line in commits if field(line, "producer_pid") == launcher_pid
 ]
@@ -803,8 +1048,8 @@ for line in launcher_commits:
         raise SystemExit("Launcher scanout geometry changed")
     if field(line, "format") != "xrgb8888":
         raise SystemExit("Launcher pixel format changed")
-    if field(line, "global_damage") != "0/0/720/1600":
-        raise SystemExit("Launcher full-frame composition contract changed")
+    if field(line, "mode") not in {"full", "damage"}:
+        raise SystemExit("Launcher buffer-present mode changed")
 
 def ppm(name: str) -> bytes:
     parts = (artifact_dir / name).read_bytes().split(b"\n", 3)
@@ -891,6 +1136,12 @@ summary = {
     "launcher_pid": launcher_pid,
     "surface_server_pid": receiver_pid,
     "launcher_commits": len(launcher_commits),
+    "frame_acquires": len(frame_acquires),
+    "damage_commits": damage_commits,
+    "visible_damage_commits": visible_damage_commits,
+    "damage_pixels_total": damage_pixels_total,
+    "max_damage_pixels": max_damage_pixels,
+    "min_visible_damage_pixels": min_visible_damage_pixels,
     "androidbox_reports": len(reports),
     "activity_reports": len(activity_reports),
     "resource_reports": len(resource_reports),

@@ -1,0 +1,214 @@
+# Settings / Display 手机 UI 里程碑
+
+日期：2026-08-23（2026-08-24 补充映射式 Surface 回归）
+
+本里程碑只改进 Bndroid 自有 Shell/App UI 与本地预览启动的构建闭包。它没有增加
+syscall、wire ABI、handle、capability、存储写权限或设备权限，也没有下载 AOSP、
+修改 Android SDK、连接或操作实体设备。
+
+## 已验证界面
+
+- QEMU scanout 是物理 `720×1600`、20:9；UI 使用 `360×800 dp` 设计网格并精确
+  2 倍光栅化。这里的 “dp” 是 Bndroid UI 比例，不声称真实面板 DPI。
+- Settings 首页现在按 Personalization、Connections、This phone、System 分组，
+  保留 Apps 与 About phone 的原有物理点击区域。
+- Display & appearance 是真实子页面，包含会话级 dark mode、accent color 和五档
+  software dimming；返回动作回到 Settings。
+- 尚不存在的能力不伪装成可用开关：网络显示 `Unavailable in QEMU`，外设显示
+  `No device transport`，声音显示 `Not implemented`。
+- Display 页面明确显示 `Software surface only`，不声称物理背光、HDR、刷新率或
+  显示面板控制。
+
+物理半开点击区域如下：
+
+```text
+Settings -> Display     32/408/656/132
+Display -> Dark mode    32/408/656/132
+Display -> Accent       32/540/656/132
+Display -> Dimming      336/744/336/112
+Settings -> Apps        48/1284/640/132
+Settings -> About       48/1416/640/132
+```
+
+## 受保护栈修复
+
+第一轮 QEMU 点击 Settings 暴露了 host 光栅测试无法发现的 EL0 guard-page fault：
+单体 `render_settings` 在 release AArch64 中一次申请约 `0x20a0`（8352）字节栈，
+叠加调用链后超过普通 App 的四页（16 KiB）用户栈。
+
+修复没有扩大栈或放宽保护页，而是把 Settings 和 Display 拆成顺序执行、
+`#[inline(never)]` 的 UI 组件，并让只读渲染路径借用 `MobileModel`。修复后 release
+AArch64 的 `render_settings` 主帧为 `0x80`（128）字节，最大页面子组件帧为
+`0x970`（2416）字节；QEMU 随后完整打开 Settings 和 Display，未再出现用户态
+fault。
+
+同时补全 `androidbox_runtime` 对新增 APK/ZIP、manifest catalog 和 launcher-icon
+拒绝原因的封闭映射，使默认 `mobile-ui-runtime,androidbox-dex0` 启动构建组合重新
+通过 AArch64 check。该修复只恢复拒绝原因归类，不扩大 APK 接受范围。
+
+## 证据
+
+```text
+terminal=MOBILE_UI_PREVIEW_OK
+profile=local-qemu
+width=720
+height=1600
+design_width=360
+design_height=800
+scale=2
+settings_focus_generation=2
+settings_final_scene_digest=0x2d09763ef0fe5245
+display_final_scene_digest=0x1ebd4c4d26077a5a
+user_faults_after_fix=0
+bndr-ui=269/269
+ui_clippy_warnings=0
+init_features=mobile-ui-runtime,androidbox-dex0
+init_aarch64_check=pass
+default_preview_release_build=pass
+network=disabled
+aosp_downloaded=0
+android_sdk_modified=0
+real_device_operations=0
+```
+
+本地运行证据：
+
+- 串口日志：`target/mobile-ui/demo-serial.log`
+- Settings 截图：`target/mobile-ui/settings-home.ppm`，720×1600，SHA-256
+  `d0625a79ac47d92679c13e111febe4b06e02b72507856ca618bc89068039b376`
+- Display 截图：`target/mobile-ui/display-page.ppm`，720×1600，SHA-256
+  `6316393f507a1c715e227a405f807b503b1b1ef86e5e3d991bcd3597f87c04c1`
+
+这些文件位于被忽略的本地 `target/` 证据目录，不是产品资源。当前 QEMU 使用单核
+软件全屏光栅和 frame-stepped 动画；它能验证几何、状态、输入、隔离和像素结果，
+不能证明 60/120 Hz、GPU 合成、功耗或真机触控体验。
+
+## 2026-08-24 Surface 双缓冲回归
+
+后续实现没有改变 Settings/Display 的 UI 语义，而是把纯 mobile UI 与有界 DEX0
+profile 的完整 720×1600 backing 改为 Launcher/App 各两个映射槽：producer RW、
+SurfaceServer RO。mobile `BufferPresent` 当前为 v6，精确选择 client slot，以
+`Present/Discard` 区分可见提交与显式释放，并在固定 64-byte wire 内携带最多两个
+规范化、非重叠 Damage region；decoder 保留 v5 单矩形兼容。
+页面切换采用深度 2 的 async
+one-ahead transaction；QEMU 实际观察到 `peak_queued=2`、
+`peak_in_flight=2` 和 dual publication。启动为 `write_calls=0`、
+`maps=8/8`、`queues=5/5`、`acquires=5/5`、`releases=5`、
+`mapped_presents=1`，其中四次启动 Discard 不取得 frame grant。
+
+同一后续回归还把 mobile SurfaceServer 接到共用软件帧钟：100 Hz logical timer
+以 divider 2 提供 nominal 50 Hz grant，每次有效提交恰好消耗一个连续 epoch，Discard
+或其他取消帧不消耗机会。最新纯 mobile QEMU 的 20 次 accepted commit 对应 20 次 acquire；启动
+标记为 `timer_pacing=1`，同时明确保持 `fps_claim=0` 与
+`hardware_vsync_claim=0`。这不改变 Settings 像素或控件语义，也不代表实测 50 FPS。
+
+最新 v6 回归为每个槽保留自己的 model baseline，并把已确认/等待确认的可见 scene
+baseline 分开；首帧、焦点 generation 变化和 Discard 强制 Full。当前只将按压反馈
+按固定控件、滚动页裁剪、通知位移或动态 Android Button 的组件矩形规划，还覆盖
+status/Home/lock/shade 时钟、Phone 的号码区 + 按键、Calculator 的结果区 + 按键；
+producer 光栅、内核逐区域复制与 compositor damage 使用同一 region set，目标切换
+保留两个独立区域，未证明状态回退 Full。纯 mobile 与 DEX0 QEMU 各观察到 4 次确实
+改变 scene digest 的 Damage commit；纯 mobile 的最小/最大可见面积为
+`32,300/474,240`，DEX0 为 `40,800/89,856`。Settings 页面与主题切换仍按安全规则
+回退 Full。
+
+这轮 DEX0 另行暴露的是 AndroidBox 深解析调用链，而不是 Settings 渲染器回归。
+非 storage、非 interactive 的 DEX0/安装 profile 用户栈因此从四页增加到八页，
+上下 guard page 仍保留；纯 mobile UI 的四页栈和本文件前述 Settings 组件修复
+保持不变。完整内存布局、权限、
+门禁和边界见 [`MOBILE_MAPPED_BUFFERQUEUE.md`](MOBILE_MAPPED_BUFFERQUEUE.md)。
+
+上一轮单缓冲人工回归截图保留为历史像素证据：
+
+- `target/mobile-ui/mapped-settings-home.png`，SHA-256
+  `b54222edbeebf9811b1807632b3e595e2737db9463a36a7d4c36e56bfc722296`
+- `target/mobile-ui/mapped-display-page.png`，SHA-256
+  `eadfb7f18a03e1a2a925a8c97da177bc8907af0aa07323236f0466863f23d6ef`
+
+上一轮 v4 双缓冲版本的 Cocoa QEMU 截图保留为历史证据：
+
+- Home：`target/mobile-ui/async-db-home-ready-20260824.png`，SHA-256
+  `903ae5dc70851f19656437e5209b7b04033de7da84eac914966a09df340b6075`
+- Settings：`target/mobile-ui/async-db-settings-20260824.png`，SHA-256
+  `5a5f639faf9756320ac6ed14e1dd7c3f3c1fce1ea84177d8ed2cf2e36068b048`
+- Display：`target/mobile-ui/async-db-display-20260824.png`，SHA-256
+  `6119e4a9c09744e7d9ac66be3dd7c20c9f724ca6f87a169c83ee278a00fe1707`
+- 串口：`target/mobile-ui/async-db-preview-20260824-serial.log`；截图时 13 次
+  visible commit 对应 13 次 frame acquire，无 panic 或 user fault。
+
+上一轮组件级 v5 Cocoa QEMU 保留为历史截图证据：
+
+- Settings：`target/mobile-ui/component-damage-v5-settings-20260824.png`，SHA-256
+  `3e6bf41fce6c43073b54af242b5685cd3985f316549e4521ee490768e7672a17`
+- Display：`target/mobile-ui/component-damage-v5-display-20260824.png`，SHA-256
+  `8adb2a9df87c2ed1f914b85c7af1acc46511468c5b5719b302a42dea56945b04`
+- 串口：`target/mobile-ui/component-damage-v5-preview-20260824-serial.log`；包含 v5 profile、
+  深度 2 双缓冲和组件级 Damage commit。Home Settings 按压/释放分别只重绘
+  `530/1340/170/190`（32,300 像素），Settings Display 按压只重绘
+  `32/408/656/132`（86,592 像素）；无 panic 或 user fault。
+
+## 2026-08-24 Dynamic color v2 回归
+
+当前可见版本已替换为 Dynamic color v2 的 Interactive-0 Cocoa QEMU，窗口名为
+`Bndroid Mobile UI + AndroidBox Preview - dynamic color v2`，使用磁盘 snapshot、
+`-nic none`，停在真实仓库 APK 的 `Button callback executed` 页面。Display 中的
+Ocean/Violet 与 dark/light 选择现在共同驱动 wallpaper、background、surface、raised
+surface、panel、outline、accent container 与 on-accent ink；Settings/Display 主卡片
+也已迁入共享 spacing/radius/elevation 角色。WCAG 线性亮度门禁覆盖 accent/icon、
+主文字和次要文字。
+
+- Ocean 暗色 Display：
+  `target/mobile-ui/dynamic-color-v2-display-ocean-20260824.png`，SHA-256
+  `29945ef3f8fef65139421aa9d902a77e92f0cc1d314ac1d3ac07fc18544e0eea`
+- Violet 暗色 Display：
+  `target/mobile-ui/dynamic-color-v2-display-violet-20260824.png`，SHA-256
+  `5564fe216a839136db798827ca5802663ba0e14e6922ea81336c1f0e91063620`
+- Violet 亮色 Display：
+  `target/mobile-ui/dynamic-color-v2-display-light-violet-20260824.png`，SHA-256
+  `9f83bfc597cf0594a1ed5940e9881243c4f3c4b0ec641f18ac03b8e974520576`
+- Android 回调后：
+  `target/mobile-ui/dynamic-color-v2-android-callback-violet-20260824.png`，SHA-256
+  `e32658d4939052359937f7d972d987673c6ec587baab7800bfc6a918e6938f7b`
+- 串口：`target/mobile-ui/dynamic-color-v2-preview-20260824-1-serial.log`；实际
+  callback Damage 仍为 `68/448/584/176 + 68/664/584/128`，复制/合成
+  `177,536` 像素，两个 region 之间的 `584×40` 空隙未写入；无 panic、fault 或
+  fatal marker。
+- Host UI 回归通过 mobile `251/251`、Interactive-0 `259/259` 与最高 ABI69
+  `280/280`；最高 feature Clippy `-D warnings` 通过。
+
+## 2026-08-24 Accessibility appearance v3 回归
+
+Display 底部的占位说明已替换为 `Text & contrast` 入口，并进入真实 Accessibility
+页面。`Larger text` 使用两档 bounded semantic role promotion，`High contrast` 使用
+显式 semantic palette；两者通过 SurfaceServer 唯一 `UiAppearance` 会话协议同步到
+Launcher、App、trusted chrome 和 projected Android Activity，不是页面私有假状态。
+
+点击矩形分别为 Display 入口 `32/1304/656/192`、大字体
+`32/408/656/132`、高对比 `32/540/656/132`。half-open hit-test、pressed damage、
+Back 返回链和系统 Home 边界都有逐像素测试；开关不会移动任何 target 或授予设备/
+服务权限。动态 APK 文本按最终字号测量，固定 publisher layout 不足时使用省略号。
+
+- 最终可见窗口：
+  `Bndroid Mobile UI + AndroidBox Preview - accessibility v3 polished`，`-nic none`，
+  证据盘 `snapshot=on`；当前停在大字体 + 高对比的 Accessibility 页面。
+- 页面截图：`target/mobile-ui/accessibility-v3-visible-final-20260824.png`，SHA-256
+  `c6dfc6c7024fb0063a00bbf87e6b672b87473adffa6bf733167fc808182183ed`
+- 同会话 APK 截图：
+  `target/mobile-ui/accessibility-v3-polished-android-activity-20260824.png`，SHA-256
+  `fa01e78f8b104c25112bad5c766c7990c6a9192a5a0e16556ae018985ad6241e`
+- Host 回归：mobile `254/254`、Interactive `262/262`、ABI69 `283/283`，最高
+  feature Clippy `-D warnings` 通过。
+- 自动 QEMU 门：纯 mobile `target/mobile-ui/check-overview.bhHrg3`、DEX0
+  `target/androidbox-dex0/check.mZiXez`、Interactive
+  `target/androidbox-interactive0/check.BQYw5h`、最终三启动 ABI69
+  `target/layout-mixed19/coexist.vBPvx1`。
+- 串口：`target/mobile-ui/accessibility-v3-preview-20260824-4-serial.log`；appearance
+  revision 2/3 分别到达 Launcher/App，真实 `org.bndroid.catalog` Activity 成功启动，
+  无 panic、fault 或 fatal marker。
+
+## 尚未完成
+
+Settings 仍只是第一个可用切片。Sound、Network、Connected devices、Storage、
+Privacy、Security、屏幕阅读器/语义无障碍与 System update 仍需对应系统服务后才能
+成为可操作页面。AndroidBox 当前仍是受限 APK/DEX/资源子集，不是 ART、Bionic、
+Binder、完整 Framework 或一般 Android App 兼容。

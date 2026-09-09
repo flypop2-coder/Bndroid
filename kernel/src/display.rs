@@ -10,7 +10,7 @@ use bndr_abi::{KeyInputSample, ObjectSignals};
 use bndr_ui::{BufferPresent, InputSample, PresentFrame};
 
 #[cfg(all(
-    feature = "graphics-frame-clock-runtime",
+    feature = "surface-frame-pacing",
     not(feature = "graphics-owner-death-runtime"),
     not(feature = "app-crash-recovery-runtime")
 ))]
@@ -22,8 +22,9 @@ use bndroid_kernel::surface::SurfaceKeySnapshot;
 use bndroid_kernel::{
     compositor::{
         self, CompositionEvidence, CursorState, Rect, ScenePublishEvidence, SceneUpdateEvidence,
-        compose_full, publish_scene_damage, update_cursor as compose_cursor,
-        update_scene as compose_scene, validate_scanout_composition, validate_scene_damage,
+        compose_full, publish_scene_damage, publish_scene_damage_regions,
+        update_cursor as compose_cursor, update_scene as compose_scene,
+        validate_scanout_composition, validate_scene_damage, validate_scene_damage_regions,
     },
     fdt::FwCfgMmioRegion,
     framebuffer::{
@@ -77,7 +78,7 @@ struct SurfaceBinding {
     /// that interval; invalid presents leave this bit set.
     awaiting_recovery_frame: bool,
     #[cfg(all(
-        feature = "graphics-frame-clock-runtime",
+        feature = "surface-frame-pacing",
         not(feature = "graphics-owner-death-runtime"),
         not(feature = "app-crash-recovery-runtime")
     ))]
@@ -94,13 +95,13 @@ struct CompositorState {
     input: SurfaceInputQueue,
     key_input: SurfaceKeyQueue,
     #[cfg(all(
-        feature = "graphics-frame-clock-runtime",
+        feature = "surface-frame-pacing",
         not(feature = "graphics-owner-death-runtime"),
         not(feature = "app-crash-recovery-runtime")
     ))]
     frame_ungated_present_rejections: u64,
     #[cfg(all(
-        feature = "graphics-frame-clock-runtime",
+        feature = "surface-frame-pacing",
         not(feature = "graphics-owner-death-runtime"),
         not(feature = "app-crash-recovery-runtime")
     ))]
@@ -134,13 +135,13 @@ static COMPOSITOR_STATE: CompositorStateStorage =
         input: SurfaceInputQueue::new(),
         key_input: SurfaceKeyQueue::new(),
         #[cfg(all(
-            feature = "graphics-frame-clock-runtime",
+            feature = "surface-frame-pacing",
             not(feature = "graphics-owner-death-runtime"),
             not(feature = "app-crash-recovery-runtime")
         ))]
         frame_ungated_present_rejections: 0,
         #[cfg(all(
-            feature = "graphics-frame-clock-runtime",
+            feature = "surface-frame-pacing",
             not(feature = "graphics-owner-death-runtime"),
             not(feature = "app-crash-recovery-runtime")
         ))]
@@ -176,7 +177,7 @@ pub enum DisplayError {
     SurfaceProcessMismatch,
     #[cfg_attr(
         not(all(
-            feature = "graphics-frame-clock-runtime",
+            feature = "surface-frame-pacing",
             not(feature = "graphics-owner-death-runtime"),
             not(feature = "app-crash-recovery-runtime")
         )),
@@ -185,7 +186,7 @@ pub enum DisplayError {
     FrameOpportunityUnavailable,
     #[cfg_attr(
         not(all(
-            feature = "graphics-frame-clock-runtime",
+            feature = "surface-frame-pacing",
             not(feature = "graphics-owner-death-runtime"),
             not(feature = "app-crash-recovery-runtime")
         )),
@@ -194,7 +195,7 @@ pub enum DisplayError {
     FrameGrantAlreadyOutstanding,
     #[cfg_attr(
         not(all(
-            feature = "graphics-frame-clock-runtime",
+            feature = "surface-frame-pacing",
             not(feature = "graphics-owner-death-runtime"),
             not(feature = "app-crash-recovery-runtime")
         )),
@@ -365,7 +366,7 @@ pub struct SurfaceDegradeEvidence {
 }
 
 #[cfg(all(
-    feature = "graphics-frame-clock-runtime",
+    feature = "surface-frame-pacing",
     not(feature = "graphics-owner-death-runtime"),
     not(feature = "app-crash-recovery-runtime")
 ))]
@@ -379,7 +380,7 @@ pub struct DisplayFrameClockSnapshot {
 }
 
 #[cfg(all(
-    feature = "graphics-frame-clock-runtime",
+    feature = "surface-frame-pacing",
     not(feature = "graphics-owner-death-runtime"),
     not(feature = "app-crash-recovery-runtime")
 ))]
@@ -571,7 +572,7 @@ fn finish_initialization() {
     state.input = SurfaceInputQueue::new();
     state.key_input = SurfaceKeyQueue::new();
     #[cfg(all(
-        feature = "graphics-frame-clock-runtime",
+        feature = "surface-frame-pacing",
         not(feature = "graphics-owner-death-runtime"),
         not(feature = "app-crash-recovery-runtime")
     ))]
@@ -652,7 +653,7 @@ pub fn acquire_surface(
             _ => return Err(DisplayError::SurfaceAlreadyAcquired),
         }
         #[cfg(all(
-            feature = "graphics-frame-clock-runtime",
+            feature = "surface-frame-pacing",
             not(feature = "graphics-owner-death-runtime"),
             not(feature = "app-crash-recovery-runtime")
         ))]
@@ -669,7 +670,7 @@ pub fn acquire_surface(
             rebindable: false,
             awaiting_recovery_frame: recovered,
             #[cfg(all(
-                feature = "graphics-frame-clock-runtime",
+                feature = "surface-frame-pacing",
                 not(feature = "graphics-owner-death-runtime"),
                 not(feature = "app-crash-recovery-runtime")
             ))]
@@ -699,7 +700,7 @@ pub fn acquire_surface(
 /// This path only updates bounded state and a level signal; rasterization and
 /// framebuffer publication remain in the presenting EL0 syscall.
 #[cfg(all(
-    feature = "graphics-frame-clock-runtime",
+    feature = "surface-frame-pacing",
     not(feature = "graphics-owner-death-runtime"),
     not(feature = "app-crash-recovery-runtime")
 ))]
@@ -731,7 +732,7 @@ pub fn on_timer_tick(now: u64) {
 }
 
 #[cfg(all(
-    feature = "graphics-frame-clock-runtime",
+    feature = "surface-frame-pacing",
     not(feature = "graphics-owner-death-runtime"),
     not(feature = "app-crash-recovery-runtime")
 ))]
@@ -765,7 +766,7 @@ pub fn surface_key_snapshot() -> SurfaceKeySnapshot {
 
 /// Atomically clears the level FRAME_READY Event and installs its exact grant.
 #[cfg(all(
-    feature = "graphics-frame-clock-runtime",
+    feature = "surface-frame-pacing",
     not(feature = "graphics-owner-death-runtime"),
     not(feature = "app-crash-recovery-runtime")
 ))]
@@ -833,7 +834,7 @@ pub fn present_surface(
             return Err(DisplayError::Surface(SurfaceError::Degraded));
         }
         #[cfg(all(
-            feature = "graphics-frame-clock-runtime",
+            feature = "surface-frame-pacing",
             not(feature = "graphics-owner-death-runtime"),
             not(feature = "app-crash-recovery-runtime")
         ))]
@@ -843,7 +844,7 @@ pub fn present_surface(
             Ok(surface) => surface,
             Err(error) => {
                 #[cfg(all(
-                    feature = "graphics-frame-clock-runtime",
+                    feature = "surface-frame-pacing",
                     not(feature = "graphics-owner-death-runtime"),
                     not(feature = "app-crash-recovery-runtime")
                 ))]
@@ -852,7 +853,7 @@ pub fn present_surface(
             }
         };
         #[cfg(all(
-            feature = "graphics-frame-clock-runtime",
+            feature = "surface-frame-pacing",
             not(feature = "graphics-owner-death-runtime"),
             not(feature = "app-crash-recovery-runtime")
         ))]
@@ -890,13 +891,9 @@ pub fn present_surface_buffer(
     buffer: &GraphicsBuffer,
     frame: &BufferPresent,
 ) -> Result<SurfacePresentEvidence, DisplayError> {
-    let global_damage = Rect::new(
-        SURFACE_ORIGIN_X,
-        SURFACE_ORIGIN_Y,
-        usize::from(bndr_ui::SURFACE_WIDTH),
-        usize::from(bndr_ui::SURFACE_HEIGHT),
-    );
-    let damage = validate_scene_damage(global_damage).map_err(DisplayError::Compose)?;
+    let (global_damage, global_damage_count) = surface_buffer_global_damage_regions(frame);
+    let damage = validate_scene_damage_regions(&global_damage[..global_damage_count])
+        .map_err(DisplayError::Compose)?;
     let present = |source: &[u32]| {
         with_display(|state, scene, pixels| {
             if !state.ready {
@@ -907,7 +904,7 @@ pub fn present_surface_buffer(
                 return Err(DisplayError::Surface(SurfaceError::Degraded));
             }
             #[cfg(all(
-                feature = "graphics-frame-clock-runtime",
+                feature = "surface-frame-pacing",
                 not(feature = "graphics-owner-death-runtime"),
                 not(feature = "app-crash-recovery-runtime")
             ))]
@@ -917,7 +914,7 @@ pub fn present_surface_buffer(
                 Ok(surface) => surface,
                 Err(error) => {
                     #[cfg(all(
-                        feature = "graphics-frame-clock-runtime",
+                        feature = "surface-frame-pacing",
                         not(feature = "graphics-owner-death-runtime"),
                         not(feature = "app-crash-recovery-runtime")
                     ))]
@@ -926,7 +923,7 @@ pub fn present_surface_buffer(
                 }
             };
             #[cfg(all(
-                feature = "graphics-frame-clock-runtime",
+                feature = "surface-frame-pacing",
                 not(feature = "graphics-owner-death-runtime"),
                 not(feature = "app-crash-recovery-runtime")
             ))]
@@ -938,10 +935,13 @@ pub fn present_surface_buffer(
                     panic!("validated surface binding disappeared after buffer present")
                 })
                 .awaiting_recovery_frame = false;
-            if surface.global_damage != damage.rect() {
+            if surface.global_damage != damage.bounds()
+                || surface.damage_regions != damage.count()
+                || surface.raster_writes != damage.pixels()
+            {
                 panic!("validated graphics-buffer damage changed before publication");
             }
-            let composition = publish_scene_damage(scene, pixels, state.cursor, damage);
+            let composition = publish_scene_damage_regions(scene, pixels, state.cursor, damage);
             dma::publish_to_device();
             Ok(SurfacePresentEvidence {
                 session_id: capability.session_id(),
@@ -978,13 +978,9 @@ pub fn present_surface_buffer_layers(
     chrome_buffer: &GraphicsBuffer,
     frame: &BufferPresent,
 ) -> Result<SurfacePresentEvidence, DisplayError> {
-    let global_damage = Rect::new(
-        SURFACE_ORIGIN_X,
-        SURFACE_ORIGIN_Y,
-        usize::from(bndr_ui::SURFACE_WIDTH),
-        usize::from(bndr_ui::SURFACE_HEIGHT),
-    );
-    let damage = validate_scene_damage(global_damage).map_err(DisplayError::Compose)?;
+    let (global_damage, global_damage_count) = surface_buffer_global_damage_regions(frame);
+    let damage = validate_scene_damage_regions(&global_damage[..global_damage_count])
+        .map_err(DisplayError::Compose)?;
     let present = |content: &[u32], chrome: &[u32]| {
         with_display(|state, scene, pixels| {
             if !state.ready {
@@ -995,7 +991,7 @@ pub fn present_surface_buffer_layers(
                 return Err(DisplayError::Surface(SurfaceError::Degraded));
             }
             #[cfg(all(
-                feature = "graphics-frame-clock-runtime",
+                feature = "surface-frame-pacing",
                 not(feature = "graphics-owner-death-runtime"),
                 not(feature = "app-crash-recovery-runtime")
             ))]
@@ -1009,7 +1005,7 @@ pub fn present_surface_buffer_layers(
                     Ok(surface) => surface,
                     Err(error) => {
                         #[cfg(all(
-                            feature = "graphics-frame-clock-runtime",
+                            feature = "surface-frame-pacing",
                             not(feature = "graphics-owner-death-runtime"),
                             not(feature = "app-crash-recovery-runtime")
                         ))]
@@ -1018,7 +1014,7 @@ pub fn present_surface_buffer_layers(
                     }
                 };
             #[cfg(all(
-                feature = "graphics-frame-clock-runtime",
+                feature = "surface-frame-pacing",
                 not(feature = "graphics-owner-death-runtime"),
                 not(feature = "app-crash-recovery-runtime")
             ))]
@@ -1030,10 +1026,13 @@ pub fn present_surface_buffer_layers(
                     panic!("validated surface binding disappeared after layered buffer present")
                 })
                 .awaiting_recovery_frame = false;
-            if surface.global_damage != damage.rect() {
+            if surface.global_damage != damage.bounds()
+                || surface.damage_regions != damage.count()
+                || surface.raster_writes != damage.pixels()
+            {
                 panic!("validated layered-buffer damage changed before publication");
             }
-            let composition = publish_scene_damage(scene, pixels, state.cursor, damage);
+            let composition = publish_scene_damage_regions(scene, pixels, state.cursor, damage);
             dma::publish_to_device();
             Ok(SurfacePresentEvidence {
                 session_id: capability.session_id(),
@@ -1411,7 +1410,7 @@ fn validate_surface_binding(
 }
 
 #[cfg(all(
-    feature = "graphics-frame-clock-runtime",
+    feature = "surface-frame-pacing",
     not(feature = "graphics-owner-death-runtime"),
     not(feature = "app-crash-recovery-runtime")
 ))]
@@ -1448,7 +1447,7 @@ fn require_frame_grant(
 }
 
 #[cfg(all(
-    feature = "graphics-frame-clock-runtime",
+    feature = "surface-frame-pacing",
     not(feature = "graphics-owner-death-runtime"),
     not(feature = "app-crash-recovery-runtime")
 ))]
@@ -1481,7 +1480,7 @@ fn record_preserved_frame_failure(
 }
 
 #[cfg(all(
-    feature = "graphics-frame-clock-runtime",
+    feature = "surface-frame-pacing",
     not(feature = "graphics-owner-death-runtime"),
     not(feature = "app-crash-recovery-runtime")
 ))]
@@ -1512,6 +1511,23 @@ fn surface_global_damage(frame: &PresentFrame) -> Rect {
     )
 }
 
+fn surface_buffer_global_damage_regions(frame: &BufferPresent) -> ([Rect; 2], usize) {
+    let mut regions = [Rect::default(); 2];
+    let source = frame.damage_rects();
+    if source.is_empty() || source.len() > regions.len() {
+        panic!("decoded buffer present exposed an invalid damage region count");
+    }
+    for (destination, local) in regions.iter_mut().zip(source.iter()) {
+        *destination = Rect::new(
+            SURFACE_ORIGIN_X + usize::from(local.x),
+            SURFACE_ORIGIN_Y + usize::from(local.y),
+            usize::from(local.width),
+            usize::from(local.height),
+        );
+    }
+    (regions, source.len())
+}
+
 fn degrade_surface_locked(
     state: &mut CompositorState,
     scene: &[u32; PIXEL_COUNT],
@@ -1526,7 +1542,7 @@ fn degrade_surface_locked(
     let process_id = binding.process_id;
     let previous_owner = state.surface.owner();
     #[cfg(all(
-        feature = "graphics-frame-clock-runtime",
+        feature = "surface-frame-pacing",
         not(feature = "graphics-owner-death-runtime"),
         not(feature = "app-crash-recovery-runtime")
     ))]

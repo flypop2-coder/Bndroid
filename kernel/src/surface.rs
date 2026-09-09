@@ -8,8 +8,8 @@ use core::{
 };
 
 use bndr_ui::{
-    BufferPresent, DamageRect, InputSample, InputSampleError, PresentFrame, PresentMode,
-    ProtocolError, SURFACE_HEIGHT, SURFACE_WIDTH, validate_sequence,
+    BufferPresent, BufferPresentMode, DamageRect, InputSample, InputSampleError, PresentFrame,
+    PresentMode, ProtocolError, SURFACE_HEIGHT, SURFACE_WIDTH, validate_sequence,
 };
 #[cfg(feature = "androidbox-interactive0")]
 use bndr_ui::{
@@ -583,6 +583,7 @@ pub struct SurfaceCommitEvidence {
     pub mode: PresentMode,
     pub local_damage: DamageRect,
     pub global_damage: Rect,
+    pub damage_regions: u8,
     pub raster_writes: usize,
     pub commits: u64,
 }
@@ -672,6 +673,7 @@ impl SurfaceSession {
             mode: frame.mode(),
             local_damage,
             global_damage,
+            damage_regions: 1,
             raster_writes,
             commits: self.commits,
         })
@@ -679,10 +681,10 @@ impl SurfaceSession {
 
     /// Publishes a fully rastered client buffer into the fixed phone surface.
     ///
-    /// M32a deliberately accepts only the canonical full-buffer command. The
-    /// complete sequence, counter, source length, and XRGB high bytes are
-    /// validated before the first scene pixel changes, preserving the same
-    /// all-or-nothing boundary as the legacy solid-rectangle path.
+    /// The complete sequence, counter, source length, XRGB high bytes, and
+    /// damage bounds are validated before the first scene pixel changes,
+    /// preserving the same all-or-nothing boundary as the solid-rectangle
+    /// path. A damage transaction copies only its exact rectangle.
     pub fn present_buffer(
         &mut self,
         scene: &mut [u32],
@@ -696,11 +698,19 @@ impl SurfaceSession {
             return Err(SurfaceError::WrongScenePixelCount);
         }
         let surface_pixels = usize::from(SURFACE_WIDTH) * usize::from(SURFACE_HEIGHT);
+        let surface_width = usize::from(SURFACE_WIDTH);
         if pixels.len() != surface_pixels {
             return Err(SurfaceError::WrongBufferPixelCount);
         }
+        if self.last_frame_id.is_none() && frame.mode() != BufferPresentMode::Full {
+            return Err(SurfaceError::Protocol(ProtocolError::FirstFrameMustBeFull));
+        }
         validate_buffer_frame_sequence(self.last_frame_id, frame.global_frame_id())?;
-        if pixels.iter().any(|pixel| pixel & 0xff00_0000 != 0) {
+        if frame
+            .damage_rects()
+            .iter()
+            .any(|damage| buffer_region_has_noncanonical_pixel(pixels, *damage, surface_width))
+        {
             return Err(SurfaceError::NonCanonicalBufferPixel);
         }
         let next_commits = self
@@ -708,27 +718,29 @@ impl SurfaceSession {
             .checked_add(1)
             .ok_or(SurfaceError::CommitCounterExhausted)?;
 
-        let surface_width = usize::from(SURFACE_WIDTH);
-        for local_y in 0..usize::from(SURFACE_HEIGHT) {
-            let source = local_y * surface_width;
-            let destination = (SURFACE_ORIGIN_Y + local_y) * WIDTH + SURFACE_ORIGIN_X;
-            scene[destination..destination + surface_width]
-                .copy_from_slice(&pixels[source..source + surface_width]);
+        let local_damage = frame.damage_rect();
+        let mut raster_writes = 0_usize;
+        for damage in frame.damage_rects() {
+            copy_buffer_region(scene, pixels, *damage, surface_width);
+            raster_writes += usize::from(damage.width) * usize::from(damage.height);
         }
 
         let previous_owner = self.owner;
         self.owner = SurfaceOwner::UserspaceBound;
         self.last_frame_id = Some(frame.global_frame_id());
         self.commits = next_commits;
-        let local_damage = DamageRect::FULL;
         Ok(SurfaceCommitEvidence {
             previous_owner,
             current_owner: self.owner,
             frame_id: frame.global_frame_id(),
-            mode: PresentMode::Full,
+            mode: match frame.mode() {
+                BufferPresentMode::Full => PresentMode::Full,
+                BufferPresentMode::Damage => PresentMode::Damage,
+            },
             local_damage,
             global_damage: global_damage(local_damage),
-            raster_writes: surface_pixels,
+            damage_regions: frame.damage_rects().len() as u8,
+            raster_writes,
             commits: self.commits,
         })
     }
@@ -738,7 +750,8 @@ impl SurfaceSession {
     ///
     /// Both complete source buffers are validated before the first scene
     /// pixel changes. Only the canonical viewport is ever copied from
-    /// `content_pixels`; every pixel outside it comes from `chrome_pixels`.
+    /// `content_pixels`; every declared pixel outside it comes from
+    /// `chrome_pixels`.
     #[cfg(feature = "androidbox-interactive0")]
     pub fn present_buffer_layers(
         &mut self,
@@ -768,6 +781,9 @@ impl SurfaceSession {
         {
             return Err(SurfaceError::WrongBufferPixelCount);
         }
+        if self.last_frame_id.is_none() && frame.mode() != BufferPresentMode::Full {
+            return Err(SurfaceError::Protocol(ProtocolError::FirstFrameMustBeFull));
+        }
         validate_buffer_frame_sequence(self.last_frame_id, frame.global_frame_id())?;
         if content_pixels
             .iter()
@@ -781,35 +797,102 @@ impl SurfaceSession {
             .checked_add(1)
             .ok_or(SurfaceError::CommitCounterExhausted)?;
 
-        let content_top = usize::from(MOBILE_CONTENT_VIEWPORT_Y);
-        let content_bottom = usize::from(MOBILE_CONTENT_VIEWPORT_BOTTOM);
-        for local_y in 0..surface_height {
-            let source = local_y * surface_width;
-            let destination = (SURFACE_ORIGIN_Y + local_y) * WIDTH + SURFACE_ORIGIN_X;
-            let source_pixels = if (content_top..content_bottom).contains(&local_y) {
-                content_pixels
-            } else {
-                chrome_pixels
-            };
-            scene[destination..destination + surface_width]
-                .copy_from_slice(&source_pixels[source..source + surface_width]);
+        let mut raster_writes = 0_usize;
+        for damage in frame.damage_rects() {
+            copy_layered_buffer_region(
+                scene,
+                content_pixels,
+                chrome_pixels,
+                *damage,
+                surface_width,
+            );
+            raster_writes += usize::from(damage.width) * usize::from(damage.height);
         }
 
         let previous_owner = self.owner;
         self.owner = SurfaceOwner::UserspaceBound;
         self.last_frame_id = Some(frame.global_frame_id());
         self.commits = next_commits;
-        let local_damage = DamageRect::FULL;
+        let local_damage = frame.damage_rect();
         Ok(SurfaceCommitEvidence {
             previous_owner,
             current_owner: self.owner,
             frame_id: frame.global_frame_id(),
-            mode: PresentMode::Full,
+            mode: match frame.mode() {
+                BufferPresentMode::Full => PresentMode::Full,
+                BufferPresentMode::Damage => PresentMode::Damage,
+            },
             local_damage,
             global_damage: global_damage(local_damage),
-            raster_writes: surface_pixels,
+            damage_regions: frame.damage_rects().len() as u8,
+            raster_writes,
             commits: self.commits,
         })
+    }
+}
+
+fn buffer_region_has_noncanonical_pixel(
+    pixels: &[u32],
+    damage: DamageRect,
+    surface_width: usize,
+) -> bool {
+    let left = usize::from(damage.x);
+    let top = usize::from(damage.y);
+    let width = usize::from(damage.width);
+    let bottom = top + usize::from(damage.height);
+    (top..bottom).any(|local_y| {
+        let start = local_y * surface_width + left;
+        pixels[start..start + width]
+            .iter()
+            .any(|pixel| pixel & 0xff00_0000 != 0)
+    })
+}
+
+fn copy_buffer_region(scene: &mut [u32], pixels: &[u32], damage: DamageRect, surface_width: usize) {
+    let left = usize::from(damage.x);
+    let top = usize::from(damage.y);
+    let width = usize::from(damage.width);
+    let bottom = top + usize::from(damage.height);
+    for local_y in top..bottom {
+        let source = local_y * surface_width + left;
+        let destination = (SURFACE_ORIGIN_Y + local_y) * WIDTH + SURFACE_ORIGIN_X + left;
+        scene[destination..destination + width].copy_from_slice(&pixels[source..source + width]);
+    }
+}
+
+#[cfg(feature = "androidbox-interactive0")]
+fn layered_source_for_row<'a>(
+    content_pixels: &'a [u32],
+    chrome_pixels: &'a [u32],
+    local_y: usize,
+) -> &'a [u32] {
+    if (usize::from(MOBILE_CONTENT_VIEWPORT_Y)..usize::from(MOBILE_CONTENT_VIEWPORT_BOTTOM))
+        .contains(&local_y)
+    {
+        content_pixels
+    } else {
+        chrome_pixels
+    }
+}
+
+#[cfg(feature = "androidbox-interactive0")]
+fn copy_layered_buffer_region(
+    scene: &mut [u32],
+    content_pixels: &[u32],
+    chrome_pixels: &[u32],
+    damage: DamageRect,
+    surface_width: usize,
+) {
+    let left = usize::from(damage.x);
+    let top = usize::from(damage.y);
+    let width = usize::from(damage.width);
+    let bottom = top + usize::from(damage.height);
+    for local_y in top..bottom {
+        let source_pixels = layered_source_for_row(content_pixels, chrome_pixels, local_y);
+        let source = local_y * surface_width + left;
+        let destination = (SURFACE_ORIGIN_Y + local_y) * WIDTH + SURFACE_ORIGIN_X + left;
+        scene[destination..destination + width]
+            .copy_from_slice(&source_pixels[source..source + width]);
     }
 }
 
@@ -1100,6 +1183,132 @@ mod tests {
         assert_eq!(scene, pixels);
     }
 
+    #[cfg(feature = "mobile-ui-runtime")]
+    #[test]
+    fn buffer_damage_requires_a_full_base_then_copies_only_the_exact_rectangle() {
+        let surface_width = usize::from(SURFACE_WIDTH);
+        let surface_height = usize::from(SURFACE_HEIGHT);
+        let mut scene = vec![0x0001_0203; PIXEL_COUNT];
+        let base = vec![0x0011_2233; surface_width * surface_height];
+        let mut next = vec![0x0044_5566; surface_width * surface_height];
+        let damage = DamageRect {
+            x: 17,
+            y: 29,
+            width: 31,
+            height: 43,
+        };
+        let damage_first = BufferPresent::client(1, 1, 7)
+            .unwrap()
+            .with_damage(damage)
+            .unwrap();
+        let original = scene.clone();
+        let mut session = SurfaceSession::new();
+        assert_eq!(
+            session.present_buffer(&mut scene, &damage_first, &next),
+            Err(SurfaceError::Protocol(ProtocolError::FirstFrameMustBeFull))
+        );
+        assert_eq!(scene, original);
+        assert_eq!(session.commits(), 0);
+
+        session
+            .present_buffer(&mut scene, &BufferPresent::client(1, 1, 8).unwrap(), &base)
+            .unwrap();
+        // Keep a distinct value inside the rectangle and a different value
+        // everywhere else so an accidental full copy is immediately visible.
+        for y in usize::from(damage.y)..usize::from(damage.y + damage.height) {
+            let row = y * surface_width;
+            next[row + usize::from(damage.x)..row + usize::from(damage.x + damage.width)]
+                .fill(0x0077_8899);
+        }
+        let frame = BufferPresent::client(2, 1, 9)
+            .unwrap()
+            .with_damage(damage)
+            .unwrap();
+        let evidence = session.present_buffer(&mut scene, &frame, &next).unwrap();
+        assert_eq!(evidence.mode, PresentMode::Damage);
+        assert_eq!(evidence.local_damage, damage);
+        assert_eq!(
+            evidence.global_damage,
+            Rect::new(
+                SURFACE_ORIGIN_X + usize::from(damage.x),
+                SURFACE_ORIGIN_Y + usize::from(damage.y),
+                usize::from(damage.width),
+                usize::from(damage.height),
+            )
+        );
+        assert_eq!(
+            evidence.raster_writes,
+            usize::from(damage.width) * usize::from(damage.height)
+        );
+        assert_eq!(evidence.commits, 2);
+        for y in 0..surface_height {
+            for x in 0..surface_width {
+                let scene_index = (SURFACE_ORIGIN_Y + y) * WIDTH + SURFACE_ORIGIN_X + x;
+                let inside = (usize::from(damage.x)..usize::from(damage.x + damage.width))
+                    .contains(&x)
+                    && (usize::from(damage.y)..usize::from(damage.y + damage.height)).contains(&y);
+                assert_eq!(
+                    scene[scene_index],
+                    if inside { 0x0077_8899 } else { 0x0011_2233 },
+                    "pixel {x}/{y}"
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "mobile-ui-runtime")]
+    #[test]
+    fn buffer_damage_copies_two_regions_without_writing_the_large_union_gap() {
+        let surface_width = usize::from(SURFACE_WIDTH);
+        let surface_height = usize::from(SURFACE_HEIGHT);
+        let first = DamageRect {
+            x: 12,
+            y: 24,
+            width: 9,
+            height: 7,
+        };
+        let second = DamageRect {
+            x: 640,
+            y: 1_420,
+            width: 11,
+            height: 5,
+        };
+        let mut scene = vec![0x0001_0203; PIXEL_COUNT];
+        let base = vec![0x0011_2233; surface_width * surface_height];
+        let next = vec![0x0044_5566; surface_width * surface_height];
+        let mut session = SurfaceSession::new();
+        session
+            .present_buffer(&mut scene, &BufferPresent::client(1, 1, 8).unwrap(), &base)
+            .unwrap();
+        let frame = BufferPresent::client(2, 1, 9)
+            .unwrap()
+            .with_damage_rects(&[second, first])
+            .unwrap();
+
+        let evidence = session.present_buffer(&mut scene, &frame, &next).unwrap();
+
+        assert_eq!(evidence.mode, PresentMode::Damage);
+        assert_eq!(evidence.damage_regions, 2);
+        assert_eq!(evidence.local_damage, first.union(second));
+        assert_eq!(evidence.raster_writes, 9 * 7 + 11 * 5);
+        assert_eq!(evidence.commits, 2);
+        for y in 0..surface_height {
+            for x in 0..surface_width {
+                let inside = (usize::from(first.x)..usize::from(first.x + first.width))
+                    .contains(&x)
+                    && (usize::from(first.y)..usize::from(first.y + first.height)).contains(&y)
+                    || (usize::from(second.x)..usize::from(second.x + second.width)).contains(&x)
+                        && (usize::from(second.y)..usize::from(second.y + second.height))
+                            .contains(&y);
+                assert_eq!(
+                    scene[y * WIDTH + x],
+                    if inside { 0x0044_5566 } else { 0x0011_2233 },
+                    "surface pixel {x}/{y}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn buffer_present_rejects_bad_source_and_sequence_before_any_scene_write() {
         let original = vec![0x0004_0506; PIXEL_COUNT];
@@ -1169,6 +1378,85 @@ mod tests {
             };
             let row = &scene[y * WIDTH..y * WIDTH + surface_width];
             assert!(row.iter().all(|pixel| *pixel == expected));
+        }
+    }
+
+    #[cfg(feature = "androidbox-interactive0")]
+    #[test]
+    fn layered_damage_uses_chrome_and_content_for_two_exact_regions_only() {
+        let surface_width = usize::from(SURFACE_WIDTH);
+        let surface_height = usize::from(SURFACE_HEIGHT);
+        let chrome_damage = DamageRect {
+            x: 10,
+            y: 20,
+            width: 7,
+            height: 5,
+        };
+        let content_damage = DamageRect {
+            x: 30,
+            y: MOBILE_CONTENT_VIEWPORT_Y + 40,
+            width: 9,
+            height: 6,
+        };
+        let mut scene = vec![0x0001_0203; PIXEL_COUNT];
+        let base_content = vec![0x0011_2233; surface_width * surface_height];
+        let base_chrome = vec![0x0044_5566; surface_width * surface_height];
+        let next_content = vec![0x0077_8899; surface_width * surface_height];
+        let next_chrome = vec![0x00aa_bbcc; surface_width * surface_height];
+        let mut session = SurfaceSession::new();
+        let full = BufferPresent::client(1, 1, 7)
+            .unwrap()
+            .with_system_chrome_generation(9)
+            .unwrap();
+        session
+            .present_buffer_layers(&mut scene, &full, &base_content, &base_chrome)
+            .unwrap();
+        let damage = BufferPresent::client(2, 1, 8)
+            .unwrap()
+            .with_system_chrome_generation(10)
+            .unwrap()
+            .with_damage_rects(&[content_damage, chrome_damage])
+            .unwrap();
+
+        let evidence = session
+            .present_buffer_layers(&mut scene, &damage, &next_content, &next_chrome)
+            .unwrap();
+
+        assert_eq!(evidence.mode, PresentMode::Damage);
+        assert_eq!(evidence.damage_regions, 2);
+        assert_eq!(evidence.local_damage, chrome_damage.union(content_damage));
+        assert_eq!(evidence.raster_writes, 7 * 5 + 9 * 6);
+        for y in 0..surface_height {
+            for x in 0..surface_width {
+                let in_chrome_damage = (usize::from(chrome_damage.x)
+                    ..usize::from(chrome_damage.x + chrome_damage.width))
+                    .contains(&x)
+                    && (usize::from(chrome_damage.y)
+                        ..usize::from(chrome_damage.y + chrome_damage.height))
+                        .contains(&y);
+                let in_content_damage = (usize::from(content_damage.x)
+                    ..usize::from(content_damage.x + content_damage.width))
+                    .contains(&x)
+                    && (usize::from(content_damage.y)
+                        ..usize::from(content_damage.y + content_damage.height))
+                        .contains(&y);
+                let base = if (usize::from(MOBILE_CONTENT_VIEWPORT_Y)
+                    ..usize::from(MOBILE_CONTENT_VIEWPORT_BOTTOM))
+                    .contains(&y)
+                {
+                    0x0011_2233
+                } else {
+                    0x0044_5566
+                };
+                let expected = if in_chrome_damage {
+                    0x00aa_bbcc
+                } else if in_content_damage {
+                    0x0077_8899
+                } else {
+                    base
+                };
+                assert_eq!(scene[y * WIDTH + x], expected, "layer pixel {x}/{y}");
+            }
         }
     }
 

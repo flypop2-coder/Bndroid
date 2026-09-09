@@ -12,7 +12,13 @@ use bndroid_kernel::aarch64_paging::{
     kernel_rw_nx_page_descriptor, user_ro_nx_page_descriptor, user_ro_x_page_descriptor,
     user_rw_nx_page_descriptor,
 };
-#[cfg(not(feature = "mobile-ui-runtime"))]
+#[cfg(any(
+    not(feature = "mobile-ui-runtime"),
+    all(
+        feature = "mobile-ui-runtime",
+        not(feature = "androidbox-apk-install0")
+    )
+))]
 use bndroid_kernel::graphics_buffer::GRAPHICS_BUFFER_SLOT_COUNT;
 use bndroid_kernel::graphics_buffer::{GraphicsBuffer, GraphicsBufferIdentity};
 use bndroid_kernel::memory::{self, OwnedFrame, PAGE_SIZE, PhysFrame};
@@ -37,13 +43,14 @@ pub const USER_STACK_PAGE_LIMIT: usize = 20;
 #[cfg(all(
     not(feature = "storage-server-runtime"),
     not(feature = "androidbox-interactive0"),
-    feature = "androidbox-apk-install0"
+    any(feature = "androidbox-apk-install0", feature = "androidbox-dex0")
 ))]
 pub const USER_STACK_PAGE_LIMIT: usize = 8;
 #[cfg(all(
     not(feature = "storage-server-runtime"),
     not(feature = "androidbox-interactive0"),
-    not(feature = "androidbox-apk-install0")
+    not(feature = "androidbox-apk-install0"),
+    not(feature = "androidbox-dex0")
 ))]
 pub const USER_STACK_PAGE_LIMIT: usize = 4;
 pub const MAX_USER_MAPPED_PAGES: usize = MAX_USER_LOAD_PAGES + USER_STACK_PAGE_LIMIT;
@@ -51,11 +58,25 @@ pub const MAX_USER_VMAS: usize = 9;
 pub const MAX_USER_GUARDS: usize = 2;
 #[cfg(not(feature = "mobile-ui-runtime"))]
 pub const USER_GRAPHICS_MAPPING_CAPACITY: usize = 2;
-// A 720x1600 backing spans more than the single 2 MiB EL0 page-table window.
-// The mobile preview therefore keeps the bounded copy-write ABI and exposes no
-// shared graphics mapping slots.
-#[cfg(feature = "mobile-ui-runtime")]
+#[cfg(all(
+    feature = "mobile-ui-runtime",
+    not(feature = "androidbox-apk-install0")
+))]
+pub const USER_GRAPHICS_MAPPING_CAPACITY: usize = 4;
+// Persistent and layered AndroidBox profiles retain bounded copy writes until
+// mapped content/chrome layer composition has its own isolated contract.
+#[cfg(all(feature = "mobile-ui-runtime", feature = "androidbox-apk-install0"))]
 pub const USER_GRAPHICS_MAPPING_CAPACITY: usize = 0;
+#[cfg(all(
+    feature = "mobile-ui-runtime",
+    not(feature = "androidbox-apk-install0")
+))]
+const USER_LEVEL_3_TABLE_COUNT: usize = 11;
+#[cfg(any(
+    not(feature = "mobile-ui-runtime"),
+    feature = "androidbox-apk-install0"
+))]
+const USER_LEVEL_3_TABLE_COUNT: usize = 1;
 pub const USER_GRAPHICS_MAPPING_PAGES: usize = bndr_abi::GRAPHICS_BUFFER_BACKING_BYTES / PAGE_SIZE;
 pub const USER_GRAPHICS_MAP_ADDRESS: usize = bndr_abi::GRAPHICS_BUFFER_MAP_ADDRESS as usize;
 pub const USER_GRAPHICS_MAP_STRIDE: usize = bndr_abi::GRAPHICS_BUFFER_MAP_STRIDE as usize;
@@ -65,6 +86,7 @@ pub const INIT_USER_ASID: u8 = 1;
 const DYNAMIC_LEVEL_1_FIRST: usize = (DYNAMIC_MAP_START >> 30) & (ENTRY_COUNT - 1);
 const DYNAMIC_LEVEL_1_COUNT: usize = (DYNAMIC_MAP_END - DYNAMIC_MAP_START) / LEVEL_1_BLOCK_SIZE;
 const INIT_USER_LEVEL_1_INDEX: usize = (INIT_USER_WINDOW_START >> 30) & (ENTRY_COUNT - 1);
+const INIT_USER_LEVEL_2_FIRST: usize = (INIT_USER_WINDOW_START >> 21) & (ENTRY_COUNT - 1);
 const TTBR_ASID_SHIFT: u32 = 48;
 const TTBR_ASID_MASK: u64 = 0xff << TTBR_ASID_SHIFT;
 const TTBR_BASE_MASK: u64 = 0x0000_ffff_ffff_f000;
@@ -77,11 +99,17 @@ const PRIVILEGED_EXECUTE_NEVER: u64 = 1 << 53;
 const UNPRIVILEGED_EXECUTE_NEVER: u64 = 1 << 54;
 
 const _: () = assert!(usize::BITS >= 64);
-#[cfg(not(feature = "mobile-ui-runtime"))]
+#[cfg(any(
+    not(feature = "mobile-ui-runtime"),
+    all(
+        feature = "mobile-ui-runtime",
+        not(feature = "androidbox-apk-install0")
+    )
+))]
 const _: () = assert!(USER_GRAPHICS_MAPPING_CAPACITY == GRAPHICS_BUFFER_SLOT_COUNT);
 #[cfg(not(feature = "mobile-ui-runtime"))]
 const _: () = assert!(USER_GRAPHICS_MAPPING_PAGES == 75);
-#[cfg(feature = "mobile-ui-runtime")]
+#[cfg(all(feature = "mobile-ui-runtime", feature = "androidbox-apk-install0"))]
 const _: () = assert!(USER_GRAPHICS_MAPPING_CAPACITY == 0);
 #[cfg(feature = "mobile-ui-runtime")]
 const _: () = assert!(USER_GRAPHICS_MAPPING_PAGES == 1_125);
@@ -89,9 +117,22 @@ const _: () = assert!(bndr_abi::GRAPHICS_BUFFER_BACKING_BYTES.is_multiple_of(PAG
 const _: () = assert!(USER_GRAPHICS_MAP_STRIDE >= bndr_abi::GRAPHICS_BUFFER_BACKING_BYTES);
 const _: () =
     assert!(USER_GRAPHICS_MAP_ADDRESS >= INIT_USER_WINDOW_START + MAX_USER_LOAD_PAGES * PAGE_SIZE);
+#[cfg(any(
+    not(feature = "mobile-ui-runtime"),
+    feature = "androidbox-apk-install0"
+))]
 const _: () = assert!(
     USER_GRAPHICS_MAP_ADDRESS + USER_GRAPHICS_MAPPING_CAPACITY * USER_GRAPHICS_MAP_STRIDE
         <= INIT_USER_WINDOW_END - (USER_STACK_PAGE_LIMIT + 2) * PAGE_SIZE
+);
+#[cfg(all(
+    feature = "mobile-ui-runtime",
+    not(feature = "androidbox-apk-install0")
+))]
+const _: () = assert!(
+    USER_GRAPHICS_MAP_ADDRESS >= INIT_USER_WINDOW_END
+        && USER_GRAPHICS_MAP_ADDRESS + USER_GRAPHICS_MAPPING_CAPACITY * USER_GRAPHICS_MAP_STRIDE
+            <= INIT_USER_WINDOW_START + USER_LEVEL_3_TABLE_COUNT * LEVEL_2_BLOCK_SIZE
 );
 
 const SCTLR_M: u64 = 1 << 0;
@@ -544,7 +585,7 @@ pub struct UserAddressSpace {
     root: OwnedFrame,
     level_1: OwnedFrame,
     user_level_2: OwnedFrame,
-    user_level_3: OwnedFrame,
+    user_level_3: Vec<OwnedFrame>,
     mappings: OwnedUserMappings,
     asid_lease: AsidLease,
 }
@@ -553,7 +594,7 @@ struct UnpublishedUserTables {
     root: Option<OwnedFrame>,
     level_1: Option<OwnedFrame>,
     user_level_2: Option<OwnedFrame>,
-    user_level_3: Option<OwnedFrame>,
+    user_level_3: Vec<OwnedFrame>,
 }
 
 struct AsidClaim {
@@ -951,15 +992,22 @@ impl UnpublishedUserTables {
             root: None,
             level_1: None,
             user_level_2: None,
-            user_level_3: None,
+            user_level_3: Vec::new(),
         };
         tables.root = Some(memory::allocate_frame().map_err(|_| AddressSpaceError::OutOfMemory)?);
         tables.level_1 =
             Some(memory::allocate_frame().map_err(|_| AddressSpaceError::OutOfMemory)?);
         tables.user_level_2 =
             Some(memory::allocate_frame().map_err(|_| AddressSpaceError::OutOfMemory)?);
-        tables.user_level_3 =
-            Some(memory::allocate_frame().map_err(|_| AddressSpaceError::OutOfMemory)?);
+        tables
+            .user_level_3
+            .try_reserve_exact(USER_LEVEL_3_TABLE_COUNT)
+            .map_err(|_| AddressSpaceError::OutOfMemory)?;
+        for _ in 0..USER_LEVEL_3_TABLE_COUNT {
+            tables
+                .user_level_3
+                .push(memory::allocate_frame().map_err(|_| AddressSpaceError::OutOfMemory)?);
+        }
         Ok(tables)
     }
 
@@ -981,13 +1029,14 @@ impl UnpublishedUserTables {
             .unwrap_or_else(|| panic!("unpublished user L2 was missing"))
     }
 
-    fn user_level_3(&self) -> &OwnedFrame {
-        self.user_level_3
-            .as_ref()
-            .unwrap_or_else(|| panic!("unpublished user L3 was missing"))
+    fn user_level_3(&self) -> &[OwnedFrame] {
+        if self.user_level_3.len() != USER_LEVEL_3_TABLE_COUNT {
+            panic!("unpublished user L3 table set was incomplete");
+        }
+        &self.user_level_3
     }
 
-    fn into_frames(mut self) -> (OwnedFrame, OwnedFrame, OwnedFrame, OwnedFrame) {
+    fn into_frames(mut self) -> (OwnedFrame, OwnedFrame, OwnedFrame, Vec<OwnedFrame>) {
         (
             self.root
                 .take()
@@ -998,17 +1047,17 @@ impl UnpublishedUserTables {
             self.user_level_2
                 .take()
                 .unwrap_or_else(|| panic!("sealed user L2 was missing")),
-            self.user_level_3
-                .take()
-                .unwrap_or_else(|| panic!("sealed user L3 was missing")),
+            core::mem::take(&mut self.user_level_3),
         )
     }
 }
 
 impl Drop for UnpublishedUserTables {
     fn drop(&mut self) {
+        for frame in self.user_level_3.drain(..).rev() {
+            release_unpublished_table(frame);
+        }
         for frame in [
-            self.user_level_3.take(),
             self.user_level_2.take(),
             self.level_1.take(),
             self.root.take(),
@@ -1422,14 +1471,9 @@ impl UserAddressSpace {
         })
     }
 
-    pub const fn private_table_frames(&self) -> usize {
-        let _ = (
-            &self.root,
-            &self.level_1,
-            &self.user_level_2,
-            &self.user_level_3,
-        );
-        4
+    pub fn private_table_frames(&self) -> usize {
+        let _ = (&self.root, &self.level_1, &self.user_level_2);
+        3 + self.user_level_3.len()
     }
 
     pub fn query_page_descriptor(&self, virtual_address: usize) -> Result<Option<u64>, UnmapError> {
@@ -1547,7 +1591,9 @@ impl UserAddressSpace {
         for page in mappings.pages {
             release_destroyed_address_space_frame(page.frame, "user leaf");
         }
-        release_destroyed_address_space_frame(user_level_3, "L3 table");
+        for frame in user_level_3 {
+            release_destroyed_address_space_frame(frame, "L3 table");
+        }
         release_destroyed_address_space_frame(user_level_2, "L2 table");
         release_destroyed_address_space_frame(level_1, "L1 table");
         release_destroyed_address_space_frame(root, "root table");
@@ -1983,9 +2029,12 @@ unsafe fn initialize_user_hierarchy(
     root_owner: &OwnedFrame,
     level_1_owner: &OwnedFrame,
     user_level_2_owner: &OwnedFrame,
-    user_level_3_owner: &OwnedFrame,
+    user_level_3_owners: &[OwnedFrame],
     mappings: &OwnedUserMappings,
 ) -> bool {
+    if user_level_3_owners.len() != USER_LEVEL_3_TABLE_COUNT {
+        return false;
+    }
     let boot_level_1 = unsafe { &*LEVEL_1.0.get() };
     let mmio = unsafe { ptr::read_volatile(boot_level_1.0.as_ptr()) };
     let ram = unsafe { ptr::read_volatile(boot_level_1.0.as_ptr().add(1)) };
@@ -2015,7 +2064,9 @@ unsafe fn initialize_user_hierarchy(
     let root = unsafe { zero_table(root_owner) };
     let level_1 = unsafe { zero_table(level_1_owner) };
     let user_level_2 = unsafe { zero_table(user_level_2_owner) };
-    let user_level_3 = unsafe { zero_table(user_level_3_owner) };
+    for owner in user_level_3_owners {
+        unsafe { zero_table(owner) };
+    }
     unsafe {
         ptr::write_volatile(
             (*root).0.as_mut_ptr(),
@@ -2038,13 +2089,20 @@ unsafe fn initialize_user_hierarchy(
             (*level_1).0.as_mut_ptr().add(INIT_USER_LEVEL_1_INDEX),
             table_descriptor_address(user_level_2_owner.start_address()),
         );
-        ptr::write_volatile(
-            (*user_level_2).0.as_mut_ptr(),
-            table_descriptor_address(user_level_3_owner.start_address()),
-        );
+        for (offset, owner) in user_level_3_owners.iter().enumerate() {
+            ptr::write_volatile(
+                (*user_level_2)
+                    .0
+                    .as_mut_ptr()
+                    .add(INIT_USER_LEVEL_2_FIRST + offset),
+                table_descriptor_address(owner.start_address()),
+            );
+        }
         for page in &mappings.pages {
             let leaf = user_leaf_descriptor(page)
                 .unwrap_or_else(|_| panic!("validated user page lost its descriptor"));
+            let user_level_3 = user_level_3_table_mut(user_level_3_owners, page.virtual_address)
+                .unwrap_or_else(|| panic!("validated user page escaped its L3 table set"));
             ptr::write_volatile(
                 (*user_level_3)
                     .0
@@ -2059,37 +2117,46 @@ unsafe fn initialize_user_hierarchy(
 }
 
 unsafe fn verify_user_leaves(
-    user_level_3_owner: &OwnedFrame,
+    user_level_3_owners: &[OwnedFrame],
     mappings: &OwnedUserMappings,
     graphics_mappings: &[Option<Box<UserGraphicsBufferMapping>>],
 ) -> bool {
-    let user_level_3 = user_level_3_owner.start_address() as *const PageTable;
-    for index in 0..ENTRY_COUNT {
-        let virtual_address = INIT_USER_WINDOW_START + index * PAGE_SIZE;
-        let owned = mappings
-            .pages
-            .iter()
-            .find(|page| page.virtual_address == virtual_address);
-        let borrowed = graphics_mappings
-            .iter()
-            .flatten()
-            .find(|mapping| mapping.contains_page(virtual_address));
-        if owned.is_some() && borrowed.is_some() {
-            return false;
-        }
-        let expected = match (owned, borrowed) {
-            (Some(page), None) => user_leaf_descriptor(page)
-                .unwrap_or_else(|_| panic!("validated user page lost its descriptor")),
-            (None, Some(mapping)) => {
-                let offset = virtual_address - mapping.address;
-                graphics_mapping_leaf_descriptor(mapping.backing_address + offset, mapping.access)
-                    .unwrap_or_else(|_| panic!("validated graphics mapping lost its descriptor"))
+    if user_level_3_owners.len() != USER_LEVEL_3_TABLE_COUNT {
+        return false;
+    }
+    for (table_index, owner) in user_level_3_owners.iter().enumerate() {
+        let user_level_3 = owner.start_address() as *const PageTable;
+        for index in 0..ENTRY_COUNT {
+            let virtual_address =
+                INIT_USER_WINDOW_START + table_index * LEVEL_2_BLOCK_SIZE + index * PAGE_SIZE;
+            let owned = mappings
+                .pages
+                .iter()
+                .find(|page| page.virtual_address == virtual_address);
+            let borrowed = graphics_mappings
+                .iter()
+                .flatten()
+                .find(|mapping| mapping.contains_page(virtual_address));
+            if owned.is_some() && borrowed.is_some() {
+                return false;
             }
-            (None, None) => 0,
-            (Some(_), Some(_)) => unreachable!(),
-        };
-        if unsafe { ptr::read_volatile((*user_level_3).0.as_ptr().add(index)) } != expected {
-            return false;
+            let expected = match (owned, borrowed) {
+                (Some(page), None) => user_leaf_descriptor(page)
+                    .unwrap_or_else(|_| panic!("validated user page lost its descriptor")),
+                (None, Some(mapping)) => {
+                    let offset = virtual_address - mapping.address;
+                    graphics_mapping_leaf_descriptor(
+                        mapping.backing_address + offset,
+                        mapping.access,
+                    )
+                    .unwrap_or_else(|_| panic!("validated graphics mapping lost its descriptor"))
+                }
+                (None, None) => 0,
+                (Some(_), Some(_)) => unreachable!(),
+            };
+            if unsafe { ptr::read_volatile((*user_level_3).0.as_ptr().add(index)) } != expected {
+                return false;
+            }
         }
     }
     graphics_mappings.iter().enumerate().all(|(slot, mapping)| {
@@ -2108,12 +2175,13 @@ unsafe fn verify_user_leaves(
 }
 
 unsafe fn clear_user_leaves(
-    user_level_3_owner: &OwnedFrame,
+    user_level_3_owners: &[OwnedFrame],
     mappings: &OwnedUserMappings,
     graphics_mappings: &[Option<Box<UserGraphicsBufferMapping>>],
 ) {
-    let user_level_3 = user_level_3_owner.start_address() as *mut PageTable;
     for page in &mappings.pages {
+        let user_level_3 = user_level_3_table_mut(user_level_3_owners, page.virtual_address)
+            .unwrap_or_else(|| panic!("owned user page escaped its L3 table set"));
         unsafe {
             ptr::write_volatile(
                 (*user_level_3)
@@ -2125,7 +2193,7 @@ unsafe fn clear_user_leaves(
         }
     }
     for mapping in graphics_mappings.iter().flatten() {
-        unsafe { clear_graphics_mapping_leaves(user_level_3_owner, mapping.address) };
+        unsafe { clear_graphics_mapping_leaves(user_level_3_owners, mapping.address) };
     }
     unsafe { asm!("dsb ishst", options(nostack, preserves_flags)) };
 }
@@ -2405,28 +2473,16 @@ fn graphics_mapping_leaf_descriptor(
     descriptor.map_err(|_| AddressSpaceError::InvalidPhysicalFrame)
 }
 
-#[cfg(not(feature = "mobile-ui-runtime"))]
 fn graphics_mapping_address(slot: usize) -> Option<usize> {
-    if slot >= USER_GRAPHICS_MAPPING_CAPACITY {
+    if !(0..USER_GRAPHICS_MAPPING_CAPACITY).contains(&slot) {
         return None;
     }
     USER_GRAPHICS_MAP_ADDRESS.checked_add(slot.checked_mul(USER_GRAPHICS_MAP_STRIDE)?)
 }
 
-#[cfg(feature = "mobile-ui-runtime")]
-fn graphics_mapping_address(_slot: usize) -> Option<usize> {
-    None
-}
-
-#[cfg(not(feature = "mobile-ui-runtime"))]
 fn graphics_mapping_slot_for_address(address: usize) -> Option<usize> {
     (0..USER_GRAPHICS_MAPPING_CAPACITY)
         .find(|slot| graphics_mapping_address(*slot) == Some(address))
-}
-
-#[cfg(feature = "mobile-ui-runtime")]
-fn graphics_mapping_slot_for_address(_address: usize) -> Option<usize> {
-    None
 }
 
 fn valid_graphics_backing(address: usize) -> bool {
@@ -2437,13 +2493,31 @@ fn valid_graphics_backing(address: usize) -> bool {
             .is_some_and(|end| end <= EARLY_RAM_END)
 }
 
+fn user_level_3_table_index(address: usize) -> Option<usize> {
+    let offset = address.checked_sub(INIT_USER_WINDOW_START)?;
+    let index = offset / LEVEL_2_BLOCK_SIZE;
+    (index < USER_LEVEL_3_TABLE_COUNT).then_some(index)
+}
+
+fn user_level_3_table_mut(owners: &[OwnedFrame], address: usize) -> Option<*mut PageTable> {
+    let index = user_level_3_table_index(address)?;
+    let owner = owners.get(index)?;
+    Some(owner.start_address() as *mut PageTable)
+}
+
+fn user_level_3_table(owners: &[OwnedFrame], address: usize) -> Option<*const PageTable> {
+    user_level_3_table_mut(owners, address).map(|table| table.cast_const())
+}
+
 unsafe fn graphics_mapping_range_is_unmapped(
-    user_level_3_owner: &OwnedFrame,
+    user_level_3_owners: &[OwnedFrame],
     address: usize,
 ) -> bool {
-    let level_3 = user_level_3_owner.start_address() as *const PageTable;
     (0..USER_GRAPHICS_MAPPING_PAGES).all(|page| {
         let virtual_address = address + page * PAGE_SIZE;
+        let Some(level_3) = user_level_3_table(user_level_3_owners, virtual_address) else {
+            return false;
+        };
         unsafe {
             ptr::read_volatile(
                 (*level_3)
@@ -2456,15 +2530,17 @@ unsafe fn graphics_mapping_range_is_unmapped(
 }
 
 unsafe fn graphics_mapping_leaves_match(
-    user_level_3_owner: &OwnedFrame,
+    user_level_3_owners: &[OwnedFrame],
     address: usize,
     backing_address: usize,
     access: GraphicsMappingAccess,
 ) -> bool {
-    let level_3 = user_level_3_owner.start_address() as *const PageTable;
     (0..USER_GRAPHICS_MAPPING_PAGES).all(|page| {
         let virtual_address = address + page * PAGE_SIZE;
         let physical_address = backing_address + page * PAGE_SIZE;
+        let Some(level_3) = user_level_3_table(user_level_3_owners, virtual_address) else {
+            return false;
+        };
         let expected = graphics_mapping_leaf_descriptor(physical_address, access)
             .unwrap_or_else(|_| panic!("validated graphics backing lost its leaf descriptor"));
         unsafe {
@@ -2479,15 +2555,16 @@ unsafe fn graphics_mapping_leaves_match(
 }
 
 unsafe fn write_graphics_mapping_leaves(
-    user_level_3_owner: &OwnedFrame,
+    user_level_3_owners: &[OwnedFrame],
     address: usize,
     backing_address: usize,
     access: GraphicsMappingAccess,
 ) {
-    let level_3 = user_level_3_owner.start_address() as *mut PageTable;
     for page in 0..USER_GRAPHICS_MAPPING_PAGES {
         let virtual_address = address + page * PAGE_SIZE;
         let physical_address = backing_address + page * PAGE_SIZE;
+        let level_3 = user_level_3_table_mut(user_level_3_owners, virtual_address)
+            .unwrap_or_else(|| panic!("graphics mapping escaped its L3 table set"));
         let descriptor = graphics_mapping_leaf_descriptor(physical_address, access)
             .unwrap_or_else(|_| panic!("validated graphics backing lost its leaf descriptor"));
         unsafe {
@@ -2503,10 +2580,11 @@ unsafe fn write_graphics_mapping_leaves(
     unsafe { asm!("dsb ishst", options(nostack, preserves_flags)) };
 }
 
-unsafe fn clear_graphics_mapping_leaves(user_level_3_owner: &OwnedFrame, address: usize) {
-    let level_3 = user_level_3_owner.start_address() as *mut PageTable;
+unsafe fn clear_graphics_mapping_leaves(user_level_3_owners: &[OwnedFrame], address: usize) {
     for page in 0..USER_GRAPHICS_MAPPING_PAGES {
         let virtual_address = address + page * PAGE_SIZE;
+        let level_3 = user_level_3_table_mut(user_level_3_owners, virtual_address)
+            .unwrap_or_else(|| panic!("graphics mapping escaped its L3 table set"));
         unsafe {
             ptr::write_volatile(
                 (*level_3)

@@ -135,8 +135,12 @@ TOP_AFTER="$ARTIFACT_DIR/activity.top-after.ppm"
 BOTTOM_CORNER_BEFORE="$ARTIFACT_DIR/activity.bottom-corner-before.ppm"
 BOTTOM_CORNER_AFTER="$ARTIFACT_DIR/activity.bottom-corner-after.ppm"
 OVERVIEW="$ARTIFACT_DIR/overview.ppm"
+OVERVIEW_DISMISS_DRAG="$ARTIFACT_DIR/overview.dismiss-drag.ppm"
+OVERVIEW_AFTER_DISMISS="$ARTIFACT_DIR/overview.after-dismiss.ppm"
 RASTER_EVIDENCE="$ARTIFACT_DIR/raster-evidence.txt"
+OVERVIEW_DISMISS_EVIDENCE="$ARTIFACT_DIR/overview-dismiss-evidence.txt"
 PROTOCOL_EVIDENCE="$ARTIFACT_DIR/protocol-evidence.txt"
+COPY_EVIDENCE="$ARTIFACT_DIR/copy-evidence.json"
 SUMMARY="$ARTIFACT_DIR/summary.txt"
 
 QEMU_PID=""
@@ -277,22 +281,48 @@ def pixel(x: int, y: int) -> tuple[int, int, int]:
     offset = (y * 720 + x) * 3
     return tuple(pixels[offset:offset + 3])
 
+def blend(base, overlay, alpha):
+    return tuple((left * (255 - alpha) + right * alpha) // 255 for left, right in zip(base, overlay))
+
+def mix(first, second, numerator, denominator):
+    return tuple((left * (denominator - numerator) + right * numerator) // denominator for left, right in zip(first, second))
+
+ocean = (78, 127, 255)
+panel = blend((13, 22, 41), ocean, 12)
+raised_surface = blend((32, 45, 73), ocean, 22)
+background_top = blend((7, 13, 28), ocean, 10)
+background_bottom = blend((16, 24, 48), ocean, 8)
+activity_wallpaper = mix(background_top, background_bottom, 300, 1599)
+primary_glow_strength = ((500 * 500 - ((360 - 604) ** 2 + (300 - 184) ** 2)) * 74) // (500 * 500)
+activity_wallpaper = blend(activity_wallpaper, ocean, primary_glow_strength)
+
 expected = {
     "drawer": {
-        (360, 300): (13, 22, 41),
+        (360, 300): panel,
         (104, 630): (16, 118, 111),
         (719, 1599): (0, 0, 0),
     },
     "activity": {
-        (108, 268): (16, 118, 111),
-        (180, 267): (24, 34, 56),
-        (360, 300): (24, 34, 56),
-        (100, 500): (32, 45, 73),
+        (620, 100): (142, 36, 170),
+        (360, 300): activity_wallpaper,
+        (100, 500): raised_surface,
+        (100, 728): (78, 127, 255),
         (719, 1599): (0, 0, 0),
     },
     "overview": {
-        (360, 300): (13, 22, 41),
-        (360, 580): (16, 118, 111),
+        (360, 300): panel,
+        (360, 580): (142, 36, 170),
+        (719, 1599): (0, 0, 0),
+    },
+    "overview-empty": {
+        (360, 300): panel,
+        (360, 580): (26, 39, 66),
+        (100, 500): raised_surface,
+        (719, 1599): (0, 0, 0),
+    },
+    "overview-drag": {
+        (360, 324): (142, 36, 170),
+        (100, 244): raised_surface,
         (719, 1599): (0, 0, 0),
     },
 }.get(kind)
@@ -322,6 +352,27 @@ wait_for_screenshot() {
   # cross-frame raster comparison below therefore measures guest pixels with
   # identical host cursor placement.
   qmp move 700 1500
+  while ((SECONDS < deadline)); do
+    reject_panic_fault_or_fatal
+    qmp screenshot "$screenshot"
+    if ppm_matches "$kind" "$screenshot"; then
+      return
+    fi
+    if ! kill -0 "$QEMU_PID" 2>/dev/null; then
+      fail_gate "QEMU exited while waiting for $description."
+    fi
+    sleep 0.05
+  done
+  fail_gate "Timed out waiting for $description."
+}
+
+wait_for_current_screenshot() {
+  local kind="$1"
+  local screenshot="$2"
+  local description="$3"
+  local deadline=$((SECONDS + BOOT_TIMEOUT_SECONDS))
+  # Preserve the active pointer stream. Moving the tablet cursor here would
+  # itself change the finger-follow distance being proved by this frame.
   while ((SECONDS < deadline)); do
     reject_panic_fault_or_fatal
     qmp screenshot "$screenshot"
@@ -502,7 +553,7 @@ wait_for_pattern \
   "^APK_PACKAGE_STORE_OK .* source_present=1 source_admitted=1 .* operation=install .* installed=1 .* generation=1 .* apk_bytes=${APK_BYTES} .* package=${PACKAGE} activity=${ACTIVITY} .* apk_sha256=${APK_SHA256} signer_cert_sha256=${EXPECTED_SIGNER_SHA256} network=disabled " \
   "the sourced generation-1 install"
 wait_for_pattern \
-  '^ANDROIDBOX_INTERACTIVE0_PROFILE_OK format=1 abi=46 .* surface_present_layers_syscall=62 .* content_viewport=0/64/720/1448 .* user_stack_pages=16 user_stack_bytes=65536 stack_guard_pages=2 .* network=disabled .* real_phone_claim=0$' \
+  '^ANDROIDBOX_INTERACTIVE0_PROFILE_OK format=1 abi=46 .* surface_present_layers_syscall=62 .* content_viewport=0/64/720/1448 .* user_stack_pages=20 user_stack_bytes=81920 stack_guard_pages=2 .* network=disabled .* real_phone_claim=0$' \
   "the ABI-46 Interactive-0 profile"
 stop_qemu
 INSTALL_LOG="$BOOT_NORMALIZED_LOG"
@@ -525,7 +576,7 @@ require_once_ere \
   "installed interactive Activity preflight"
 require_once_ere \
   "$INSTALL_LOG" \
-  '^MOBILE_UI_PREVIEW_OK profile=local-qemu abi=46 width=720 height=1600 design_width=360 design_height=800 scale=2 aspect=20:9 buffers=3 .* buffer_present_version=3 .* network=disabled .* real_phone_claim=0$' \
+  '^MOBILE_UI_PREVIEW_OK profile=local-qemu abi=46 width=720 height=1600 design_width=360 design_height=800 scale=2 aspect=20:9 buffers=3 .* buffer_present_version=6 .* network=disabled .* real_phone_claim=0$' \
   "install ABI-46 720x1600 preview"
 
 INSTALLED_DISK_SHA256="$(shasum -a 256 "$DISK_IMAGE" | awk '{print $1}')"
@@ -577,10 +628,10 @@ wait_for_pattern \
   "^APK_PACKAGE_STORE_OK .* source_present=0 source_admitted=0 .* operation=recovery .* installed=1 .* generation=1 .* apk_bytes=${APK_BYTES} .* package=${PACKAGE} activity=${ACTIVITY} .* writes=0 flushes=0 source_free_zero_writes=1 .* apk_sha256=${APK_SHA256} signer_cert_sha256=${EXPECTED_SIGNER_SHA256} network=disabled " \
   "source-free durable package recovery"
 wait_for_pattern \
-  '^MOBILE_UI_PREVIEW_OK profile=local-qemu abi=46 width=720 height=1600 design_width=360 design_height=800 scale=2 aspect=20:9 buffers=3 .* buffer_present_version=3 .* network=disabled .* real_phone_claim=0$' \
+  '^MOBILE_UI_PREVIEW_OK profile=local-qemu abi=46 width=720 height=1600 design_width=360 design_height=800 scale=2 aspect=20:9 buffers=3 .* buffer_present_version=6 .* network=disabled .* real_phone_claim=0$' \
   "the recovery ABI-46 720x1600 preview"
 wait_for_pattern \
-  '^ANDROIDBOX_INTERACTIVE0_PROFILE_OK format=1 abi=46 parent_profile=androidbox-el0-runtime0 surface_present_layers_syscall=62 sources=2 content_owner=launcher-or-app chrome_owner=surface-server content_viewport=0/64/720/1448 chrome_regions=0-64/1512-1600 .* buffer_present_version=3 buffer_present_wire_bytes=64 .* system_chrome_input_capture=surface-server app_content_input_bounds=0/64/720/1448 physical_screen=720x1600 user_stack_pages=16 user_stack_bytes=65536 stack_guard_pages=2 art=0 binder=0 general_apk_claim=0 network=disabled emulator_only=1 real_phone_claim=0$' \
+  '^ANDROIDBOX_INTERACTIVE0_PROFILE_OK format=1 abi=46 parent_profile=androidbox-el0-runtime0 surface_present_layers_syscall=62 sources=2 content_owner=launcher-or-app chrome_owner=surface-server content_viewport=0/64/720/1448 chrome_regions=0-64/1512-1600 .* buffer_present_version=6 buffer_present_wire_bytes=64 .* system_chrome_input_capture=surface-server app_content_input_bounds=0/64/720/1448 physical_screen=720x1600 user_stack_pages=20 user_stack_bytes=81920 stack_guard_pages=2 art=0 binder=0 general_apk_claim=0 network=disabled emulator_only=1 real_phone_claim=0$' \
   "the complete recovery Interactive-0 ownership profile"
 wait_for_pattern \
   '^USER_SURFACE_LAYERED_COMMIT_OK .* content_producer_pid=[1-9][0-9]* chrome_producer_pid=[1-9][0-9]* .* viewport=0/64/720/1448 chrome_regions=0-64/1512-1600 .* atomic_sources=2 system_chrome_owner=surface-server$' \
@@ -776,6 +827,7 @@ wait_for_count \
 
 # Open identity-only Overview entirely through the trusted navigation capture.
 LAUNCHER_COMMITS_BEFORE="$(layered_commit_count "$LAUNCHER_PID")"
+LAUNCHER_COMMITS_BEFORE_SECOND_OVERVIEW="$(layered_commit_count "$LAUNCHER_PID")"
 qmp touch-down 360 1570
 wait_for_pattern \
   '^UI_SYSTEM_UI_CHANGED_OK .* receiver_image=launcher .* mode=home recent_app=android-compatible nav_pressed=1 nav_reveal_px=0 .* compatible_session=1 package_generation=1 ' \
@@ -812,12 +864,198 @@ wait_for_count \
   "five App relaunch-transition layered commits"
 wait_for_screenshot activity "$ACTIVITY_RELAUNCH" "the reset initial Activity raster"
 
+# Return to the same capacity-one compatible recent identity, then dismiss it
+# with the real Overview card gesture. The 260 px pointer travel is quantised
+# to one 256 px rendered offset while held, and crosses the 224 px release
+# threshold. SurfaceServer authenticates the exact compatible session and
+# package generation before clearing only the boot-local recent record.
+DISMISS_APP_ROUTES_BEFORE="$(app_route_count "$APP_PID")"
+DISMISS_APP_COMMITS_BEFORE="$(layered_commit_count "$APP_PID")"
+DISMISS_CLAIMS_BEFORE="$(claim_count "$APP_PID")"
+LAUNCHER_COMMITS_BEFORE="$(layered_commit_count "$LAUNCHER_PID")"
+qmp tap 360 1570
+wait_for_pattern \
+  '^UI_SYSTEM_UI_CHANGED_OK .* receiver_image=launcher .* mode=home recent_app=android-compatible nav_pressed=0 nav_reveal_px=0 .* recent_kind=compatible-activity compatible_session=1 package_generation=1 ' \
+  "Home before compatible recent dismissal"
+wait_for_count \
+  "^USER_SURFACE_LAYERED_COMMIT_OK .* content_producer_pid=${LAUNCHER_PID} " \
+  "$((LAUNCHER_COMMITS_BEFORE + 1))" \
+  "the Launcher Home frame before dismissal"
+
+qmp touch-down 360 1570
+wait_for_pattern \
+  '^UI_SYSTEM_UI_CHANGED_OK .* receiver_image=launcher .* mode=home recent_app=android-compatible nav_pressed=1 nav_reveal_px=0 .* compatible_session=1 package_generation=1 ' \
+  "the second trusted Overview capture"
+qmp touch-move 360 1330
+wait_for_pattern \
+  '^UI_SYSTEM_UI_CHANGED_OK .* receiver_image=launcher .* mode=home recent_app=android-compatible nav_pressed=1 nav_reveal_px=240 .* compatible_session=1 package_generation=1 ' \
+  "the second Overview finger-follow state"
+qmp touch-up
+wait_for_pattern \
+  '^UI_SYSTEM_UI_CHANGED_OK .* receiver_image=launcher .* mode=overview recent_app=android-compatible nav_pressed=0 nav_reveal_px=0 .* compatible_session=1 package_generation=1 ' \
+  "stable compatible Overview before dismissal"
+wait_for_count \
+  "^USER_SURFACE_LAYERED_COMMIT_OK .* content_producer_pid=${LAUNCHER_PID} " \
+  "$((LAUNCHER_COMMITS_BEFORE_SECOND_OVERVIEW + 1))" \
+  "the settled compatible Overview frame before dismissal"
+
+LAUNCHER_COMMITS_BEFORE_DISMISS_DRAG="$(layered_commit_count "$LAUNCHER_PID")"
+qmp touch-down 360 920
+qmp touch-move 360 660
+wait_for_count \
+  "^USER_SURFACE_LAYERED_COMMIT_OK .* content_producer_pid=${LAUNCHER_PID} " \
+  "$((LAUNCHER_COMMITS_BEFORE_DISMISS_DRAG + 2))" \
+  "the compatible-card press and 256 px finger-follow frames"
+wait_for_current_screenshot \
+  overview-drag \
+  "$OVERVIEW_DISMISS_DRAG" \
+  "the held 256 px compatible-card finger-follow raster"
+qmp touch-up
+wait_for_pattern \
+  "^UI_SYSTEM_UI_REQUEST_OK sender_image=launcher sender_pid=${LAUNCHER_PID} receiver_image=surface-server receiver_pid=${SURFACE_PID} action=dismiss-recent app=android-compatible request_id=6 observed_revision=[1-9][0-9]* recent_kind=compatible-activity compatible_session=1 package_generation=1$" \
+  "the exact compatible recent dismissal request"
+wait_for_pattern \
+  "^UI_SYSTEM_UI_REQUEST_COMPLETED_OK sender_image=surface-server sender_pid=${SURFACE_PID} receiver_image=launcher receiver_pid=${LAUNCHER_PID} session=1 action=dismiss-recent status=accepted request_id=6 revision=[1-9][0-9]* recent_kind=compatible-activity compatible_session=1 package_generation=1 reservation_origin=none$" \
+  "the accepted compatible recent dismissal completion"
+wait_for_pattern \
+  '^UI_SYSTEM_UI_CHANGED_OK .* receiver_image=launcher .* mode=overview recent_app=none nav_pressed=0 nav_reveal_px=0 .* recent_kind=none compatible_session=0 package_generation=0 activity_pixels=0 thumbnail=0 live_preview=0 background_execution=0$' \
+  "the empty Overview after compatible recent dismissal"
+wait_for_pattern \
+  '^UI_SYSTEM_UI_CHANGED_OK .* receiver_image=app .* mode=overview recent_app=none nav_pressed=0 nav_reveal_px=0 .* recent_kind=none compatible_session=0 package_generation=0 activity_pixels=0 thumbnail=0 live_preview=0 background_execution=0$' \
+  "the still-running App observing identity-only dismissal"
+wait_for_screenshot \
+  overview-empty \
+  "$OVERVIEW_AFTER_DISMISS" \
+  "the empty Overview raster after compatible recent dismissal"
+[[ "$(app_route_count "$APP_PID")" == "$DISMISS_APP_ROUTES_BEFORE" \
+  && "$(layered_commit_count "$APP_PID")" == "$DISMISS_APP_COMMITS_BEFORE" \
+  && "$(claim_count "$APP_PID")" == "$DISMISS_CLAIMS_BEFORE" ]] || {
+  fail_gate "Compatible recent dismissal routed to, rendered through, or granted a new image to App."
+}
+
 stop_qemu
 RECOVERY_LOG="$BOOT_NORMALIZED_LOG"
 RECOVERY_AFTER_DISK_SHA256="$(shasum -a 256 "$DISK_IMAGE" | awk '{print $1}')"
 [[ "$RECOVERY_AFTER_DISK_SHA256" == "$RECOVERY_BEFORE_DISK_SHA256" ]] || {
   fail_gate "Source-free recovery, click, or navigation changed the package disk."
 }
+
+# Prove the held frame contains the exact quantised 256 px card translation,
+# while authenticated release replaces the identity card with the canonical
+# empty Overview and leaves both trusted chrome regions unchanged.
+python3 - \
+  "$OVERVIEW" \
+  "$OVERVIEW_DISMISS_DRAG" \
+  "$OVERVIEW_AFTER_DISMISS" \
+  "$OVERVIEW_DISMISS_EVIDENCE" <<'PY'
+from hashlib import sha256
+from pathlib import Path
+import sys
+
+overview_path, drag_path, after_path, output_path = map(Path, sys.argv[1:5])
+
+def read_ppm(path: Path) -> tuple[bytes, bytes]:
+    payload = path.read_bytes()
+    parts = payload.split(b"\n", 3)
+    if len(parts) != 4 or parts[:3] != [b"P6", b"720 1600", b"255"]:
+        raise SystemExit(f"{path.name} is not an exact 720x1600 PPM")
+    pixels = parts[3]
+    if len(pixels) != 720 * 1600 * 3:
+        raise SystemExit(f"{path.name} has a non-canonical pixel payload")
+    return payload, pixels
+
+overview_payload, overview = read_ppm(overview_path)
+drag_payload, drag = read_ppm(drag_path)
+after_payload, after = read_ppm(after_path)
+
+def pixel(pixels: bytes, x: int, y: int) -> bytes:
+    offset = (y * 720 + x) * 3
+    return pixels[offset:offset + 3]
+
+def rows(pixels: bytes, first: int, last: int) -> bytes:
+    stride = 720 * 3
+    return pixels[first * stride:last * stride]
+
+if pixel(overview, 360, 580) != bytes((142, 36, 170)):
+    raise SystemExit("compatible Overview baseline lacks the package-derived app icon")
+if pixel(drag, 360, 324) != pixel(overview, 360, 580):
+    raise SystemExit("compatible card icon did not follow the finger by exactly 256 px")
+if pixel(drag, 100, 244) != pixel(overview, 100, 500):
+    raise SystemExit("compatible card surface did not follow the finger by exactly 256 px")
+if pixel(drag, 360, 324) == pixel(overview, 360, 324):
+    raise SystemExit("held compatible card did not visibly leave its resting position")
+if pixel(after, 360, 580) != bytes((26, 39, 66)):
+    raise SystemExit("dismissal did not render the canonical empty-Overview icon")
+if overview_payload == drag_payload or overview_payload == after_payload:
+    raise SystemExit("compatible card drag or dismissal produced no raster change")
+if rows(overview, 0, 64) != rows(drag, 0, 64) \
+        or rows(overview, 0, 64) != rows(after, 0, 64):
+    raise SystemExit("compatible card dismissal changed trusted top chrome")
+if rows(overview, 1512, 1600) != rows(after, 1512, 1600):
+    raise SystemExit("settled compatible card dismissal changed trusted bottom chrome")
+
+changed_after = sum(
+    overview[index:index + 3] != after[index:index + 3]
+    for index in range(0, len(overview), 3)
+)
+changed_card = 0
+changed_outside_card = 0
+changed_points: list[tuple[int, int]] = []
+for index in range(0, len(overview), 3):
+    if overview[index:index + 3] == after[index:index + 3]:
+        continue
+    pixel_index = index // 3
+    point = (pixel_index % 720, pixel_index // 720)
+    changed_points.append(point)
+    if 48 <= point[0] < 672 and 424 <= point[1] < 1184:
+        changed_card += 1
+    else:
+        changed_outside_card += 1
+if changed_after < 50_000 or changed_card < 55_000:
+    raise SystemExit("compatible recent dismissal did not materially replace the card")
+if changed_outside_card > 5_000:
+    raise SystemExit("compatible recent dismissal changed pixels beyond the card and guide")
+left = min(point[0] for point in changed_points)
+top = min(point[1] for point in changed_points)
+right = max(point[0] for point in changed_points)
+bottom = max(point[1] for point in changed_points)
+if left < 150 or top < 540 or right > 570 or bottom > 1300:
+    raise SystemExit("compatible recent dismissal escaped its bounded content geometry")
+
+output_path.write_text(
+    "\n".join(
+        (
+            "physical_screen=720x1600",
+            "gesture_start=360/920",
+            "gesture_held=360/660",
+            "pointer_travel_px=260",
+            "rendered_card_offset_px=256",
+            "dismiss_threshold_px=224",
+            "recent_identity=compatible-activity/1/1",
+            "recent_icon_source=verified-package-catalog-fallback",
+            "recent_icon_rgb=8e24aa",
+            "recent_icon_activity_pixels=0",
+            "recent_icon_thumbnail_pixels=0",
+            "dismiss_authority=identity-only",
+            "process_kill=0",
+            "background_task_authority=0",
+            "activity_pixels=0",
+            "thumbnail_pixels=0",
+            "top_chrome_byte_identical=1",
+            "bottom_chrome_byte_identical=1",
+            f"dismiss_changed_pixels={changed_after}",
+            f"dismiss_changed_card_pixels={changed_card}",
+            f"dismiss_changed_outside_card_pixels={changed_outside_card}",
+            f"dismiss_changed_bounds={left}/{top}/{right + 1}/{bottom + 1}",
+            f"overview_ppm_sha256={sha256(overview_payload).hexdigest()}",
+            f"drag_ppm_sha256={sha256(drag_payload).hexdigest()}",
+            f"after_dismiss_ppm_sha256={sha256(after_payload).hexdigest()}",
+        )
+    )
+    + "\n",
+    encoding="utf-8",
+)
+PY
 
 require_once_ere \
   "$RECOVERY_LOG" \
@@ -956,6 +1194,67 @@ def exact(prefix: str) -> list[tuple[int, dict[str, str]]]:
         if line.startswith(prefix)
     ]
 
+def verified_layer_damage(value: dict[str, str]) -> tuple[str, int, int]:
+    try:
+        count = int(value.get("damage_rects", "0"), 10)
+        raw = [tuple(map(int, value.get(f"damage{index}", "").split("/")))
+               for index in range(2)]
+        global_rect = tuple(map(int, value.get("global_damage", "").split("/")))
+        composition = tuple(map(int, value.get("composition", "").split("/")))
+    except ValueError as error:
+        raise SystemExit("layered commit emitted malformed multi-region damage") from error
+    if count not in (1, 2) or any(len(rect) != 4 for rect in raw):
+        raise SystemExit("layered commit emitted an invalid damage-region count")
+    if count == 1 and raw[1] != (0, 0, 0, 0):
+        raise SystemExit("layered single-region commit exposed a nonzero second slot")
+    rects = raw[:count]
+    for x, y, width, height in rects:
+        if width <= 0 or height <= 0 or x < 0 or y < 0 \
+                or x + width > 720 or y + height > 1600:
+            raise SystemExit("layered damage escaped the physical surface")
+    if rects != sorted(rects, key=lambda rect: (rect[1], rect[0], rect[3], rect[2])):
+        raise SystemExit("layered damage regions are not canonically ordered")
+    if count == 2:
+        ax, ay, aw, ah = rects[0]
+        bx, by, bw, bh = rects[1]
+        if ax < bx + bw and bx < ax + aw and ay < by + bh and by < ay + ah:
+            raise SystemExit("layered damage regions overlap")
+    left = min(rect[0] for rect in rects)
+    top = min(rect[1] for rect in rects)
+    right = max(rect[0] + rect[2] for rect in rects)
+    bottom = max(rect[1] + rect[3] for rect in rects)
+    bounds = (left, top, right - left, bottom - top)
+    pixels = sum(rect[2] * rect[3] for rect in rects)
+    if global_rect != bounds:
+        raise SystemExit("layered global damage is not the exact region-set bound")
+    try:
+        damage_pixels = int(value.get("damage_pixels", "-1"), 10)
+        raster_writes = int(value.get("raster_writes", "-1"), 10)
+        composition_rects = int(value.get("composition_rects", "0"), 10)
+        composition_pixels = int(value.get("composition_pixels", "-1"), 10)
+    except ValueError as error:
+        raise SystemExit("layered damage accounting is not numeric") from error
+    if damage_pixels != pixels or raster_writes != pixels:
+        raise SystemExit("layered writes do not equal the disjoint damage pixels")
+    cx, cy, cw, ch = composition
+    if cw <= 0 or ch <= 0 or cx < 0 or cy < 0 \
+            or cx + cw > 720 or cy + ch > 1600 \
+            or cx > left or cy > top or cx + cw < right or cy + ch < bottom:
+        raise SystemExit("layered compositor evidence does not contain the damage regions")
+    if composition_rects not in (count, count + 1) \
+            or not pixels <= composition_pixels <= pixels + 12 * 22:
+        raise SystemExit("layered cursor-preserving composition accounting changed")
+    mode = value.get("damage_mode", "")
+    if mode == "full":
+        if count != 1 or bounds != (0, 0, 720, 1600) or pixels != 720 * 1600:
+            raise SystemExit("layered full frame did not establish a complete base")
+    elif mode == "damage":
+        if pixels >= 720 * 1600 // 2:
+            raise SystemExit("layered damage frame was not component-tight")
+    else:
+        raise SystemExit(f"unknown layered damage mode: {mode!r}")
+    return mode, count, pixels
+
 preview = exact("MOBILE_UI_PREVIEW_OK ")
 profile = exact("ANDROIDBOX_INTERACTIVE0_PROFILE_OK ")
 if len(preview) != 1 or len(profile) != 1:
@@ -965,7 +1264,18 @@ for name, expected in {
     "width": "720",
     "height": "1600",
     "buffers": "3",
-    "buffer_present_version": "3",
+    "buffer_present_version": "6",
+    "overview_compatible_icon": "verified-package-catalog",
+    "overview_compatible_icon_binding": "session+generation+apk-digest",
+    "overview_compatible_icon_activity_pixels": "0",
+    "overview_compatible_icon_thumbnail": "0",
+    "overview_dismiss": "identity-only",
+    "overview_dismiss_gesture": "upward",
+    "overview_dismiss_activation_px": "32",
+    "overview_dismiss_threshold_px": "224",
+    "overview_dismiss_max_offset_px": "320",
+    "overview_dismiss_quantum_px": "8",
+    "overview_task_kill": "0",
     "network": "disabled",
 }.items():
     if preview[0][1].get(name) != expected:
@@ -978,7 +1288,7 @@ for name, expected in {
     "chrome_owner": "surface-server",
     "content_viewport": "0/64/720/1448",
     "chrome_regions": "0-64/1512-1600",
-    "buffer_present_version": "3",
+    "buffer_present_version": "6",
     "buffer_present_wire_bytes": "64",
     "graphics_handle_rights": "verified",
     "graphics_identities": "3",
@@ -990,8 +1300,8 @@ for name, expected in {
     "graphics_role_counts": "1/1/1",
     "system_chrome_input_capture": "surface-server",
     "app_content_input_bounds": "0/64/720/1448",
-    "user_stack_pages": "16",
-    "user_stack_bytes": "65536",
+    "user_stack_pages": "20",
+    "user_stack_bytes": "81920",
     "stack_guard_pages": "2",
     "network": "disabled",
 }.items():
@@ -1003,6 +1313,8 @@ if not commits:
     raise SystemExit("recovery emitted no layered commit")
 app_commits: list[tuple[int, dict[str, str]]] = []
 launcher_commits: list[tuple[int, dict[str, str]]] = []
+layered_damage_commits = 0
+layered_two_region_commits = 0
 for index, value in commits:
     expected = {
         "owner": "surface-server",
@@ -1018,6 +1330,9 @@ for index, value in commits:
     }
     if any(value.get(name) != item for name, item in expected.items()):
         raise SystemExit("layered commit ownership or geometry mismatch")
+    damage_mode, damage_region_count, _damage_pixels = verified_layer_damage(value)
+    layered_damage_commits += int(damage_mode == "damage")
+    layered_two_region_commits += int(damage_region_count == 2)
     if value.get("content_producer_pid") not in {launcher_pid, app_pid}:
         raise SystemExit("layered content came from an unauthorised producer")
     for generation in ("content_generation", "chrome_generation"):
@@ -1032,6 +1347,8 @@ for index, value in commits:
         launcher_commits.append((index, value))
 if len(app_commits) < 12 or not launcher_commits:
     raise SystemExit("missing App or Launcher layered producer evidence")
+if layered_damage_commits == 0:
+    raise SystemExit("interactive layered rendering never exercised Damage mode")
 
 collects = exact("ANDROID_PACKAGE_RELAUNCH_COLLECT_OK ")
 claims = exact("ANDROID_PACKAGE_IMAGE_CLAIM_OK ")
@@ -1101,6 +1418,64 @@ if [value.get("pressed") for _index, value in button_routes] != ["0", "1", "0"]:
 if not claims[0][0] < button_routes[0][0] < button_routes[-1][0] < claims[1][0]:
     raise SystemExit("Button dispatch is outside the first retained Activity lease")
 
+requests = exact("UI_SYSTEM_UI_REQUEST_OK ")
+expected_actions = [
+    "unlock",
+    "reserve-compatible",
+    "present-compatible",
+    "reserve-compatible",
+    "activate-recent",
+    "dismiss-recent",
+]
+if len(requests) != len(expected_actions):
+    raise SystemExit("interactive flow emitted an unexpected System UI request count")
+for request_id, ((_, request), action) in enumerate(
+    zip(requests, expected_actions), 1
+):
+    if (
+        request.get("sender_image") != "launcher"
+        or request.get("sender_pid") != launcher_pid
+        or request.get("receiver_image") != "surface-server"
+        or request.get("receiver_pid") != surface_pid
+        or request.get("request_id") != str(request_id)
+        or request.get("action") != action
+    ):
+        raise SystemExit(f"System UI request {request_id} is not canonical")
+dismiss_request_index, dismiss_request = requests[-1]
+for name, expected in {
+    "app": "android-compatible",
+    "recent_kind": "compatible-activity",
+    "compatible_session": "1",
+    "package_generation": "1",
+}.items():
+    if dismiss_request.get(name) != expected:
+        raise SystemExit(f"compatible dismissal request identity mismatch: {name}")
+
+completions = exact("UI_SYSTEM_UI_REQUEST_COMPLETED_OK ")
+dismiss_completions = [
+    (index, value)
+    for index, value in completions
+    if value.get("action") == "dismiss-recent"
+]
+if len(dismiss_completions) != 1:
+    raise SystemExit("expected exactly one compatible dismissal completion")
+dismiss_completion_index, dismiss_completion = dismiss_completions[0]
+for name, expected in {
+    "sender_image": "surface-server",
+    "sender_pid": surface_pid,
+    "receiver_image": "launcher",
+    "receiver_pid": launcher_pid,
+    "session": "1",
+    "status": "accepted",
+    "request_id": "6",
+    "recent_kind": "compatible-activity",
+    "compatible_session": "1",
+    "package_generation": "1",
+    "reservation_origin": "none",
+}.items():
+    if dismiss_completion.get(name) != expected:
+        raise SystemExit(f"compatible dismissal completion mismatch: {name}")
+
 states = exact("UI_SYSTEM_UI_CHANGED_OK ")
 def stable_state(mode: str, recent: str, after: int) -> int:
     for index, value in states:
@@ -1119,13 +1494,37 @@ foreground_one = stable_state("foreground", "android-compatible", collects[0][0]
 home = stable_state("home", "android-compatible", button_routes[-1][0])
 overview = stable_state("overview", "android-compatible", home)
 foreground_two = stable_state("foreground", "android-compatible", collects[1][0])
+home_two = stable_state("home", "android-compatible", claims[1][0])
+overview_two = stable_state("overview", "android-compatible", home_two)
+dismissed = stable_state("overview", "none", dismiss_request_index)
 if not (
     collects[0][0] < foreground_one < claims[0][0]
     < button_routes[0][0] < button_routes[-1][0]
     < home < overview < collects[1][0] < foreground_two < claims[1][0]
+    < home_two < overview_two < dismiss_request_index
+    < dismissed < dismiss_completion_index
 ):
     raise SystemExit("interactive Activity lifecycle evidence is out of order")
-for boundary in (home, overview):
+app_dismissed_states = [
+    (index, value)
+    for index, value in states
+    if index > dismiss_request_index
+    and value.get("receiver_image") == "app"
+    and value.get("receiver_pid") == app_pid
+    and value.get("mode") == "overview"
+    and value.get("recent_app") == "none"
+]
+if len(app_dismissed_states) != 1:
+    raise SystemExit("still-running App did not observe exactly one empty Overview state")
+for name in (
+    "activity_pixels",
+    "thumbnail",
+    "live_preview",
+    "background_execution",
+):
+    if app_dismissed_states[0][1].get(name) != "0":
+        raise SystemExit(f"dismissed compatible identity exposed {name}")
+for boundary in (home, overview, home_two, overview_two, dismissed):
     if not any(index > boundary for index, _value in launcher_commits):
         raise SystemExit("Home/Overview has no later Launcher-owned frame")
 for claim_index, _claim in claims:
@@ -1150,7 +1549,7 @@ output_path.write_text(
         (
             "abi=46",
             "surface_present_layers_syscall=62",
-            "buffer_present_version=3",
+            "buffer_present_version=6",
             "surface_sources=2",
             "graphics_handle_rights=verified",
             "graphics_identities=3",
@@ -1166,8 +1565,24 @@ output_path.write_text(
             f"layered_commits={len(commits)}",
             f"app_layered_commits={len(app_commits)}",
             f"launcher_layered_commits={len(launcher_commits)}",
+            f"layered_damage_commits={layered_damage_commits}",
+            f"layered_two_region_commits={layered_two_region_commits}",
             "image_claim_count=2",
             "durable_relaunch_count=2",
+            "system_ui_request_count=6",
+            "overview_compatible_icon=verified-package-catalog-fallback",
+            "overview_compatible_icon_binding=session+generation+apk-digest",
+            "overview_compatible_icon_activity_pixels=0",
+            "overview_compatible_icon_thumbnail_pixels=0",
+            "overview_dismiss_request_id=6",
+            "overview_dismiss_identity=compatible-activity/1/1",
+            "overview_dismiss_completion=accepted",
+            "overview_dismiss_reservation_origin=none",
+            "overview_dismiss_process_kill=0",
+            "overview_dismiss_background_task_authority=0",
+            "overview_dismiss_activity_pixels=0",
+            "overview_dismiss_thumbnail_pixels=0",
+            "app_observed_empty_overview=1",
             "button_samples=3",
             "button_sample_order=unpressed-press-release",
             "top_chrome_samples_to_app=0",
@@ -1192,13 +1607,21 @@ CONTENT_CHANGED_PIXELS="$(sed -n 's/^content_changed_pixels=//p' "$RASTER_EVIDEN
 LABEL_CHANGED_PIXELS="$(sed -n 's/^text_label_changed_pixels=//p' "$RASTER_EVIDENCE")"
 APP_LAYERED_COMMITS="$(sed -n 's/^app_layered_commits=//p' "$PROTOCOL_EVIDENCE")"
 LAUNCHER_LAYERED_COMMITS="$(sed -n 's/^launcher_layered_commits=//p' "$PROTOCOL_EVIDENCE")"
+OVERVIEW_PPM_SHA256="$(sed -n 's/^overview_ppm_sha256=//p' "$OVERVIEW_DISMISS_EVIDENCE")"
+OVERVIEW_DISMISS_DRAG_PPM_SHA256="$(sed -n 's/^drag_ppm_sha256=//p' "$OVERVIEW_DISMISS_EVIDENCE")"
+OVERVIEW_AFTER_DISMISS_PPM_SHA256="$(sed -n 's/^after_dismiss_ppm_sha256=//p' "$OVERVIEW_DISMISS_EVIDENCE")"
+OVERVIEW_DISMISS_CHANGED_PIXELS="$(sed -n 's/^dismiss_changed_pixels=//p' "$OVERVIEW_DISMISS_EVIDENCE")"
 [[ "$INITIAL_PPM_SHA256" =~ ^[0-9a-f]{64}$ \
   && "$CLICKED_PPM_SHA256" =~ ^[0-9a-f]{64}$ \
   && "$RELAUNCH_PPM_SHA256" == "$INITIAL_PPM_SHA256" \
   && "$CONTENT_CHANGED_PIXELS" =~ ^[1-9][0-9]*$ \
   && "$LABEL_CHANGED_PIXELS" =~ ^[1-9][0-9]*$ \
   && "$APP_LAYERED_COMMITS" =~ ^[1-9][0-9]*$ \
-  && "$LAUNCHER_LAYERED_COMMITS" =~ ^[1-9][0-9]*$ ]] || {
+  && "$LAUNCHER_LAYERED_COMMITS" =~ ^[1-9][0-9]*$ \
+  && "$OVERVIEW_PPM_SHA256" =~ ^[0-9a-f]{64}$ \
+  && "$OVERVIEW_DISMISS_DRAG_PPM_SHA256" =~ ^[0-9a-f]{64}$ \
+  && "$OVERVIEW_AFTER_DISMISS_PPM_SHA256" =~ ^[0-9a-f]{64}$ \
+  && "$OVERVIEW_DISMISS_CHANGED_PIXELS" =~ ^[1-9][0-9]*$ ]] || {
   fail_gate "Could not retain canonical Interactive-0 evidence."
 }
 
@@ -1211,7 +1634,7 @@ printf '%s\n' \
   'top_chrome_rows=0-64' \
   'bottom_chrome_rows=1512-1600' \
   'surface_present_layers_syscall=62' \
-  'buffer_present_version=3' \
+  'buffer_present_version=6' \
   'buffer_present_wire_bytes=64' \
   'surface_sources=2' \
   'graphics_handle_rights=verified' \
@@ -1224,8 +1647,8 @@ printf '%s\n' \
   'graphics_role_counts=1/1/1' \
   'chrome_owner=surface-server' \
   'content_owner=launcher-or-app' \
-  'user_stack_pages=16' \
-  'user_stack_bytes=65536' \
+  'user_stack_pages=20' \
+  'user_stack_bytes=81920' \
   'stack_guard_pages=2' \
   'qemu_boots=2' \
   'qemu_nic_none_per_boot=1' \
@@ -1250,6 +1673,31 @@ printf '%s\n' \
   'recovery_disk_unchanged=1' \
   'durable_relaunch_count=2' \
   'image_claim_count=2' \
+  'system_ui_request_count=6' \
+  'overview_compatible_icon=verified-package-catalog-fallback' \
+  'overview_compatible_icon_rgb=8e24aa' \
+  'overview_compatible_icon_binding=session+generation+apk-digest' \
+  'overview_compatible_icon_activity_pixels=0' \
+  'overview_compatible_icon_thumbnail_pixels=0' \
+  'overview_dismiss_gesture=upward' \
+  'overview_dismiss_activation_px=32' \
+  'overview_dismiss_threshold_px=224' \
+  'overview_dismiss_max_offset_px=320' \
+  'overview_dismiss_quantum_px=8' \
+  'overview_dismiss_pointer_travel_px=260' \
+  'overview_dismiss_rendered_offset_px=256' \
+  'overview_dismiss_identity=compatible-activity/1/1' \
+  'overview_dismiss_completion=accepted' \
+  'overview_dismiss_reservation_origin=none' \
+  'overview_dismiss_process_kill=0' \
+  'overview_dismiss_background_task_authority=0' \
+  'overview_dismiss_activity_pixels=0' \
+  'overview_dismiss_thumbnail_pixels=0' \
+  'overview_dismiss_app_alive=1' \
+  "overview_dismiss_changed_pixels=$OVERVIEW_DISMISS_CHANGED_PIXELS" \
+  "overview_ppm_sha256=$OVERVIEW_PPM_SHA256" \
+  "overview_dismiss_drag_ppm_sha256=$OVERVIEW_DISMISS_DRAG_PPM_SHA256" \
+  "overview_after_dismiss_ppm_sha256=$OVERVIEW_AFTER_DISMISS_PPM_SHA256" \
   'button_samples=3' \
   'button_sample_order=unpressed-press-release' \
   'button_callback_frames=2' \
@@ -1278,4 +1726,7 @@ printf '%s\n' \
   'general_apk_claim=0' \
   >"$SUMMARY"
 
-echo "ANDROIDBOX_INTERACTIVE0_QEMU_OK artifact_dir=$ARTIFACT_DIR abi=46 physical_screen=720x1600 content_viewport=0/64/720/1448 surface_present_layers_syscall=62 buffer_present_version=3 surface_sources=2 graphics_handle_rights=verified graphics_identities=3 graphics_handles=6 graphics_identity_handles=2/2/2 graphics_producer_handles=1/1/1 graphics_server_handles=3 graphics_producer_roles=surface-server+launcher+app graphics_role_counts=1/1/1 chrome_owner=surface-server content_owner=launcher-or-app user_stack_pages=16 user_stack_bytes=65536 stack_guard_pages=2 qemu_boots=2 qemu_nic_none_per_boot=1 install_source=qemu-fw_cfg recovery_source=none apk_bytes=$APK_BYTES apk_sha256=$APK_SHA256 signer_cert_sha256=$EXPECTED_SIGNER_SHA256 package=$PACKAGE activity=$ACTIVITY version_code=$VERSION_CODE generation=1 surface_server_pid=$SURFACE_PID launcher_pid=$LAUNCHER_PID app_pid=$APP_PID durable_relaunch_count=2 image_claim_count=2 button_coordinate=360/728 button_samples=3 button_callback_frames=2 app_layered_commits=$APP_LAYERED_COMMITS launcher_layered_commits=$LAUNCHER_LAYERED_COMMITS top_chrome_samples_to_app=0 bottom_home_samples_to_app=0 bottom_corner_samples_to_app=0 bottom_corner_claim_unchanged=1 bottom_corner_raster_identical=1 top_chrome_byte_identical=1 bottom_chrome_byte_identical=1 content_changed_pixels=$CONTENT_CHANGED_PIXELS text_label_changed_pixels=$LABEL_CHANGED_PIXELS initial_ppm_sha256=$INITIAL_PPM_SHA256 clicked_ppm_sha256=$CLICKED_PPM_SHA256 relaunch_ppm_sha256=$RELAUNCH_PPM_SHA256 relaunch_initial_raster_identical=1 recovery_disk_unchanged=1 recovery_disk_sha256=$RECOVERY_AFTER_DISK_SHA256 network=disabled panic_fault_fatal_free=1 art=0 binder=0 general_apk_claim=0"
+python3 "$SCRIPT_DIR/verify-mobile-layer-copy.py" --callback-pixels 177536 \
+  "$BOOT_NORMALIZED_LOG" >"$COPY_EVIDENCE"
+
+echo "ANDROIDBOX_INTERACTIVE0_QEMU_OK artifact_dir=$ARTIFACT_DIR abi=46 physical_screen=720x1600 content_viewport=0/64/720/1448 surface_present_layers_syscall=62 buffer_present_version=6 surface_sources=2 graphics_handle_rights=verified graphics_identities=3 graphics_handles=6 graphics_identity_handles=2/2/2 graphics_producer_handles=1/1/1 graphics_server_handles=3 graphics_producer_roles=surface-server+launcher+app graphics_role_counts=1/1/1 chrome_owner=surface-server content_owner=launcher-or-app user_stack_pages=20 user_stack_bytes=81920 stack_guard_pages=2 qemu_boots=2 qemu_nic_none_per_boot=1 install_source=qemu-fw_cfg recovery_source=none apk_bytes=$APK_BYTES apk_sha256=$APK_SHA256 signer_cert_sha256=$EXPECTED_SIGNER_SHA256 package=$PACKAGE activity=$ACTIVITY version_code=$VERSION_CODE generation=1 surface_server_pid=$SURFACE_PID launcher_pid=$LAUNCHER_PID app_pid=$APP_PID durable_relaunch_count=2 image_claim_count=2 system_ui_request_count=6 overview_dismiss_gesture=upward overview_dismiss_activation_px=32 overview_dismiss_threshold_px=224 overview_dismiss_pointer_travel_px=260 overview_dismiss_rendered_offset_px=256 overview_dismiss_identity=compatible-activity/1/1 overview_dismiss_completion=accepted overview_dismiss_process_kill=0 overview_dismiss_background_task_authority=0 overview_dismiss_app_alive=1 overview_dismiss_changed_pixels=$OVERVIEW_DISMISS_CHANGED_PIXELS overview_ppm_sha256=$OVERVIEW_PPM_SHA256 overview_dismiss_drag_ppm_sha256=$OVERVIEW_DISMISS_DRAG_PPM_SHA256 overview_after_dismiss_ppm_sha256=$OVERVIEW_AFTER_DISMISS_PPM_SHA256 button_coordinate=360/728 button_samples=3 button_callback_frames=2 app_layered_commits=$APP_LAYERED_COMMITS launcher_layered_commits=$LAUNCHER_LAYERED_COMMITS top_chrome_samples_to_app=0 bottom_home_samples_to_app=0 bottom_corner_samples_to_app=0 bottom_corner_claim_unchanged=1 bottom_corner_raster_identical=1 top_chrome_byte_identical=1 bottom_chrome_byte_identical=1 content_changed_pixels=$CONTENT_CHANGED_PIXELS text_label_changed_pixels=$LABEL_CHANGED_PIXELS initial_ppm_sha256=$INITIAL_PPM_SHA256 clicked_ppm_sha256=$CLICKED_PPM_SHA256 relaunch_ppm_sha256=$RELAUNCH_PPM_SHA256 relaunch_initial_raster_identical=1 recovery_disk_unchanged=1 recovery_disk_sha256=$RECOVERY_AFTER_DISK_SHA256 network=disabled panic_fault_fatal_free=1 art=0 binder=0 general_apk_claim=0"

@@ -29,10 +29,12 @@ mapped-graphics-runtime = ["app-lifecycle-runtime"]
 graphics-owner-death-runtime = ["mapped-graphics-runtime"]
 graphics-surface-restart-runtime = ["graphics-owner-death-runtime"]
 graphics-producer-orphan-runtime = ["graphics-owner-death-runtime"]
-graphics-frame-clock-runtime = ["mapped-graphics-runtime"]
+surface-frame-pacing = []
+graphics-frame-clock-runtime = ["mapped-graphics-runtime", "surface-frame-pacing"]
 graphics-swapchain-runtime = ["graphics-frame-clock-runtime"]
 multi-window-runtime = ["graphics-frame-clock-runtime", "surface-trace-evidence"]
 mobile-ui-runtime = [
+    "surface-frame-pacing",
     "surface-trace-evidence",
     "bndr-abi/mobile-ui-runtime",
     "bndr-input/mobile-ui-runtime",

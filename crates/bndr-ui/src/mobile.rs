@@ -14,6 +14,8 @@ use super::android_scene::AndroidSceneOrientation;
 use super::android_scene::{
     AndroidInstalledActivitySceneNode, AndroidInstalledActivitySceneState, AndroidSceneViewKind,
 };
+#[cfg(feature = "mobile-ui-runtime")]
+use super::{DamageRect, DamageRegions};
 #[cfg(feature = "mobile-system-chrome0")]
 pub use super::{
     MOBILE_CONTENT_BOTTOM, MOBILE_CONTENT_HEIGHT, MOBILE_CONTENT_TOP,
@@ -27,6 +29,14 @@ use super::{
 
 #[path = "mobile_font_data.rs"]
 mod mobile_font_data;
+
+#[cfg(feature = "mobile-ui-runtime")]
+#[path = "mobile_raster.rs"]
+mod raster;
+#[cfg(feature = "mobile-ui-runtime")]
+pub use raster::{MobileRasterCache, clip_damage_plan, render_region};
+#[cfg(feature = "mobile-system-chrome0")]
+pub use raster::{render_content_region, render_system_chrome_region, system_chrome_damage_plan};
 
 pub const WIDTH: usize = 720;
 pub const HEIGHT: usize = 1_600;
@@ -48,7 +58,6 @@ const COLOR_DARK_TOP: u32 = 0x0007_0d1c;
 const COLOR_DARK_BOTTOM: u32 = 0x0010_1830;
 const COLOR_LIGHT_TOP: u32 = 0x00e9_f1ff;
 const COLOR_LIGHT_BOTTOM: u32 = 0x00f8_faff;
-const COLOR_PURPLE_GLOW: u32 = 0x006d_4aff;
 const COLOR_CYAN_GLOW: u32 = 0x001d_bbd1;
 const COLOR_CARD_DARK: u32 = 0x0018_2238;
 const COLOR_CARD_RAISED_DARK: u32 = 0x0020_2d49;
@@ -73,7 +82,163 @@ const COLOR_TOGGLE_OFF: u32 = 0x0042_4d64;
 const COLOR_WHITE: u32 = 0x00ff_ffff;
 const COLOR_BLACK: u32 = 0x0000_0000;
 const COLOR_SHADOW: u32 = 0x0004_0812;
+const COLOR_SHADOW_LIGHT: u32 = 0x00c8_d3e4;
 const COLOR_AMBER: u32 = 0x00f5_a524;
+const COLOR_PANEL_DARK: u32 = 0x000d_1629;
+const COLOR_PANEL_LIGHT: u32 = 0x00f3_f7ff;
+
+/// Chooses one of the two canonical high-contrast inks for a solid color.
+/// The threshold is intentionally deterministic integer sRGB luma; the test
+/// suite independently enforces the stricter WCAG contrast ratio with linear
+/// channels for every product icon/accent surface.
+const fn accessible_surface_ink(surface: u32) -> u32 {
+    let luma =
+        ((surface >> 16) & 0xff) * 2_126 + ((surface >> 8) & 0xff) * 7_152 + (surface & 0xff) * 722;
+    if luma >= 1_100_000 {
+        COLOR_TEXT_LIGHT
+    } else {
+        COLOR_WHITE
+    }
+}
+
+/// Semantic color roles shared by every native page and projected Android
+/// Activity. Keeping these roles in one allocation-free value prevents a
+/// page from inventing a second light/dark palette while still letting the
+/// renderer select colors without storing theme state in global memory.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct MobileThemeTokens {
+    background_top: u32,
+    background_bottom: u32,
+    surface: u32,
+    surface_raised: u32,
+    panel: u32,
+    outline: u32,
+    text_primary: u32,
+    text_secondary: u32,
+    text_tertiary: u32,
+    shadow: u32,
+    accent: u32,
+    accent_container: u32,
+    on_accent: u32,
+    wallpaper_glow_primary: u32,
+    wallpaper_glow_secondary: u32,
+}
+
+/// Builds the complete allocation-free color scheme from the user's current
+/// accent choice. The procedural wallpaper and every semantic surface share
+/// this seed, so switching Accent changes one coherent scheme rather than a
+/// handful of unrelated blue pixels.
+const fn mobile_theme_tokens(
+    dark: bool,
+    alternate_accent: bool,
+    high_contrast: bool,
+) -> MobileThemeTokens {
+    let accent = if alternate_accent {
+        COLOR_BLUE_ALT
+    } else {
+        COLOR_BLUE
+    };
+    if dark {
+        MobileThemeTokens {
+            background_top: blend(COLOR_DARK_TOP, accent, 10),
+            background_bottom: blend(COLOR_DARK_BOTTOM, accent, 8),
+            surface: blend(COLOR_CARD_DARK, accent, if high_contrast { 8 } else { 14 }),
+            surface_raised: blend(
+                COLOR_CARD_RAISED_DARK,
+                accent,
+                if high_contrast { 14 } else { 22 },
+            ),
+            panel: blend(COLOR_PANEL_DARK, accent, if high_contrast { 6 } else { 12 }),
+            outline: if high_contrast {
+                blend(COLOR_TEXT_DARK, accent, 48)
+            } else {
+                blend(COLOR_BORDER_DARK, accent, 38)
+            },
+            text_primary: COLOR_TEXT_DARK,
+            text_secondary: if high_contrast {
+                COLOR_TEXT_DARK
+            } else {
+                COLOR_TEXT_MUTED_DARK
+            },
+            text_tertiary: if high_contrast {
+                COLOR_TEXT_MUTED_DARK
+            } else {
+                COLOR_TEXT_WEAK_DARK
+            },
+            shadow: COLOR_SHADOW,
+            accent,
+            accent_container: blend(COLOR_CARD_RAISED_DARK, accent, 72),
+            on_accent: accessible_surface_ink(accent),
+            wallpaper_glow_primary: accent,
+            wallpaper_glow_secondary: blend(COLOR_CYAN_GLOW, accent, 28),
+        }
+    } else {
+        MobileThemeTokens {
+            background_top: blend(COLOR_LIGHT_TOP, accent, 10),
+            background_bottom: blend(COLOR_LIGHT_BOTTOM, accent, 4),
+            surface: blend(COLOR_CARD_LIGHT, accent, if high_contrast { 2 } else { 6 }),
+            surface_raised: blend(
+                COLOR_CARD_RAISED_LIGHT,
+                accent,
+                if high_contrast { 4 } else { 10 },
+            ),
+            panel: blend(COLOR_PANEL_LIGHT, accent, if high_contrast { 2 } else { 8 }),
+            outline: if high_contrast {
+                blend(COLOR_TEXT_LIGHT, accent, 22)
+            } else {
+                blend(COLOR_BORDER_LIGHT, accent, 24)
+            },
+            text_primary: COLOR_TEXT_LIGHT,
+            text_secondary: if high_contrast {
+                COLOR_TEXT_LIGHT
+            } else {
+                COLOR_TEXT_MUTED_LIGHT
+            },
+            text_tertiary: if high_contrast {
+                COLOR_TEXT_MUTED_LIGHT
+            } else {
+                COLOR_TEXT_WEAK_LIGHT
+            },
+            shadow: COLOR_SHADOW_LIGHT,
+            accent,
+            accent_container: blend(COLOR_CARD_RAISED_LIGHT, accent, 54),
+            on_accent: accessible_surface_ink(accent),
+            wallpaper_glow_primary: blend(COLOR_WHITE, accent, 70),
+            wallpaper_glow_secondary: blend(COLOR_WHITE, COLOR_CYAN_GLOW, 58),
+        }
+    }
+}
+
+/// A small shape/elevation scale. Exact hit targets remain public physical
+/// rectangles; these tokens only define how visual surfaces are drawn inside
+/// those already-authoritative bounds.
+struct MobileShapeTokens;
+
+impl MobileShapeTokens {
+    const OUTLINE_PX: i32 = MobileSpacingTokens::HAIRLINE;
+    const ELEVATION_LOW_PX: i32 = MobileSpacingTokens::XS - MobileSpacingTokens::HAIRLINE;
+    const RADIUS_SETTING_ICON: i32 = MobileSpacingTokens::MD - MobileSpacingTokens::HAIRLINE;
+    const RADIUS_APP_ICON: i32 = MobileSpacingTokens::LG;
+    const RADIUS_CONTROL: i32 = MobileSpacingTokens::APP_GUTTER;
+    const RADIUS_LARGE: i32 = MobileSpacingTokens::CONTENT_GUTTER;
+    const RADIUS_PANEL: i32 = MobileSpacingTokens::CONTENT_GUTTER + MobileSpacingTokens::XS;
+}
+
+/// Spacing roles used by the phone shell. Public hit rectangles stay the
+/// authority; these values remove page-local magic numbers without moving a
+/// target or weakening an existing damage contract.
+struct MobileSpacingTokens;
+
+impl MobileSpacingTokens {
+    const HAIRLINE: i32 = 1;
+    const XXS: i32 = 2;
+    const XS: i32 = 4;
+    const MD: i32 = 12;
+    const LG: i32 = 16;
+    const PAGE_GUTTER: i32 = 18;
+    const APP_GUTTER: i32 = 20;
+    const CONTENT_GUTTER: i32 = 24;
+}
 
 // Public targets are physical scanout coordinates. They intentionally match
 // the top-level shell targets so render and input cannot drift apart.
@@ -82,13 +247,23 @@ pub const HOME_MESSAGES_TARGET: ShellRect = ShellRect::new(190, 1_340, 170, 190)
 pub const HOME_CALCULATOR_TARGET: ShellRect = ShellRect::new(360, 1_340, 170, 190);
 pub const HOME_SETTINGS_TARGET: ShellRect = ShellRect::new(530, 1_340, 170, 190);
 pub const APP_BACK_TARGET: ShellRect = ShellRect::new(0, 64, 160, 112);
-pub const SETTINGS_THEME_TARGET: ShellRect = ShellRect::new(32, 408, 656, 132);
-pub const SETTINGS_ACCENT_TARGET: ShellRect = ShellRect::new(32, 540, 656, 132);
+/// Settings-home entry into the real Display subpage.
+pub const SETTINGS_DISPLAY_TARGET: ShellRect = ShellRect::new(32, 408, 656, 132);
+/// Display-page session theme row.
+pub const DISPLAY_THEME_TARGET: ShellRect = ShellRect::new(32, 408, 656, 132);
+/// Display-page session accent row.
+pub const DISPLAY_ACCENT_TARGET: ShellRect = ShellRect::new(32, 540, 656, 132);
 /// Five-stop software-surface dimming slider in the Settings appearance card.
 ///
 /// This target controls only rendered pixels in the current UI session. It is
 /// not a physical panel, backlight, power-saving, or hardware-brightness API.
-pub const SETTINGS_DIMMING_TARGET: ShellRect = ShellRect::new(336, 744, 336, 112);
+pub const DISPLAY_DIMMING_TARGET: ShellRect = ShellRect::new(336, 744, 336, 112);
+/// Display-owned entry into the real accessibility appearance page.
+pub const DISPLAY_ACCESSIBILITY_TARGET: ShellRect = ShellRect::new(32, 1_304, 656, 192);
+/// Accessibility-page two-stop text-size preference.
+pub const ACCESSIBILITY_LARGE_TEXT_TARGET: ShellRect = ShellRect::new(32, 408, 656, 132);
+/// Accessibility-page explicit contrast preference.
+pub const ACCESSIBILITY_HIGH_CONTRAST_TARGET: ShellRect = ShellRect::new(32, 540, 656, 132);
 pub const SETTINGS_APPS_TARGET: ShellRect = ShellRect::new(48, 1_284, 640, 132);
 pub const SETTINGS_ABOUT_TARGET: ShellRect = ShellRect::new(48, 1_416, 640, 132);
 pub const APPS_BACK_TARGET: ShellRect = APP_BACK_TARGET;
@@ -102,7 +277,7 @@ pub const APPS_UNINSTALL_CANCEL_TARGET: ShellRect = ShellRect::new(80, 1_016, 25
 pub const APPS_UNINSTALL_CONFIRM_TARGET: ShellRect = ShellRect::new(390, 1_016, 250, 112);
 /// ABI 53's install/update action is bound to the candidate card.
 #[cfg(feature = "androidbox-runtime-install2")]
-pub const APPS_INSTALL_TARGET: ShellRect = ShellRect::new(36, 520, 648, 160);
+pub const APPS_INSTALL_TARGET: ShellRect = ShellRect::new(36, 520, 648, 164);
 #[cfg(feature = "androidbox-runtime-install2")]
 pub const APPS_UPDATE_TARGET: ShellRect = ShellRect::new(480, 336, 184, 88);
 /// ABI 55's two fixed installed-package selectors inside the Apps summary
@@ -148,6 +323,12 @@ pub const QUICK_CLOSE_TARGET: ShellRect = ShellRect::new(584, 104, 128, 112);
 /// vibration API. The SurfaceServer session owns only its visible/dismissed
 /// state; the fixed content describes the local preview itself.
 pub const QUICK_BOOT_NOTIFICATION_TARGET: ShellRect = ShellRect::new(32, 904, 656, 232);
+/// The same boot-local System UI notice where it is rendered on Lock.
+///
+/// A tap remains inert while locked, but a horizontal swipe may dismiss the
+/// canonical SurfaceServer-owned notice. This does not grant navigation,
+/// unlock, application-notification, delivery, sound, or vibration authority.
+pub const LOCK_BOOT_NOTIFICATION_TARGET: ShellRect = ShellRect::new(48, 652, 624, 232);
 pub const SYSTEM_NAV_TOP_PX: u16 = 1_548;
 pub const SYSTEM_HOME_TARGET: ShellRect = ShellRect::new(240, 1_548, 240, 52);
 /// The single honest recent-app identity card shown by Overview.
@@ -155,6 +336,13 @@ pub const SYSTEM_HOME_TARGET: ShellRect = ShellRect::new(240, 1_548, 240, 52);
 /// The Launcher cannot read App pixels, so this target never represents a
 /// framebuffer thumbnail, background task, or killable process card.
 pub const OVERVIEW_RECENT_TARGET: ShellRect = ShellRect::new(48, 424, 624, 760);
+/// Minimum vertical motion before an Overview-card tap becomes a drag.
+pub const OVERVIEW_RECENT_SWIPE_ACTIVATION_PX: u16 = 32;
+/// Upward card travel required to remove the exact recent identity.
+pub const OVERVIEW_RECENT_DISMISS_THRESHOLD_PX: u16 = 224;
+/// Bounded finger-follow travel; the card never escapes the display model.
+pub const OVERVIEW_RECENT_MAX_OFFSET_PX: u16 = 320;
+const OVERVIEW_RECENT_RENDER_QUANTUM_PX: u16 = 8;
 pub const OVERVIEW_GESTURE_COMMIT_PX: u16 = 240;
 pub const OVERVIEW_RENDER_MAX_PX: u16 = 320;
 pub const OVERVIEW_HOME_COMMIT_PX: u16 = 480;
@@ -257,6 +445,91 @@ pub const CALCULATOR_KEY_TARGETS: [ShellRect; 20] = [
 ];
 pub const MESSAGE_GUIDE_TARGET: ShellRect = ShellRect::new(36, 668, 648, 152);
 pub const MESSAGE_OFFLINE_TARGET: ShellRect = ShellRect::new(36, 820, 648, 152);
+
+#[cfg(feature = "mobile-ui-runtime")]
+const STATUS_TIME_DAMAGE: DamageRect = DamageRect {
+    x: 32,
+    y: 12,
+    width: 200,
+    height: 52,
+};
+#[cfg(feature = "mobile-ui-runtime")]
+const HOME_TIME_DAMAGE: DamageRect = DamageRect {
+    x: 32,
+    y: 120,
+    width: 300,
+    height: 152,
+};
+#[cfg(feature = "mobile-ui-runtime")]
+const HOME_DATE_DAMAGE: DamageRect = DamageRect {
+    x: 36,
+    y: 328,
+    width: 648,
+    height: 160,
+};
+#[cfg(feature = "mobile-ui-runtime")]
+const LOCK_TIME_DATE_DAMAGE: DamageRect = DamageRect {
+    x: 96,
+    y: 232,
+    width: 528,
+    height: 212,
+};
+#[cfg(feature = "mobile-ui-runtime")]
+const SHADE_TIME_DATE_DAMAGE: DamageRect = DamageRect {
+    x: 32,
+    y: 96,
+    width: 328,
+    height: 128,
+};
+#[cfg(feature = "mobile-ui-runtime")]
+const LOCK_BOOT_NOTIFICATION_DAMAGE: DamageRect = DamageRect {
+    x: 48,
+    y: 652,
+    width: 624,
+    height: 240,
+};
+#[cfg(feature = "mobile-ui-runtime")]
+const SHADE_BOOT_NOTIFICATION_DAMAGE: DamageRect = DamageRect {
+    x: 32,
+    y: 904,
+    width: 656,
+    height: 240,
+};
+#[cfg(feature = "mobile-ui-runtime")]
+const SHADE_EMPTY_NOTIFICATION_DAMAGE: DamageRect = DamageRect {
+    x: 32,
+    y: 904,
+    width: 656,
+    height: 344,
+};
+#[cfg(feature = "mobile-ui-runtime")]
+const PHONE_NUMBER_DAMAGE: DamageRect = DamageRect {
+    x: 32,
+    y: 240,
+    width: 656,
+    height: 144,
+};
+#[cfg(feature = "mobile-ui-runtime")]
+const CALCULATOR_DISPLAY_DAMAGE: DamageRect = DamageRect {
+    x: 32,
+    y: 192,
+    width: 656,
+    height: 264,
+};
+#[cfg(all(feature = "mobile-ui-runtime", feature = "androidbox-interactive0"))]
+const INSTALLED_ANDROID_LABEL_DAMAGE: DamageRect = DamageRect {
+    x: 68,
+    y: 448,
+    width: 584,
+    height: 176,
+};
+#[cfg(all(feature = "mobile-ui-runtime", feature = "androidbox-interactive0"))]
+const INSTALLED_ANDROID_BUTTON_DAMAGE: DamageRect = DamageRect {
+    x: INSTALLED_ANDROID_BUTTON_TARGET.x,
+    y: INSTALLED_ANDROID_BUTTON_TARGET.y,
+    width: INSTALLED_ANDROID_BUTTON_TARGET.width,
+    height: INSTALLED_ANDROID_BUTTON_TARGET.height,
+};
 pub const SHADE_GESTURE_START_MAX_Y: u16 = 120;
 pub const SHADE_GESTURE_MIN_TRAVEL: u16 = 240;
 /// Maximum visible quick-settings extent, measured in physical scanout pixels.
@@ -582,6 +855,10 @@ pub enum MobilePage {
     Settings,
     Apps,
     About,
+    /// Settings-owned appearance controls and exact display facts.
+    Display,
+    /// Session-wide implemented text-size and contrast preferences.
+    Accessibility,
 }
 
 /// Coarse, UI-facing failure class supplied by the AndroidBox runtime owner.
@@ -1448,9 +1725,13 @@ pub enum MobilePressedTarget {
     Calculator,
     Settings,
     Back,
+    Display,
+    Accessibility,
     Theme,
     Accent,
     SoftwareDimming,
+    LargeText,
+    HighContrast,
     BootNotification,
     Apps,
     #[cfg(feature = "androidbox-runtime-uninstall1")]
@@ -1487,6 +1768,20 @@ pub enum MobilePressedTarget {
     MessageOffline,
 }
 
+/// Exact redraw scope for one transition between two mobile render models.
+///
+/// The planner deliberately recognizes only transient pressed-state changes.
+/// Every semantic, layout, overlay, clock, appearance, or runtime-content
+/// change remains a full-frame update until it has its own independently
+/// verified damage contract.
+#[cfg(feature = "mobile-ui-runtime")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MobileDamagePlan {
+    Unchanged,
+    Regions(DamageRegions),
+    Full,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MobileModel {
     pub page: MobilePage,
@@ -1500,6 +1795,10 @@ pub struct MobileModel {
     /// This changes rendered RGB values only and must not be interpreted as
     /// physical backlight, panel-brightness, power, or persistence state.
     pub software_dimming: UiSoftwareDimming,
+    /// Session-wide two-stop semantic type scale shared through SurfaceServer.
+    pub large_text: bool,
+    /// Session-wide stronger text/outline contrast shared through SurfaceServer.
+    pub high_contrast: bool,
     /// SurfaceServer-session mirror of one fixed boot-local System UI notice.
     ///
     /// This is not a general notification, application-posting, push, sound,
@@ -1518,6 +1817,12 @@ pub struct MobileModel {
     pub system_ui_mode: UiSystemUiMode,
     /// Capacity-one recent identity mirrored from SurfaceServer.
     pub system_ui_recent: Option<UiRecentIdentity>,
+    /// Transient upward finger-follow displacement of the Overview card.
+    ///
+    /// The SurfaceServer-owned recent identity is unchanged until a separate
+    /// authenticated `DismissRecent` request commits. This value grants no
+    /// lifecycle, process, package, or storage authority.
+    pub overview_recent_offset_px: u16,
     /// Authoritative system-navigation contact state. Raw samples beginning in
     /// the bottom system region are consumed by SurfaceServer, not by apps.
     pub system_nav_pressed: bool,
@@ -1661,11 +1966,14 @@ impl Default for MobileModel {
             dark_theme: true,
             alternate_accent: false,
             software_dimming: UiSoftwareDimming::Off,
+            large_text: false,
+            high_contrast: false,
             boot_notification_visible: true,
             boot_notification_expanded: false,
             boot_notification_offset_px: 0,
             system_ui_mode: UiSystemUiMode::Home,
             system_ui_recent: None,
+            overview_recent_offset_px: 0,
             system_nav_pressed: false,
             system_nav_reveal_px: 0,
             system_ui_revision: 1,
@@ -1735,6 +2043,8 @@ impl MobileModel {
             dark_theme: true,
             alternate_accent: false,
             software_dimming: UiSoftwareDimming::Off,
+            large_text: false,
+            high_contrast: false,
             boot_notification_visible: true,
             boot_notification_expanded: false,
             boot_notification_offset_px: 0,
@@ -1749,6 +2059,7 @@ impl MobileModel {
                 UiSystemUiMode::Foreground
             },
             system_ui_recent: None,
+            overview_recent_offset_px: 0,
             system_nav_pressed: false,
             system_nav_reveal_px: 0,
             system_ui_revision: 1,
@@ -1810,11 +2121,40 @@ impl MobileModel {
     }
 
     pub const fn accent(&self) -> u32 {
-        if self.alternate_accent {
-            COLOR_BLUE_ALT
+        mobile_theme_tokens(self.dark_theme, self.alternate_accent, self.high_contrast).accent
+    }
+
+    pub const fn on_accent(&self) -> u32 {
+        mobile_theme_tokens(self.dark_theme, self.alternate_accent, self.high_contrast).on_accent
+    }
+
+    const fn theme_tokens(&self) -> MobileThemeTokens {
+        mobile_theme_tokens(self.dark_theme, self.alternate_accent, self.high_contrast)
+    }
+
+    const fn surface_color(&self, raised: bool) -> u32 {
+        let theme = self.theme_tokens();
+        if raised {
+            theme.surface_raised
         } else {
-            COLOR_BLUE
+            theme.surface
         }
+    }
+
+    const fn outline_color(&self) -> u32 {
+        self.theme_tokens().outline
+    }
+
+    const fn text_primary(&self) -> u32 {
+        self.theme_tokens().text_primary
+    }
+
+    const fn text_secondary(&self) -> u32 {
+        self.theme_tokens().text_secondary
+    }
+
+    const fn text_tertiary(&self) -> u32 {
+        self.theme_tokens().text_tertiary
     }
 
     pub const fn locked() -> Self {
@@ -2544,7 +2884,7 @@ impl MobileModel {
             })
     }
 
-    pub const fn overview_open(self) -> bool {
+    pub const fn overview_open(&self) -> bool {
         matches!(self.system_ui_mode, UiSystemUiMode::Overview)
     }
 
@@ -2584,12 +2924,14 @@ impl MobileModel {
         let nav_released = self.system_nav_pressed && !nav_pressed;
         let mut changed = self.system_ui_mode != mode
             || self.system_ui_recent != recent
+            || self.overview_recent_offset_px != 0
             || self.system_nav_pressed != nav_pressed
             || self.system_nav_reveal_px != nav_reveal_px
             || self.system_ui_revision != revision;
 
         self.system_ui_mode = mode;
         self.system_ui_recent = recent;
+        self.overview_recent_offset_px = 0;
         self.system_nav_pressed = nav_pressed;
         self.system_nav_reveal_px = nav_reveal_px.min(OVERVIEW_HOME_COMMIT_PX);
         self.system_ui_revision = revision;
@@ -2685,7 +3027,7 @@ impl MobileModel {
         changed
     }
 
-    pub const fn effective_overview_reveal_px(self) -> u16 {
+    pub const fn effective_overview_reveal_px(&self) -> u16 {
         if self.overview_open() {
             OVERVIEW_RENDER_MAX_PX
         } else if !matches!(self.system_ui_mode, UiSystemUiMode::Locked) && self.system_nav_pressed
@@ -2698,6 +3040,20 @@ impl MobileModel {
         } else {
             0
         }
+    }
+
+    pub const fn effective_overview_recent_offset_px(&self) -> u16 {
+        if !matches!(self.system_ui_mode, UiSystemUiMode::Overview)
+            || self.system_ui_recent.is_none()
+        {
+            return 0;
+        }
+        let bounded = if self.overview_recent_offset_px > OVERVIEW_RECENT_MAX_OFFSET_PX {
+            OVERVIEW_RECENT_MAX_OFFSET_PX
+        } else {
+            self.overview_recent_offset_px
+        };
+        bounded / OVERVIEW_RECENT_RENDER_QUANTUM_PX * OVERVIEW_RECENT_RENDER_QUANTUM_PX
     }
 
     pub fn phone_number(&self) -> &str {
@@ -2926,14 +3282,16 @@ impl MobileModel {
         }
     }
 
-    pub const fn has_in_app_back(self) -> bool {
-        matches!(self.page, MobilePage::Apps | MobilePage::About)
-            || matches!(self.page, MobilePage::Messages)
-                && !matches!(self.message_view, MessageView::Inbox)
+    pub const fn has_in_app_back(&self) -> bool {
+        matches!(
+            self.page,
+            MobilePage::Apps | MobilePage::About | MobilePage::Display | MobilePage::Accessibility
+        ) || matches!(self.page, MobilePage::Messages)
+            && !matches!(self.message_view, MessageView::Inbox)
     }
 
     /// Returns the visible quick-settings extent in physical scanout pixels.
-    pub const fn effective_shade_reveal_px(self) -> u16 {
+    pub const fn effective_shade_reveal_px(&self) -> u16 {
         if self.shade_reveal_px != 0 {
             if self.shade_reveal_px > SHADE_REVEAL_MAX {
                 SHADE_REVEAL_MAX
@@ -2947,7 +3305,7 @@ impl MobileModel {
         }
     }
 
-    pub const fn effective_drawer_reveal_px(self) -> u16 {
+    pub const fn effective_drawer_reveal_px(&self) -> u16 {
         if self.drawer_reveal_px != 0 {
             if self.drawer_reveal_px > DRAWER_REVEAL_MAX {
                 DRAWER_REVEAL_MAX
@@ -2961,7 +3319,7 @@ impl MobileModel {
         }
     }
 
-    pub const fn effective_back_reveal_px(self) -> u16 {
+    pub const fn effective_back_reveal_px(&self) -> u16 {
         if self.back_reveal_px > BACK_GESTURE_REVEAL_MAX {
             BACK_GESTURE_REVEAL_MAX
         } else {
@@ -2969,7 +3327,7 @@ impl MobileModel {
         }
     }
 
-    pub const fn effective_unlock_reveal_px(self) -> u16 {
+    pub const fn effective_unlock_reveal_px(&self) -> u16 {
         if self.unlock_reveal_px > UNLOCK_REVEAL_MAX {
             UNLOCK_REVEAL_MAX
         } else {
@@ -2977,7 +3335,7 @@ impl MobileModel {
         }
     }
 
-    pub const fn effective_page_transition_offset_px(self) -> u16 {
+    pub const fn effective_page_transition_offset_px(&self) -> u16 {
         if self.page_transition_offset_px > PAGE_TRANSITION_MAX_OFFSET {
             PAGE_TRANSITION_MAX_OFFSET
         } else {
@@ -2986,7 +3344,7 @@ impl MobileModel {
     }
 
     /// Returns the canonical scroll position for the currently visible page.
-    pub const fn effective_page_scroll_offset_px(self) -> u16 {
+    pub const fn effective_page_scroll_offset_px(&self) -> u16 {
         match self.page {
             MobilePage::Settings => {
                 if self.settings_scroll_offset_px > SETTINGS_SCROLL_MAX_PX {
@@ -3008,7 +3366,9 @@ impl MobileModel {
             | MobilePage::Messages
             | MobilePage::Calculator
             | MobilePage::AndroidDemo
-            | MobilePage::About => 0,
+            | MobilePage::About
+            | MobilePage::Display
+            | MobilePage::Accessibility => 0,
         }
     }
 
@@ -3036,6 +3396,13 @@ impl MobileModel {
             clears_boot_notification_offset && self.boot_notification_offset_px != 0;
         if clears_boot_notification_offset {
             self.boot_notification_offset_px = 0;
+        }
+        let clears_overview_recent_offset =
+            !matches!(action, MobileAction::SetOverviewRecentOffset(_));
+        let overview_recent_offset_changed =
+            clears_overview_recent_offset && self.overview_recent_offset_px != 0;
+        if clears_overview_recent_offset {
+            self.overview_recent_offset_px = 0;
         }
         let changed = match action {
             MobileAction::Unlock
@@ -3182,7 +3549,17 @@ impl MobileModel {
             {
                 self.cancel_android_installed_uninstall()
             }
-            MobileAction::Back if matches!(self.page, MobilePage::Apps | MobilePage::About) => {
+            MobileAction::Back if self.page == MobilePage::Accessibility => {
+                self.page = MobilePage::Display;
+                self.pressed_target = None;
+                true
+            }
+            MobileAction::Back
+                if matches!(
+                    self.page,
+                    MobilePage::Apps | MobilePage::About | MobilePage::Display
+                ) =>
+            {
                 self.page = MobilePage::Settings;
                 self.pressed_target = None;
                 true
@@ -3207,6 +3584,16 @@ impl MobileModel {
                 self.software_dimming = level;
                 self.pressed_target = None;
                 changed
+            }
+            MobileAction::ToggleLargeText => {
+                self.large_text = !self.large_text;
+                self.pressed_target = None;
+                true
+            }
+            MobileAction::ToggleHighContrast => {
+                self.high_contrast = !self.high_contrast;
+                self.pressed_target = None;
+                true
             }
             MobileAction::ActivateBootNotification
                 if self.boot_notification_visible
@@ -3391,7 +3778,9 @@ impl MobileModel {
                         | MobilePage::Messages
                         | MobilePage::Calculator
                         | MobilePage::AndroidDemo
-                        | MobilePage::About => false,
+                        | MobilePage::About
+                        | MobilePage::Display
+                        | MobilePage::Accessibility => false,
                     } || self.pressed_target.is_some();
                     self.pressed_target = None;
                     changed
@@ -3432,12 +3821,26 @@ impl MobileModel {
                 changed
             }
             MobileAction::SetBootNotificationOffset(offset_px)
-                if self.boot_notification_visible && self.shade_open =>
+                if self.boot_notification_visible
+                    && (self.shade_open
+                        || (self.page == MobilePage::Lock
+                            && self.shade_reveal_px == 0
+                            && self.unlock_reveal_px == 0)) =>
             {
                 let offset_px = quantize_boot_notification_offset(offset_px);
                 let changed =
                     self.boot_notification_offset_px != offset_px || self.pressed_target.is_some();
                 self.boot_notification_offset_px = offset_px;
+                self.pressed_target = None;
+                changed
+            }
+            MobileAction::SetOverviewRecentOffset(offset_px)
+                if self.overview_open() && self.system_ui_recent.is_some() =>
+            {
+                let offset_px = quantize_overview_recent_offset(offset_px);
+                let changed =
+                    self.overview_recent_offset_px != offset_px || self.pressed_target.is_some();
+                self.overview_recent_offset_px = offset_px;
                 self.pressed_target = None;
                 changed
             }
@@ -3473,11 +3876,13 @@ impl MobileModel {
             MobileAction::Open(_)
             | MobileAction::Unlock
             | MobileAction::ActivateRecentApp
+            | MobileAction::DismissRecentApp
             | MobileAction::CloseOverview
             | MobileAction::OpenDrawer
             | MobileAction::SetDrawerReveal(_)
             | MobileAction::SetUnlockReveal(_)
             | MobileAction::SetBootNotificationOffset(_)
+            | MobileAction::SetOverviewRecentOffset(_)
             | MobileAction::SetPageTransitionOffset(_)
             | MobileAction::SetPageScroll { .. }
             | MobileAction::PhoneKey(_)
@@ -3496,6 +3901,7 @@ impl MobileModel {
             || unlock_feedback_changed
             || page_transition_changed
             || boot_notification_offset_changed
+            || overview_recent_offset_changed
     }
 }
 
@@ -3508,12 +3914,19 @@ pub enum MobileAction {
     /// Request activation of the single SurfaceServer-authenticated recent
     /// ShellAppId from stable Overview.
     ActivateRecentApp,
+    /// Request removal of the exact SurfaceServer-authenticated recent card.
+    /// This does not itself mutate the server-owned record or kill a process.
+    DismissRecentApp,
     /// Request a stable Overview-to-Home transition.
     CloseOverview,
     ToggleTheme,
     ToggleAccent,
     /// Set one of five bounded final-surface software dimming levels.
     SetSoftwareDimming(UiSoftwareDimming),
+    /// Toggle the bounded two-stop semantic font scale.
+    ToggleLargeText,
+    /// Toggle the stronger semantic text/outline contrast palette.
+    ToggleHighContrast,
     /// Activate the fixed boot-local notice. Settings opens its existing
     /// About page; other unlocked pages disclose bounded inline detail.
     ActivateBootNotification,
@@ -3573,6 +3986,8 @@ pub enum MobileAction {
     SetUnlockReveal(u16),
     /// Set signed, quantized horizontal feedback without dismissing.
     SetBootNotificationOffset(i16),
+    /// Set bounded upward Overview-card feedback without removing the record.
+    SetOverviewRecentOffset(u16),
     /// Set the deterministic full-page software-transition offset.
     SetPageTransitionOffset(u16),
     /// Set one bounded Settings/Apps content scroll position.
@@ -3617,6 +4032,9 @@ pub struct TouchController {
     boot_notification_candidate: bool,
     boot_notification_dragged: bool,
     boot_notification_rejected: bool,
+    overview_recent_candidate: bool,
+    overview_recent_dragged: bool,
+    overview_recent_rejected: bool,
     cancelled_until_release: bool,
 }
 
@@ -3645,6 +4063,9 @@ impl TouchController {
             boot_notification_candidate: false,
             boot_notification_dragged: false,
             boot_notification_rejected: false,
+            overview_recent_candidate: false,
+            overview_recent_dragged: false,
+            overview_recent_rejected: false,
             cancelled_until_release: false,
         }
     }
@@ -3681,6 +4102,11 @@ impl TouchController {
                     hit == Some(MobilePressedTarget::BootNotification);
                 self.boot_notification_dragged = false;
                 self.boot_notification_rejected = false;
+                self.overview_recent_candidate = model.overview_open()
+                    && model.system_ui_recent.is_some()
+                    && OVERVIEW_RECENT_TARGET.contains(x, y);
+                self.overview_recent_dragged = false;
+                self.overview_recent_rejected = false;
                 self.unlock_candidate = point_inside_visible_display(x, y)
                     && model.page == MobilePage::Lock
                     && !model.shade_open
@@ -3760,6 +4186,8 @@ impl TouchController {
                 let edge_back_rejected = self.edge_back_rejected;
                 let software_dimming_drag = self.software_dimming_drag;
                 let boot_notification_dragged = self.boot_notification_dragged;
+                let overview_recent_dragged = self.overview_recent_dragged;
+                let overview_recent_rejected = self.overview_recent_rejected;
                 self.shade_dragged = false;
                 self.restore_drawer_after_shade = false;
                 self.drawer_dragged = false;
@@ -3777,6 +4205,9 @@ impl TouchController {
                 self.boot_notification_candidate = false;
                 self.boot_notification_dragged = false;
                 self.boot_notification_rejected = false;
+                self.overview_recent_candidate = false;
+                self.overview_recent_dragged = false;
+                self.overview_recent_rejected = false;
                 if software_dimming_drag {
                     if software_dimming_slider_y_contains(model, y) {
                         let level = software_dimming_for_x(x);
@@ -3804,6 +4235,27 @@ impl TouchController {
                         .then_some(MobileAction::SetBootNotificationOffset(0))
                         .or_else(|| {
                             (signed_travel != 0 && model.pressed_target.is_some())
+                                .then_some(MobileAction::SetPressed(None))
+                        });
+                }
+                if overview_recent_dragged {
+                    let upward_travel = self.start_y.saturating_sub(y);
+                    let release_is_upward = point_inside_visible_display(x, y)
+                        && y < self.start_y
+                        && vertical_travel >= horizontal_travel.saturating_mul(2);
+                    if release_is_upward && upward_travel >= OVERVIEW_RECENT_DISMISS_THRESHOLD_PX {
+                        return Some(MobileAction::DismissRecentApp);
+                    }
+                    return (model.overview_recent_offset_px != 0)
+                        .then_some(MobileAction::SetOverviewRecentOffset(0));
+                }
+                if overview_recent_rejected {
+                    return (model.overview_recent_offset_px != 0)
+                        .then_some(MobileAction::SetOverviewRecentOffset(0))
+                        .or_else(|| {
+                            model
+                                .pressed_target
+                                .is_some()
                                 .then_some(MobileAction::SetPressed(None))
                         });
                 }
@@ -3920,9 +4372,19 @@ impl TouchController {
                     }
                     Some(MobilePressedTarget::Back) => Some(MobileAction::Back),
                     Some(MobilePressedTarget::SystemHome) => Some(MobileAction::Home),
+                    Some(MobilePressedTarget::Display) => {
+                        Some(MobileAction::Open(MobilePage::Display))
+                    }
                     Some(MobilePressedTarget::Theme) => Some(MobileAction::ToggleTheme),
                     Some(MobilePressedTarget::Accent) => Some(MobileAction::ToggleAccent),
                     Some(MobilePressedTarget::SoftwareDimming) => None,
+                    Some(MobilePressedTarget::Accessibility) => {
+                        Some(MobileAction::Open(MobilePage::Accessibility))
+                    }
+                    Some(MobilePressedTarget::LargeText) => Some(MobileAction::ToggleLargeText),
+                    Some(MobilePressedTarget::HighContrast) => {
+                        Some(MobileAction::ToggleHighContrast)
+                    }
                     Some(MobilePressedTarget::BootNotification) => {
                         if model.page == MobilePage::Lock {
                             Some(MobileAction::SetPressed(None))
@@ -4066,6 +4528,52 @@ impl TouchController {
                     // to the settled-shade close gesture below.
                 }
                 if self.boot_notification_rejected {
+                    return None;
+                }
+                if self.overview_recent_dragged {
+                    if !point_inside_visible_display(x, y)
+                        || y >= self.start_y
+                        || upward_travel < horizontal_travel.saturating_mul(2)
+                    {
+                        self.overview_recent_dragged = false;
+                        self.overview_recent_rejected = true;
+                        self.armed = None;
+                        return (model.overview_recent_offset_px != 0)
+                            .then_some(MobileAction::SetOverviewRecentOffset(0));
+                    }
+                    let offset_px = quantize_overview_recent_offset(upward_travel);
+                    if offset_px != model.overview_recent_offset_px {
+                        return Some(MobileAction::SetOverviewRecentOffset(offset_px));
+                    }
+                    return None;
+                }
+                if self.overview_recent_candidate {
+                    if horizontal_travel.max(vertical_travel) < OVERVIEW_RECENT_SWIPE_ACTIVATION_PX
+                    {
+                        return None;
+                    }
+                    if y < self.start_y && upward_travel >= horizontal_travel.saturating_mul(2) {
+                        self.overview_recent_candidate = false;
+                        self.overview_recent_dragged = true;
+                        self.overview_recent_rejected = false;
+                        self.shade_dragged = false;
+                        self.restore_drawer_after_shade = false;
+                        self.drawer_dragged = false;
+                        self.edge_back_candidate = false;
+                        self.edge_back_dragged = false;
+                        self.edge_back_rejected = false;
+                        self.armed = None;
+                        return Some(MobileAction::SetOverviewRecentOffset(upward_travel));
+                    }
+                    self.overview_recent_candidate = false;
+                    self.overview_recent_rejected = true;
+                    self.armed = None;
+                    return model
+                        .pressed_target
+                        .is_some()
+                        .then_some(MobileAction::SetPressed(None));
+                }
+                if self.overview_recent_rejected {
                     return None;
                 }
                 if self.software_dimming_drag {
@@ -4350,6 +4858,9 @@ impl TouchController {
                 self.boot_notification_candidate = false;
                 self.boot_notification_dragged = false;
                 self.boot_notification_rejected = false;
+                self.overview_recent_candidate = false;
+                self.overview_recent_dragged = false;
+                self.overview_recent_rejected = false;
                 model
                     .pressed_target
                     .is_some()
@@ -4371,6 +4882,8 @@ impl TouchController {
             })
         } else if model.boot_notification_offset_px != 0 {
             Some(MobileAction::SetBootNotificationOffset(0))
+        } else if model.overview_recent_offset_px != 0 {
+            Some(MobileAction::SetOverviewRecentOffset(0))
         } else if self.restore_drawer_after_shade {
             Some(MobileAction::OpenDrawer)
         } else if model.shade_reveal_px != 0 {
@@ -4406,7 +4919,9 @@ const fn page_scroll_max_px(page: MobilePage) -> u16 {
         | MobilePage::Messages
         | MobilePage::Calculator
         | MobilePage::AndroidDemo
-        | MobilePage::About => 0,
+        | MobilePage::About
+        | MobilePage::Display
+        | MobilePage::Accessibility => 0,
     }
 }
 
@@ -4440,10 +4955,9 @@ fn software_dimming_slider_y_contains(model: MobileModel, y: u16) -> bool {
     if model.shade_open || model.shade_reveal_px != 0 {
         (688..808).contains(&y)
     } else {
-        model.page == MobilePage::Settings
+        model.page == MobilePage::Display
             && page_scroll_content_y(model, y).is_some_and(|content_y| {
-                (SETTINGS_DIMMING_TARGET.y
-                    ..SETTINGS_DIMMING_TARGET.y + SETTINGS_DIMMING_TARGET.height)
+                (DISPLAY_DIMMING_TARGET.y..DISPLAY_DIMMING_TARGET.y + DISPLAY_DIMMING_TARGET.height)
                     .contains(&content_y)
             })
     }
@@ -4654,6 +5168,15 @@ const fn quantize_boot_notification_offset(offset_px: i16) -> i16 {
     };
     let quantum = BOOT_NOTIFICATION_RENDER_QUANTUM_PX as i32;
     (sign * (bounded / quantum * quantum)) as i16
+}
+
+const fn quantize_overview_recent_offset(offset_px: u16) -> u16 {
+    let bounded = if offset_px > OVERVIEW_RECENT_MAX_OFFSET_PX {
+        OVERVIEW_RECENT_MAX_OFFSET_PX
+    } else {
+        offset_px
+    };
+    bounded / OVERVIEW_RECENT_RENDER_QUANTUM_PX * OVERVIEW_RECENT_RENDER_QUANTUM_PX
 }
 
 fn edge_back_available(model: MobileModel) -> bool {
@@ -5274,6 +5797,665 @@ fn installed_android_scene_button_target(model: MobileModel, button_id: u32) -> 
     ))
 }
 
+#[cfg(feature = "mobile-ui-runtime")]
+fn clipped_damage_rect(
+    x: i32,
+    y: i32,
+    width: u16,
+    height: u16,
+    clip: ShellRect,
+) -> Option<DamageRect> {
+    let right = x.checked_add(i32::from(width))?;
+    let bottom = y.checked_add(i32::from(height))?;
+    let clip_right = clip.x.checked_add(clip.width)?;
+    let clip_bottom = clip.y.checked_add(clip.height)?;
+    let left = x.max(i32::from(clip.x));
+    let top = y.max(i32::from(clip.y));
+    let right = right.min(i32::from(clip_right));
+    let bottom = bottom.min(i32::from(clip_bottom));
+    if left >= right || top >= bottom {
+        return None;
+    }
+    Some(DamageRect {
+        x: u16::try_from(left).ok()?,
+        y: u16::try_from(top).ok()?,
+        width: u16::try_from(right - left).ok()?,
+        height: u16::try_from(bottom - top).ok()?,
+    })
+}
+
+#[cfg(feature = "mobile-ui-runtime")]
+fn shell_target_damage(target: ShellRect) -> Option<DamageRect> {
+    clipped_damage_rect(
+        i32::from(target.x),
+        i32::from(target.y),
+        target.width,
+        target.height,
+        ShellRect::new(0, 0, WIDTH as u16, HEIGHT as u16),
+    )
+}
+
+#[cfg(feature = "mobile-ui-runtime")]
+fn scrolling_page_target_damage(model: MobileModel, target: ShellRect) -> Option<DamageRect> {
+    clipped_damage_rect(
+        i32::from(target.x),
+        i32::from(target.y) - i32::from(model.effective_page_scroll_offset_px()),
+        target.width,
+        target.height,
+        ShellRect::new(
+            0,
+            PAGE_SCROLL_VIEWPORT_TOP_PX,
+            WIDTH as u16,
+            PAGE_SCROLL_VIEWPORT_BOTTOM_PX - PAGE_SCROLL_VIEWPORT_TOP_PX,
+        ),
+    )
+}
+
+#[cfg(feature = "mobile-ui-runtime")]
+fn stable_page_is(model: MobileModel, page: MobilePage) -> bool {
+    model.page == page
+        && model.effective_page_transition_offset_px() == 0
+        && model.effective_overview_reveal_px() == 0
+        && model.effective_drawer_reveal_px() == 0
+        && model.effective_shade_reveal_px() == 0
+        && model.effective_back_reveal_px() == 0
+        && model.effective_unlock_reveal_px() == 0
+}
+
+#[cfg(feature = "mobile-ui-runtime")]
+fn stable_shade_is_open(model: MobileModel) -> bool {
+    model.shade_open
+        && model.shade_reveal_px == 0
+        && model.effective_shade_reveal_px() == SHADE_REVEAL_MAX
+}
+
+#[cfg(feature = "mobile-ui-runtime")]
+fn stable_drawer_is_open(model: MobileModel) -> bool {
+    model.page == MobilePage::Home
+        && model.drawer_open
+        && model.drawer_reveal_px == 0
+        && model.effective_drawer_reveal_px() == DRAWER_REVEAL_MAX
+        && model.effective_shade_reveal_px() == 0
+        && model.effective_overview_reveal_px() == 0
+}
+
+#[cfg(feature = "mobile-ui-runtime")]
+fn pressed_target_damage(model: MobileModel, target: MobilePressedTarget) -> Option<DamageRect> {
+    let fixed = |target| shell_target_damage(target);
+    match target {
+        MobilePressedTarget::SystemHome => fixed(SYSTEM_HOME_TARGET),
+        MobilePressedTarget::OverviewRecent
+            if model.overview_open()
+                && model.effective_shade_reveal_px() == 0
+                && model.effective_drawer_reveal_px() == 0 =>
+        {
+            fixed(OVERVIEW_RECENT_TARGET)
+        }
+        // OverviewBackground intentionally has no visual pressed feedback.
+        // A valid, in-bounds no-op rectangle preserves the single-rectangle
+        // wire contract without repainting an unrelated component.
+        MobilePressedTarget::OverviewBackground => Some(DamageRect {
+            x: WIDTH as u16 / 2,
+            y: HEIGHT as u16 / 2,
+            width: 1,
+            height: 1,
+        }),
+        MobilePressedTarget::Phone if stable_page_is(model, MobilePage::Home) => {
+            fixed(HOME_PHONE_TARGET)
+        }
+        MobilePressedTarget::Messages if stable_page_is(model, MobilePage::Home) => {
+            fixed(HOME_MESSAGES_TARGET)
+        }
+        MobilePressedTarget::Calculator if stable_page_is(model, MobilePage::Home) => {
+            fixed(HOME_CALCULATOR_TARGET)
+        }
+        MobilePressedTarget::Settings if stable_page_is(model, MobilePage::Home) => {
+            fixed(HOME_SETTINGS_TARGET)
+        }
+        MobilePressedTarget::Back
+            if matches!(
+                model.page,
+                MobilePage::Phone
+                    | MobilePage::Messages
+                    | MobilePage::Calculator
+                    | MobilePage::AndroidDemo
+                    | MobilePage::Settings
+                    | MobilePage::Apps
+                    | MobilePage::About
+                    | MobilePage::Display
+                    | MobilePage::Accessibility
+            ) && stable_page_is(model, model.page) =>
+        {
+            fixed(APP_BACK_TARGET)
+        }
+        MobilePressedTarget::Display if stable_page_is(model, MobilePage::Settings) => {
+            scrolling_page_target_damage(model, SETTINGS_DISPLAY_TARGET)
+        }
+        MobilePressedTarget::Theme if stable_shade_is_open(model) => fixed(QUICK_THEME_TARGET),
+        MobilePressedTarget::Theme if stable_page_is(model, MobilePage::Display) => {
+            fixed(DISPLAY_THEME_TARGET)
+        }
+        MobilePressedTarget::Accent if stable_shade_is_open(model) => fixed(QUICK_ACCENT_TARGET),
+        MobilePressedTarget::Accent if stable_page_is(model, MobilePage::Display) => {
+            fixed(DISPLAY_ACCENT_TARGET)
+        }
+        MobilePressedTarget::SoftwareDimming if stable_shade_is_open(model) => {
+            fixed(QUICK_DIMMING_TARGET)
+        }
+        MobilePressedTarget::SoftwareDimming if stable_page_is(model, MobilePage::Display) => {
+            fixed(DISPLAY_DIMMING_TARGET)
+        }
+        MobilePressedTarget::Accessibility if stable_page_is(model, MobilePage::Display) => {
+            fixed(DISPLAY_ACCESSIBILITY_TARGET)
+        }
+        MobilePressedTarget::LargeText if stable_page_is(model, MobilePage::Accessibility) => {
+            fixed(ACCESSIBILITY_LARGE_TEXT_TARGET)
+        }
+        MobilePressedTarget::HighContrast if stable_page_is(model, MobilePage::Accessibility) => {
+            fixed(ACCESSIBILITY_HIGH_CONTRAST_TARGET)
+        }
+        MobilePressedTarget::BootNotification
+            if model.boot_notification_visible
+                && (stable_shade_is_open(model) || stable_page_is(model, MobilePage::Lock)) =>
+        {
+            // The renderer translates on the 2x design grid, so odd manual
+            // offsets (normal input is quantized) intentionally round toward
+            // zero in exactly the same way here.
+            let visual_offset = i32::from(model.boot_notification_offset_px) / SCALE * SCALE;
+            let target = if stable_shade_is_open(model) {
+                QUICK_BOOT_NOTIFICATION_TARGET
+            } else {
+                LOCK_BOOT_NOTIFICATION_TARGET
+            };
+            clipped_damage_rect(
+                i32::from(target.x) + visual_offset,
+                i32::from(target.y),
+                target.width,
+                target.height,
+                ShellRect::new(0, 0, WIDTH as u16, HEIGHT as u16),
+            )
+        }
+        MobilePressedTarget::Apps if stable_page_is(model, MobilePage::Settings) => {
+            scrolling_page_target_damage(model, SETTINGS_APPS_TARGET)
+        }
+        #[cfg(feature = "androidbox-runtime-uninstall1")]
+        MobilePressedTarget::AppsUninstall if stable_page_is(model, MobilePage::Apps) => {
+            scrolling_page_target_damage(model, APPS_UNINSTALL_TARGET)
+        }
+        #[cfg(feature = "androidbox-runtime-uninstall1")]
+        MobilePressedTarget::AppsUninstallCancel if stable_page_is(model, MobilePage::Apps) => {
+            fixed(APPS_UNINSTALL_CANCEL_TARGET)
+        }
+        #[cfg(feature = "androidbox-runtime-uninstall1")]
+        MobilePressedTarget::AppsUninstallConfirm if stable_page_is(model, MobilePage::Apps) => {
+            fixed(APPS_UNINSTALL_CONFIRM_TARGET)
+        }
+        #[cfg(feature = "androidbox-runtime-install2")]
+        MobilePressedTarget::AppsInstall if stable_page_is(model, MobilePage::Apps) => {
+            scrolling_page_target_damage(
+                model,
+                if model.android_installed_app.installed {
+                    APPS_UPDATE_TARGET
+                } else {
+                    APPS_INSTALL_TARGET
+                },
+            )
+        }
+        #[cfg(feature = "androidbox-runtime-install2")]
+        MobilePressedTarget::AppsInstallCancel if stable_page_is(model, MobilePage::Apps) => {
+            fixed(APPS_INSTALL_CANCEL_TARGET)
+        }
+        #[cfg(feature = "androidbox-runtime-install2")]
+        MobilePressedTarget::AppsInstallConfirm if stable_page_is(model, MobilePage::Apps) => {
+            fixed(APPS_INSTALL_CONFIRM_TARGET)
+        }
+        #[cfg(feature = "androidbox-multipackage4")]
+        MobilePressedTarget::AppsInstalledAndroid(index)
+            if stable_page_is(model, MobilePage::Apps) =>
+        {
+            let target = match index {
+                0 => APPS_INSTALLED_FIRST_TARGET,
+                1 => APPS_INSTALLED_SECOND_TARGET,
+                _ => return None,
+            };
+            scrolling_page_target_damage(model, target)
+        }
+        MobilePressedTarget::About if stable_page_is(model, MobilePage::Settings) => {
+            scrolling_page_target_damage(model, SETTINGS_ABOUT_TARGET)
+        }
+        MobilePressedTarget::DrawerPhone if stable_drawer_is_open(model) => {
+            fixed(DRAWER_PHONE_TARGET)
+        }
+        MobilePressedTarget::DrawerMessages if stable_drawer_is_open(model) => {
+            fixed(DRAWER_MESSAGES_TARGET)
+        }
+        MobilePressedTarget::DrawerCalculator if stable_drawer_is_open(model) => {
+            fixed(DRAWER_CALCULATOR_TARGET)
+        }
+        MobilePressedTarget::DrawerSettings if stable_drawer_is_open(model) => {
+            fixed(DRAWER_SETTINGS_TARGET)
+        }
+        MobilePressedTarget::DrawerAndroidBoxDemo
+            if stable_drawer_is_open(model) && drawer_android_pressed_target(model) == target =>
+        {
+            fixed(DRAWER_ANDROIDBOX_TARGET)
+        }
+        MobilePressedTarget::DrawerInstalledAndroid(_)
+            if stable_drawer_is_open(model) && drawer_android_pressed_target(model) == target =>
+        {
+            fixed(DRAWER_ANDROIDBOX_TARGET)
+        }
+        #[cfg(feature = "androidbox-multipackage4")]
+        MobilePressedTarget::DrawerInstalledAndroid(2) if stable_drawer_is_open(model) => {
+            fixed(DRAWER_ANDROIDBOX_SECOND_TARGET)
+        }
+        MobilePressedTarget::DrawerHandle if stable_drawer_is_open(model) => {
+            fixed(DRAWER_HANDLE_TARGET)
+        }
+        MobilePressedTarget::DrawerHome if stable_drawer_is_open(model) => {
+            fixed(DRAWER_HOME_TARGET)
+        }
+        MobilePressedTarget::AndroidBoxExecute
+            if stable_page_is(model, MobilePage::AndroidDemo) =>
+        {
+            fixed(ANDROIDBOX_EXECUTE_TARGET)
+        }
+        #[cfg(feature = "androidbox-interactive0")]
+        MobilePressedTarget::InstalledAndroidButton(button_id)
+            if stable_page_is(model, MobilePage::AndroidDemo) =>
+        {
+            #[cfg(feature = "androidbox-scene-rpc2")]
+            if let Some(target) = installed_android_scene_button_target(model, button_id) {
+                return fixed(target);
+            }
+            if model.installed_android_foreground_content_ready()
+                && model.android_installed_activity_view.is_active()
+                && model.android_installed_activity_view.button_view_id() == button_id
+            {
+                fixed(INSTALLED_ANDROID_BUTTON_TARGET)
+            } else {
+                None
+            }
+        }
+        MobilePressedTarget::ShadeClose if stable_shade_is_open(model) => fixed(QUICK_CLOSE_TARGET),
+        MobilePressedTarget::PhoneKey(index) if stable_page_is(model, MobilePage::Phone) => {
+            PHONE_KEY_TARGETS
+                .get(usize::from(index))
+                .copied()
+                .and_then(fixed)
+        }
+        MobilePressedTarget::PhoneBackspace if stable_page_is(model, MobilePage::Phone) => {
+            fixed(PHONE_BACKSPACE_TARGET)
+        }
+        MobilePressedTarget::CalculatorKey(index)
+            if stable_page_is(model, MobilePage::Calculator) =>
+        {
+            CALCULATOR_KEY_TARGETS
+                .get(usize::from(index))
+                .copied()
+                .and_then(fixed)
+        }
+        MobilePressedTarget::MessageGuide if stable_page_is(model, MobilePage::Messages) => {
+            fixed(MESSAGE_GUIDE_TARGET)
+        }
+        MobilePressedTarget::MessageOffline if stable_page_is(model, MobilePage::Messages) => {
+            fixed(MESSAGE_OFFLINE_TARGET)
+        }
+        _ => None,
+    }
+}
+
+#[cfg(feature = "mobile-ui-runtime")]
+fn plan_damage_regions(candidates: &[Option<DamageRect>]) -> MobileDamagePlan {
+    let mut rects = [DamageRect::EMPTY; 2];
+    let mut count = 0_usize;
+    for candidate in candidates.iter().flatten().copied() {
+        let mut merged = false;
+        let mut index = 0_usize;
+        while index < count {
+            if rects[index].intersects(candidate) {
+                rects[index] = rects[index].union(candidate);
+                merged = true;
+                break;
+            }
+            index += 1;
+        }
+        if !merged {
+            if count == rects.len() {
+                return MobileDamagePlan::Full;
+            }
+            rects[count] = candidate;
+            count += 1;
+        }
+        if count == 2 && rects[0].intersects(rects[1]) {
+            rects[0] = rects[0].union(rects[1]);
+            rects[1] = DamageRect::EMPTY;
+            count = 1;
+        }
+    }
+    if count == 0 {
+        return MobileDamagePlan::Unchanged;
+    }
+    DamageRegions::try_new(&rects[..count])
+        .map(MobileDamagePlan::Regions)
+        .unwrap_or(MobileDamagePlan::Full)
+}
+
+#[cfg(feature = "mobile-ui-runtime")]
+fn clock_damage_plan(previous: MobileModel, current: MobileModel) -> Option<MobileDamagePlan> {
+    let mut previous_without_time = previous;
+    previous_without_time.time = current.time;
+    if previous_without_time != current {
+        return None;
+    }
+    if !stable_page_is(current, current.page) && !stable_shade_is_open(current) {
+        return Some(MobileDamagePlan::Full);
+    }
+
+    let time_changed = previous.time.time_text().as_str() != current.time.time_text().as_str();
+    let short_date_changed =
+        previous.time.short_date_text().as_str() != current.time.short_date_text().as_str();
+    let long_date_changed =
+        previous.time.long_date_text().as_str() != current.time.long_date_text().as_str();
+    if !time_changed && !short_date_changed && !long_date_changed {
+        return Some(MobileDamagePlan::Unchanged);
+    }
+    let status = time_changed.then_some(STATUS_TIME_DAMAGE);
+    if stable_shade_is_open(current) {
+        let shade = (time_changed || short_date_changed).then_some(SHADE_TIME_DATE_DAMAGE);
+        return Some(plan_damage_regions(&[status, shade]));
+    }
+    match current.page {
+        MobilePage::Home => {
+            let content = match (time_changed, long_date_changed) {
+                (true, true) => Some(HOME_TIME_DAMAGE.union(HOME_DATE_DAMAGE)),
+                (true, false) => Some(HOME_TIME_DAMAGE),
+                (false, true) => Some(HOME_DATE_DAMAGE),
+                (false, false) => None,
+            };
+            Some(plan_damage_regions(&[status, content]))
+        }
+        MobilePage::Lock => {
+            let lock = (time_changed || long_date_changed).then_some(LOCK_TIME_DATE_DAMAGE);
+            Some(plan_damage_regions(&[status, lock]))
+        }
+        _ => Some(plan_damage_regions(&[status])),
+    }
+}
+
+#[cfg(feature = "mobile-ui-runtime")]
+fn phone_damage_plan(previous: MobileModel, current: MobileModel) -> Option<MobileDamagePlan> {
+    if !stable_page_is(previous, MobilePage::Phone) || !stable_page_is(current, MobilePage::Phone) {
+        return None;
+    }
+    let digits_changed = previous.phone_digits != current.phone_digits
+        || previous.phone_digit_count != current.phone_digit_count;
+    let mut normalized = previous;
+    normalized.phone_digits = current.phone_digits;
+    normalized.phone_digit_count = current.phone_digit_count;
+    normalized.pressed_target = current.pressed_target;
+    if normalized != current
+        || (!digits_changed && previous.pressed_target == current.pressed_target)
+    {
+        return None;
+    }
+    let base = MobileModel {
+        pressed_target: None,
+        ..current
+    };
+    let previous_press = match previous.pressed_target {
+        Some(target) => Some(pressed_target_damage(base, target)?),
+        None => None,
+    };
+    let current_press = match current.pressed_target {
+        Some(target) => Some(pressed_target_damage(base, target)?),
+        None => None,
+    };
+    Some(plan_damage_regions(&[
+        previous_press,
+        current_press,
+        digits_changed.then_some(PHONE_NUMBER_DAMAGE),
+    ]))
+}
+
+#[cfg(feature = "mobile-ui-runtime")]
+fn calculator_damage_plan(previous: MobileModel, current: MobileModel) -> Option<MobileDamagePlan> {
+    if !stable_page_is(previous, MobilePage::Calculator)
+        || !stable_page_is(current, MobilePage::Calculator)
+    {
+        return None;
+    }
+    let semantic_changed = previous.calculator_value != current.calculator_value
+        || previous.calculator_accumulator != current.calculator_accumulator
+        || previous.calculator_pending != current.calculator_pending
+        || previous.calculator_entering != current.calculator_entering
+        || previous.calculator_decimal_entered != current.calculator_decimal_entered
+        || previous.calculator_fraction_digits != current.calculator_fraction_digits
+        || previous.calculator_negative_zero != current.calculator_negative_zero
+        || previous.calculator_error != current.calculator_error;
+    let mut normalized = previous;
+    normalized.calculator_value = current.calculator_value;
+    normalized.calculator_accumulator = current.calculator_accumulator;
+    normalized.calculator_pending = current.calculator_pending;
+    normalized.calculator_entering = current.calculator_entering;
+    normalized.calculator_decimal_entered = current.calculator_decimal_entered;
+    normalized.calculator_fraction_digits = current.calculator_fraction_digits;
+    normalized.calculator_negative_zero = current.calculator_negative_zero;
+    normalized.calculator_error = current.calculator_error;
+    normalized.pressed_target = current.pressed_target;
+    if normalized != current
+        || (!semantic_changed && previous.pressed_target == current.pressed_target)
+    {
+        return None;
+    }
+    let base = MobileModel {
+        pressed_target: None,
+        ..current
+    };
+    let previous_press = match previous.pressed_target {
+        Some(target) => Some(pressed_target_damage(base, target)?),
+        None => None,
+    };
+    let current_press = match current.pressed_target {
+        Some(target) => Some(pressed_target_damage(base, target)?),
+        None => None,
+    };
+    Some(plan_damage_regions(&[
+        previous_press,
+        current_press,
+        semantic_changed.then_some(CALCULATOR_DISPLAY_DAMAGE),
+    ]))
+}
+
+#[cfg(feature = "mobile-ui-runtime")]
+fn boot_notification_visual_damage(model: MobileModel, on_shade: bool) -> DamageRect {
+    let base = if on_shade {
+        if model.boot_notification_visible {
+            SHADE_BOOT_NOTIFICATION_DAMAGE
+        } else {
+            SHADE_EMPTY_NOTIFICATION_DAMAGE
+        }
+    } else {
+        LOCK_BOOT_NOTIFICATION_DAMAGE
+    };
+    if !model.boot_notification_visible || model.boot_notification_offset_px == 0 {
+        return base;
+    }
+    // The renderer moves on the 2x design grid. Include both the fixed reveal
+    // underlay and the clipped translated card/shadow so partial repainting
+    // removes every old pixel without expanding to the full scanout.
+    let visual_offset = i32::from(model.boot_notification_offset_px) / SCALE * SCALE;
+    let shifted = clipped_damage_rect(
+        i32::from(base.x) + visual_offset,
+        i32::from(base.y),
+        base.width,
+        base.height,
+        ShellRect::new(0, 0, WIDTH as u16, HEIGHT as u16),
+    );
+    shifted.map_or(base, |shifted| base.union(shifted))
+}
+
+#[cfg(feature = "mobile-ui-runtime")]
+fn boot_notification_damage_plan(
+    previous: MobileModel,
+    current: MobileModel,
+) -> Option<MobileDamagePlan> {
+    let semantic_changed = previous.boot_notification_visible != current.boot_notification_visible
+        || previous.boot_notification_expanded != current.boot_notification_expanded
+        || previous.boot_notification_offset_px != current.boot_notification_offset_px;
+    if !semantic_changed {
+        return None;
+    }
+    let mut normalized = previous;
+    normalized.boot_notification_visible = current.boot_notification_visible;
+    normalized.boot_notification_expanded = current.boot_notification_expanded;
+    normalized.boot_notification_offset_px = current.boot_notification_offset_px;
+    normalized.pressed_target = current.pressed_target;
+    if normalized != current {
+        return None;
+    }
+
+    let previous_on_shade = stable_shade_is_open(previous);
+    let current_on_shade = stable_shade_is_open(current);
+    let previous_on_lock = stable_page_is(previous, MobilePage::Lock);
+    let current_on_lock = stable_page_is(current, MobilePage::Lock);
+    if previous_on_shade != current_on_shade || previous_on_lock != current_on_lock {
+        return None;
+    }
+    if previous_on_shade {
+        return Some(plan_damage_regions(&[
+            Some(boot_notification_visual_damage(previous, true)),
+            Some(boot_notification_visual_damage(current, true)),
+        ]));
+    }
+    if previous_on_lock {
+        return Some(plan_damage_regions(&[
+            Some(boot_notification_visual_damage(previous, false)),
+            Some(boot_notification_visual_damage(current, false)),
+        ]));
+    }
+    // The canonical state still changes while ordinary Home/App pages render
+    // no notification pixels. Avoid manufacturing a visual transaction.
+    Some(MobileDamagePlan::Unchanged)
+}
+
+#[cfg(all(feature = "mobile-ui-runtime", feature = "androidbox-interactive0"))]
+fn installed_activity_damage_plan(
+    previous: MobileModel,
+    current: MobileModel,
+) -> Option<MobileDamagePlan> {
+    if !stable_page_is(previous, MobilePage::AndroidDemo)
+        || !stable_page_is(current, MobilePage::AndroidDemo)
+        || !previous.installed_android_foreground_content_ready()
+        || !current.installed_android_foreground_content_ready()
+        || !previous.android_installed_activity_view.is_active()
+        || !current.android_installed_activity_view.is_active()
+    {
+        return None;
+    }
+    #[cfg(feature = "androidbox-scene-rpc2")]
+    if previous.android_installed_activity_scene.is_active()
+        || current.android_installed_activity_scene.is_active()
+    {
+        return None;
+    }
+
+    let view_changed =
+        previous.android_installed_activity_view != current.android_installed_activity_view;
+    let mut normalized = previous;
+    normalized.android_installed_activity_view = current.android_installed_activity_view;
+    normalized.pressed_target = current.pressed_target;
+    if normalized != current || (!view_changed && previous.pressed_target == current.pressed_target)
+    {
+        return None;
+    }
+
+    let base = MobileModel {
+        pressed_target: None,
+        ..current
+    };
+    let previous_press = match previous.pressed_target {
+        Some(target) => Some(pressed_target_damage(base, target)?),
+        None => None,
+    };
+    let current_press = match current.pressed_target {
+        Some(target) => Some(pressed_target_damage(base, target)?),
+        None => None,
+    };
+    Some(plan_damage_regions(&[
+        previous_press,
+        current_press,
+        view_changed.then_some(INSTALLED_ANDROID_LABEL_DAMAGE),
+        view_changed.then_some(INSTALLED_ANDROID_BUTTON_DAMAGE),
+    ]))
+}
+
+/// Plans the smallest verified set of at most two physical regions for one
+/// mobile model transition. Unsupported combinations fail safely to `Full`.
+#[cfg(feature = "mobile-ui-runtime")]
+pub fn damage_plan(previous: Option<MobileModel>, current: MobileModel) -> MobileDamagePlan {
+    let Some(previous) = previous else {
+        return MobileDamagePlan::Full;
+    };
+    if previous == current {
+        return MobileDamagePlan::Unchanged;
+    }
+    if let Some(plan) = clock_damage_plan(previous, current) {
+        return plan;
+    }
+    if let Some(plan) = phone_damage_plan(previous, current) {
+        return plan;
+    }
+    if let Some(plan) = calculator_damage_plan(previous, current) {
+        return plan;
+    }
+    if let Some(plan) = boot_notification_damage_plan(previous, current) {
+        return plan;
+    }
+    #[cfg(feature = "androidbox-scene-rpc2")]
+    if let Some(plan) = raster::installed_scene_damage_plan(previous, current) {
+        return plan;
+    }
+    #[cfg(feature = "androidbox-interactive0")]
+    if let Some(plan) = installed_activity_damage_plan(previous, current) {
+        return plan;
+    }
+    if previous.pressed_target == current.pressed_target {
+        return MobileDamagePlan::Full;
+    }
+
+    let mut previous_without_press = previous;
+    let mut current_without_press = current;
+    previous_without_press.pressed_target = None;
+    current_without_press.pressed_target = None;
+    if previous_without_press != current_without_press {
+        return MobileDamagePlan::Full;
+    }
+
+    let previous_damage = previous
+        .pressed_target
+        .and_then(|target| pressed_target_damage(current_without_press, target));
+    let current_damage = current
+        .pressed_target
+        .and_then(|target| pressed_target_damage(current_without_press, target));
+    match (
+        previous.pressed_target,
+        previous_damage,
+        current.pressed_target,
+        current_damage,
+    ) {
+        (Some(_), None, _, _) | (_, _, Some(_), None) => MobileDamagePlan::Full,
+        (Some(_), Some(previous), Some(_), Some(current)) => {
+            plan_damage_regions(&[Some(previous), Some(current)])
+        }
+        (Some(_), Some(damage), None, None) | (None, None, Some(_), Some(damage)) => {
+            plan_damage_regions(&[Some(damage)])
+        }
+        (None, None, None, None) => MobileDamagePlan::Unchanged,
+        _ => MobileDamagePlan::Full,
+    }
+}
+
 fn hit_test(model: MobileModel, x: u16, y: u16) -> Option<MobilePressedTarget> {
     if !point_inside_visible_display(x, y) {
         return None;
@@ -5345,13 +6527,28 @@ fn hit_test(model: MobileModel, x: u16, y: u16) -> Option<MobilePressedTarget> {
         if recent_is_activatable && OVERVIEW_RECENT_TARGET.contains(x, y) {
             return Some(MobilePressedTarget::OverviewRecent);
         }
-        // Preserve the existing left-edge Back gesture by leaving its narrow
-        // start strip unarmed. A short tap elsewhere on the system sheet
-        // returns Home; the empty identity card itself remains inert.
-        if x >= BACK_GESTURE_START_MAX_X && !OVERVIEW_RECENT_TARGET.contains(x, y) {
+        // Preserve both system-edge gestures before arming the Overview
+        // background: the left strip belongs to Back, while the top strip is
+        // reserved for the shade. In particular, a top-edge down must not
+        // schedule a pointless Overview-background pressed frame before the
+        // first downward sample arrives; doing so can put the real shade
+        // gesture behind an unrelated client present. A short tap elsewhere
+        // on the system sheet returns Home; the empty identity card itself
+        // remains inert.
+        if x >= BACK_GESTURE_START_MAX_X
+            && y >= SHADE_GESTURE_START_MAX_Y
+            && !OVERVIEW_RECENT_TARGET.contains(x, y)
+        {
             return Some(MobilePressedTarget::OverviewBackground);
         }
         return None;
+    }
+    if model.page == MobilePage::Lock
+        && model.effective_unlock_reveal_px() == 0
+        && model.boot_notification_visible
+        && LOCK_BOOT_NOTIFICATION_TARGET.contains(x, y)
+    {
+        return Some(MobilePressedTarget::BootNotification);
     }
     #[cfg(feature = "androidbox-runtime-install2")]
     if model.page == MobilePage::Apps {
@@ -5469,20 +6666,36 @@ fn hit_test(model: MobileModel, x: u16, y: u16) -> Option<MobilePressedTarget> {
             Some(MobilePressedTarget::MessageOffline)
         }
         MobilePage::Settings if APP_BACK_TARGET.contains(x, y) => Some(MobilePressedTarget::Back),
-        MobilePage::Settings if SETTINGS_THEME_TARGET.contains(x, page_content_y) => {
-            Some(MobilePressedTarget::Theme)
-        }
-        MobilePage::Settings if SETTINGS_ACCENT_TARGET.contains(x, page_content_y) => {
-            Some(MobilePressedTarget::Accent)
-        }
-        MobilePage::Settings if SETTINGS_DIMMING_TARGET.contains(x, page_content_y) => {
-            Some(MobilePressedTarget::SoftwareDimming)
+        MobilePage::Settings if SETTINGS_DISPLAY_TARGET.contains(x, page_content_y) => {
+            Some(MobilePressedTarget::Display)
         }
         MobilePage::Settings if SETTINGS_APPS_TARGET.contains(x, page_content_y) => {
             Some(MobilePressedTarget::Apps)
         }
         MobilePage::Settings if SETTINGS_ABOUT_TARGET.contains(x, page_content_y) => {
             Some(MobilePressedTarget::About)
+        }
+        MobilePage::Display if APP_BACK_TARGET.contains(x, y) => Some(MobilePressedTarget::Back),
+        MobilePage::Display if DISPLAY_THEME_TARGET.contains(x, y) => {
+            Some(MobilePressedTarget::Theme)
+        }
+        MobilePage::Display if DISPLAY_ACCENT_TARGET.contains(x, y) => {
+            Some(MobilePressedTarget::Accent)
+        }
+        MobilePage::Display if DISPLAY_DIMMING_TARGET.contains(x, y) => {
+            Some(MobilePressedTarget::SoftwareDimming)
+        }
+        MobilePage::Display if DISPLAY_ACCESSIBILITY_TARGET.contains(x, y) => {
+            Some(MobilePressedTarget::Accessibility)
+        }
+        MobilePage::Accessibility if APP_BACK_TARGET.contains(x, y) => {
+            Some(MobilePressedTarget::Back)
+        }
+        MobilePage::Accessibility if ACCESSIBILITY_LARGE_TEXT_TARGET.contains(x, y) => {
+            Some(MobilePressedTarget::LargeText)
+        }
+        MobilePage::Accessibility if ACCESSIBILITY_HIGH_CONTRAST_TARGET.contains(x, y) => {
+            Some(MobilePressedTarget::HighContrast)
         }
         #[cfg(feature = "androidbox-multipackage4")]
         MobilePage::Apps
@@ -5565,6 +6778,7 @@ fn apps_package_selection_is_available(model: MobileModel) -> bool {
 pub enum RenderError {
     WrongPixelCount,
     InvalidRowRange,
+    InvalidDamageRect,
 }
 
 /// Minimal SurfaceServer-owned state needed to rasterize trusted mobile chrome.
@@ -5579,6 +6793,8 @@ pub struct MobileSystemChromeState {
     dark_theme: bool,
     alternate_accent: bool,
     software_dimming: UiSoftwareDimming,
+    large_text: bool,
+    high_contrast: bool,
     nav_pressed: bool,
 }
 
@@ -5589,6 +6805,8 @@ impl MobileSystemChromeState {
         dark_theme: bool,
         alternate_accent: bool,
         software_dimming: UiSoftwareDimming,
+        large_text: bool,
+        high_contrast: bool,
         nav_pressed: bool,
     ) -> Self {
         Self {
@@ -5596,6 +6814,8 @@ impl MobileSystemChromeState {
             dark_theme,
             alternate_accent,
             software_dimming,
+            large_text,
+            high_contrast,
             nav_pressed,
         }
     }
@@ -5614,6 +6834,14 @@ impl MobileSystemChromeState {
 
     pub const fn software_dimming(self) -> UiSoftwareDimming {
         self.software_dimming
+    }
+
+    pub const fn large_text(self) -> bool {
+        self.large_text
+    }
+
+    pub const fn high_contrast(self) -> bool {
+        self.high_contrast
     }
 
     pub const fn nav_pressed(self) -> bool {
@@ -5656,6 +6884,72 @@ pub fn render(pixels: &mut [u32], model: MobileModel) -> Result<(), RenderError>
     render_rows(pixels, 0, model)
 }
 
+/// Rebuilds exactly one nonempty physical damage rectangle in an existing
+/// complete mobile backing. Every primitive is clipped horizontally and the
+/// row slice clips vertically, so pixels outside `damage` remain byte-exact.
+#[cfg(feature = "mobile-ui-runtime")]
+pub fn render_damage(
+    pixels: &mut [u32],
+    model: MobileModel,
+    damage: DamageRect,
+) -> Result<(), RenderError> {
+    if pixels.len() != PIXEL_COUNT {
+        return Err(RenderError::WrongPixelCount);
+    }
+    let right = damage
+        .x
+        .checked_add(damage.width)
+        .ok_or(RenderError::InvalidDamageRect)?;
+    let bottom = damage
+        .y
+        .checked_add(damage.height)
+        .ok_or(RenderError::InvalidDamageRect)?;
+    if damage.width == 0
+        || damage.height == 0
+        || usize::from(right) > WIDTH
+        || usize::from(bottom) > HEIGHT
+    {
+        return Err(RenderError::InvalidDamageRect);
+    }
+    let first_row = usize::from(damage.y);
+    let last_row = usize::from(bottom);
+    let mut canvas = Canvas {
+        pixels: &mut pixels[first_row * WIDTH..last_row * WIDTH],
+        first_row,
+        first_column: 0,
+        row_stride: WIDTH,
+        row_count: usize::from(damage.height),
+        alternate_accent: model.alternate_accent,
+        large_text: model.large_text,
+        high_contrast: model.high_contrast,
+        design_offset_y_px: 0,
+        clip_left_x_px: i32::from(damage.x),
+        clip_right_x_px: i32::from(right),
+        clip_top_y_px: i32::from(damage.y),
+        clip_bottom_y_px: i32::from(bottom),
+    };
+    render_content_layers(&mut canvas, model);
+    render_system_chrome(&mut canvas, model);
+    render_screen_corner_mask(&mut canvas);
+    apply_software_dimming(&mut canvas, model.software_dimming);
+    Ok(())
+}
+
+/// Rebuilds one canonical protocol-v6 region set in an existing complete
+/// backing. Regions are disjoint, so each changed pixel is rastered once and
+/// every byte outside the set remains untouched.
+#[cfg(feature = "mobile-ui-runtime")]
+pub fn render_damage_regions(
+    pixels: &mut [u32],
+    model: MobileModel,
+    damage: DamageRegions,
+) -> Result<(), RenderError> {
+    for rect in damage.rects() {
+        render_damage(pixels, model, *rect)?;
+    }
+    Ok(())
+}
+
 /// Renders one or more complete physical scanlines beginning at `first_row`.
 ///
 /// The supplied slice must contain an integer number of 720-pixel rows. This
@@ -5670,8 +6964,15 @@ pub fn render_rows(
     let mut canvas = Canvas {
         pixels,
         first_row,
+        first_column: 0,
+        row_stride: WIDTH,
         row_count,
+        alternate_accent: model.alternate_accent,
+        large_text: model.large_text,
+        high_contrast: model.high_contrast,
         design_offset_y_px: 0,
+        clip_left_x_px: 0,
+        clip_right_x_px: WIDTH as i32,
         clip_top_y_px: 0,
         clip_bottom_y_px: HEIGHT as i32,
     };
@@ -5703,8 +7004,15 @@ pub fn render_content_rows(
     let mut canvas = Canvas {
         pixels,
         first_row,
+        first_column: 0,
+        row_stride: WIDTH,
         row_count,
+        alternate_accent: model.alternate_accent,
+        large_text: model.large_text,
+        high_contrast: model.high_contrast,
         design_offset_y_px: 0,
+        clip_left_x_px: 0,
+        clip_right_x_px: WIDTH as i32,
         clip_top_y_px: i32::from(MOBILE_CONTENT_VIEWPORT_Y),
         clip_bottom_y_px: i32::from(MOBILE_CONTENT_VIEWPORT_BOTTOM),
     };
@@ -5734,12 +7042,19 @@ pub fn render_system_chrome_rows(
     let mut canvas = Canvas {
         pixels,
         first_row,
+        first_column: 0,
+        row_stride: WIDTH,
         row_count,
+        alternate_accent: state.alternate_accent,
+        large_text: state.large_text,
+        high_contrast: state.high_contrast,
         design_offset_y_px: 0,
+        clip_left_x_px: 0,
+        clip_right_x_px: WIDTH as i32,
         clip_top_y_px: 0,
         clip_bottom_y_px: HEIGHT as i32,
     };
-    canvas.wallpaper(state.dark_theme);
+    canvas.wallpaper(state.dark_theme, state.alternate_accent);
     render_system_chrome_state(
         &mut canvas,
         state.time,
@@ -5764,7 +7079,7 @@ fn validated_row_count(pixels: &[u32], first_row: usize) -> Result<usize, Render
 }
 
 fn render_content_layers(canvas: &mut Canvas<'_>, model: MobileModel) {
-    canvas.wallpaper(model.dark_theme);
+    canvas.wallpaper(model.dark_theme, model.alternate_accent);
     let page_transition_offset_px = model.effective_page_transition_offset_px();
     if page_transition_offset_px != 0 && !matches!(model.page, MobilePage::Lock | MobilePage::Home)
     {
@@ -5813,9 +7128,11 @@ fn render_page(canvas: &mut Canvas<'_>, model: MobileModel) {
         MobilePage::Messages => render_messages(canvas, model),
         MobilePage::Calculator => render_calculator(canvas, model),
         MobilePage::AndroidDemo => render_android_demo(canvas, &model),
-        MobilePage::Settings => render_settings(canvas, model),
+        MobilePage::Settings => render_settings(canvas, &model),
         MobilePage::Apps => render_apps(canvas, model),
         MobilePage::About => render_about(canvas, model),
+        MobilePage::Display => render_display(canvas, &model),
+        MobilePage::Accessibility => render_accessibility(canvas, &model),
     }
 }
 
@@ -5841,17 +7158,17 @@ fn render_page_transition(canvas: &mut Canvas<'_>, model: MobileModel, offset_px
     let previous_clip_bottom_y_px = canvas.clip_bottom_y_px;
     canvas.design_offset_y_px = previous_offset_y_px + i32::from(offset_px);
     canvas.clip_bottom_y_px = previous_clip_bottom_y_px.min(i32::from(SYSTEM_NAV_TOP_PX));
-    canvas.wallpaper_layer(model.dark_theme);
+    canvas.wallpaper_layer(model.dark_theme, model.alternate_accent);
     canvas.fill_rect(
         DRect::new(0, 0, i32::from(DESIGN_WIDTH), 1),
-        border_color(model.dark_theme),
+        model.outline_color(),
     );
     render_page(canvas, model);
     canvas.design_offset_y_px = previous_offset_y_px;
     canvas.clip_bottom_y_px = previous_clip_bottom_y_px;
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct DRect {
     x: i32,
     y: i32,
@@ -5867,6 +7184,15 @@ impl DRect {
             width,
             height,
         }
+    }
+
+    const fn screen_inset(gutter: i32, y: i32, height: i32) -> Self {
+        Self::new(
+            gutter,
+            y,
+            DESIGN_WIDTH as i32 - gutter.saturating_mul(2),
+            height,
+        )
     }
 }
 
@@ -5933,38 +7259,74 @@ pub fn measure_mobile_text_px(role: MobileTextRole, text: &str) -> u16 {
     })
 }
 
+/// Promotes the compact semantic roles by one bounded step. Large headlines
+/// and the lock/home clock keep their established geometry, while labels,
+/// captions, and body copy gain 20--25% physical height without moving any
+/// hit target or introducing a second font atlas.
+const fn accessible_text_role(role: MobileTextRole, large_text: bool) -> MobileTextRole {
+    if !large_text {
+        return role;
+    }
+    match role {
+        MobileTextRole::Label | MobileTextRole::Caption => MobileTextRole::Body,
+        MobileTextRole::Body => MobileTextRole::Title,
+        MobileTextRole::Title | MobileTextRole::Headline | MobileTextRole::Display => role,
+    }
+}
+
 struct Canvas<'a> {
     pixels: &'a mut [u32],
     first_row: usize,
+    first_column: usize,
+    row_stride: usize,
     row_count: usize,
+    alternate_accent: bool,
+    large_text: bool,
+    high_contrast: bool,
     design_offset_y_px: i32,
+    clip_left_x_px: i32,
+    clip_right_x_px: i32,
     clip_top_y_px: i32,
     clip_bottom_y_px: i32,
 }
 
 impl Canvas<'_> {
+    fn index(&self, x: usize, y: usize) -> usize {
+        (y - self.first_row) * self.row_stride + x - self.first_column
+    }
+
     fn last_row(&self) -> usize {
         self.first_row + self.row_count
     }
 
-    fn wallpaper(&mut self, dark: bool) {
-        let (top, bottom) = if dark {
-            (COLOR_DARK_TOP, COLOR_DARK_BOTTOM)
-        } else {
-            (COLOR_LIGHT_TOP, COLOR_LIGHT_BOTTOM)
-        };
+    fn wallpaper(&mut self, dark: bool, alternate_accent: bool) {
+        let theme = mobile_theme_tokens(dark, alternate_accent, self.high_contrast);
         for local_y in 0..self.row_count {
             let global_y = self.first_row + local_y;
-            let color = mix(top, bottom, global_y as u32, (HEIGHT - 1) as u32);
-            self.pixels[local_y * WIDTH..(local_y + 1) * WIDTH].fill(color);
+            let color = mix(
+                theme.background_top,
+                theme.background_bottom,
+                global_y as u32,
+                (HEIGHT - 1) as u32,
+            );
+            let start = self.index(self.clip_left_x_px as usize, global_y);
+            let end = self.index(self.clip_right_x_px as usize, global_y);
+            self.pixels[start..end].fill(color);
         }
-        if dark {
-            self.radial_glow(302, 92, 250, COLOR_PURPLE_GLOW, 74);
-            self.radial_glow(58, 542, 220, COLOR_CYAN_GLOW, 46);
-        } else {
-            self.radial_glow(310, 76, 240, 0x00a8_c2ff, 54);
-            self.radial_glow(48, 530, 210, 0x00b4_ebf2, 42);
-        }
+        self.radial_glow(
+            302,
+            92,
+            250,
+            theme.wallpaper_glow_primary,
+            if dark { 74 } else { 54 },
+        );
+        self.radial_glow(
+            58,
+            542,
+            220,
+            theme.wallpaper_glow_secondary,
+            if dark { 46 } else { 42 },
+        );
     }
 
     /// Draws an opaque copy of the standard wallpaper at the current vertical
@@ -5972,12 +7334,8 @@ impl Canvas<'_> {
     /// transitions; the stable zero-offset path continues to use `wallpaper`
     /// directly and therefore remains pixel-identical.
     #[inline(never)]
-    fn wallpaper_layer(&mut self, dark: bool) {
-        let (top, bottom) = if dark {
-            (COLOR_DARK_TOP, COLOR_DARK_BOTTOM)
-        } else {
-            (COLOR_LIGHT_TOP, COLOR_LIGHT_BOTTOM)
-        };
+    fn wallpaper_layer(&mut self, dark: bool, alternate_accent: bool) {
+        let theme = mobile_theme_tokens(dark, alternate_accent, self.high_contrast);
         let layer_top = self.design_offset_y_px.max(0);
         let start_y = layer_top.max(self.first_row as i32).max(self.clip_top_y_px);
         let end_y = self
@@ -5986,9 +7344,15 @@ impl Canvas<'_> {
             .min(HEIGHT as i32);
         for global_y in start_y..end_y {
             let source_y = (global_y - self.design_offset_y_px).clamp(0, HEIGHT as i32 - 1) as u32;
-            let color = mix(top, bottom, source_y, (HEIGHT - 1) as u32);
-            let row = (global_y as usize - self.first_row) * WIDTH;
-            self.pixels[row..row + WIDTH].fill(color);
+            let color = mix(
+                theme.background_top,
+                theme.background_bottom,
+                source_y,
+                (HEIGHT - 1) as u32,
+            );
+            let start = self.index(self.clip_left_x_px as usize, global_y as usize);
+            let end = self.index(self.clip_right_x_px as usize, global_y as usize);
+            self.pixels[start..end].fill(color);
         }
         // Keep the moving layer opaque and bounded at `layer_top`. The stable
         // destination restores the full wallpaper glows at offset zero;
@@ -5997,8 +7361,13 @@ impl Canvas<'_> {
     }
 
     fn tint(&mut self, color: u32, alpha: u32) {
-        for pixel in self.pixels.iter_mut() {
-            *pixel = blend(*pixel, color, alpha);
+        for local_y in 0..self.row_count {
+            let global_y = self.first_row + local_y;
+            let start = self.index(self.clip_left_x_px as usize, global_y);
+            let end = self.index(self.clip_right_x_px as usize, global_y);
+            for pixel in &mut self.pixels[start..end] {
+                *pixel = blend(*pixel, color, alpha);
+            }
         }
     }
 
@@ -6016,7 +7385,7 @@ impl Canvas<'_> {
             .min(HEIGHT as i32)
             .min(self.clip_bottom_y_px);
         for y in start_y..end_y {
-            for x in 0..WIDTH as i32 {
+            for x in self.clip_left_x_px..self.clip_right_x_px {
                 let dx = x - center_x;
                 let dy = y - center_y;
                 let distance = dx * dx + dy * dy;
@@ -6025,7 +7394,7 @@ impl Canvas<'_> {
                 }
                 let strength =
                     ((radius_squared - distance) as u32 * opacity) / radius_squared as u32;
-                let index = (y as usize - self.first_row) * WIDTH + x as usize;
+                let index = self.index(x as usize, y as usize);
                 self.pixels[index] = blend(self.pixels[index], color, strength.min(opacity));
             }
         }
@@ -6033,8 +7402,10 @@ impl Canvas<'_> {
 
     fn pixel(&mut self, x: i32, y: i32, color: u32) {
         if x < 0
+            || x < self.clip_left_x_px
             || y < self.first_row as i32
             || x >= WIDTH as i32
+            || x >= self.clip_right_x_px
             || y >= self.last_row() as i32
             || y >= HEIGHT as i32
             || y < self.clip_top_y_px
@@ -6042,15 +7413,17 @@ impl Canvas<'_> {
         {
             return;
         }
-        let index = (y as usize - self.first_row) * WIDTH + x as usize;
+        let index = self.index(x as usize, y as usize);
         self.pixels[index] = color;
     }
 
     fn blend_pixel(&mut self, x: i32, y: i32, color: u32, alpha: u32) {
         if alpha == 0
             || x < 0
+            || x < self.clip_left_x_px
             || y < self.first_row as i32
             || x >= WIDTH as i32
+            || x >= self.clip_right_x_px
             || y >= self.last_row() as i32
             || y >= HEIGHT as i32
             || y < self.clip_top_y_px
@@ -6058,7 +7431,7 @@ impl Canvas<'_> {
         {
             return;
         }
-        let index = (y as usize - self.first_row) * WIDTH + x as usize;
+        let index = self.index(x as usize, y as usize);
         self.pixels[index] = blend(self.pixels[index], color, alpha.min(255));
     }
 
@@ -6067,8 +7440,14 @@ impl Canvas<'_> {
         if alpha == 0 {
             return;
         }
-        let left = (rect.x * SCALE).max(0).min(WIDTH as i32);
-        let right = ((rect.x + rect.width) * SCALE).max(0).min(WIDTH as i32);
+        let left = (rect.x * SCALE)
+            .max(0)
+            .max(self.clip_left_x_px)
+            .min(WIDTH as i32);
+        let right = ((rect.x + rect.width) * SCALE)
+            .max(0)
+            .min(self.clip_right_x_px)
+            .min(WIDTH as i32);
         let top = (rect.y * SCALE + self.design_offset_y_px)
             .max(self.first_row as i32)
             .max(self.clip_top_y_px)
@@ -6085,8 +7464,14 @@ impl Canvas<'_> {
     }
 
     fn fill_rect(&mut self, rect: DRect, color: u32) {
-        let left = (rect.x * SCALE).max(0).min(WIDTH as i32);
-        let right = ((rect.x + rect.width) * SCALE).max(0).min(WIDTH as i32);
+        let left = (rect.x * SCALE)
+            .max(0)
+            .max(self.clip_left_x_px)
+            .min(WIDTH as i32);
+        let right = ((rect.x + rect.width) * SCALE)
+            .max(0)
+            .min(self.clip_right_x_px)
+            .min(WIDTH as i32);
         let top = (rect.y * SCALE + self.design_offset_y_px)
             .max(self.first_row as i32)
             .max(self.clip_top_y_px)
@@ -6101,8 +7486,9 @@ impl Canvas<'_> {
             return;
         }
         for y in top..bottom {
-            let row = (y as usize - self.first_row) * WIDTH;
-            self.pixels[row + left as usize..row + right as usize].fill(color);
+            let start = self.index(left as usize, y as usize);
+            let end = self.index(right as usize, y as usize);
+            self.pixels[start..end].fill(color);
         }
     }
 
@@ -6110,8 +7496,14 @@ impl Canvas<'_> {
         if alpha == 0 {
             return;
         }
-        let left = (rect.x * SCALE).max(0).min(WIDTH as i32);
-        let right = ((rect.x + rect.width) * SCALE).max(0).min(WIDTH as i32);
+        let left = (rect.x * SCALE)
+            .max(0)
+            .max(self.clip_left_x_px)
+            .min(WIDTH as i32);
+        let right = ((rect.x + rect.width) * SCALE)
+            .max(0)
+            .min(self.clip_right_x_px)
+            .min(WIDTH as i32);
         let top = (rect.y * SCALE + self.design_offset_y_px)
             .max(self.first_row as i32)
             .max(self.clip_top_y_px)
@@ -6127,9 +7519,8 @@ impl Canvas<'_> {
         }
         let alpha = alpha.min(255);
         for y in top..bottom {
-            let row = (y as usize - self.first_row) * WIDTH;
             for x in left..right {
-                let index = row + x as usize;
+                let index = self.index(x as usize, y as usize);
                 self.pixels[index] = blend(self.pixels[index], color, alpha);
             }
         }
@@ -6203,14 +7594,49 @@ impl Canvas<'_> {
     }
 
     fn card(&mut self, rect: DRect, radius: i32, dark: bool, raised: bool) {
-        let fill = card_color(dark, raised);
-        let border = border_color(dark);
+        let theme = mobile_theme_tokens(dark, self.alternate_accent, self.high_contrast);
+        let fill = if raised {
+            theme.surface_raised
+        } else {
+            theme.surface
+        };
+        self.elevated_surface(rect, radius, fill, dark, false);
+    }
+
+    /// Draws a tactile surface whose shadow and pressed translation remain
+    /// strictly inside `rect`. Damage planners may therefore continue using
+    /// the control's public hit rectangle without hidden elevation pixels
+    /// leaking into a neighbouring region.
+    fn elevated_surface(&mut self, rect: DRect, radius: i32, fill: u32, dark: bool, pressed: bool) {
+        let theme = mobile_theme_tokens(dark, self.alternate_accent, self.high_contrast);
+        let elevation = MobileShapeTokens::ELEVATION_LOW_PX.min(rect.height.saturating_sub(1));
+        let face_offset = if pressed {
+            elevation.saturating_sub(1)
+        } else {
+            0
+        };
+        let face_height = rect.height.saturating_sub(elevation);
+        if face_height <= 0 {
+            self.rounded_rect(rect, radius, fill);
+            return;
+        }
         self.rounded_rect(
-            DRect::new(rect.x, rect.y + 4, rect.width, rect.height),
-            radius,
-            if dark { COLOR_SHADOW } else { 0x00c8_d3e4 },
+            DRect::new(
+                rect.x,
+                rect.y + elevation,
+                rect.width,
+                rect.height - elevation,
+            ),
+            radius.saturating_sub(1),
+            theme.shadow,
         );
-        self.rounded_border(rect, radius, 1, border, fill);
+        self.rounded_border(
+            DRect::new(rect.x, rect.y + face_offset, rect.width, face_height),
+            radius,
+            MobileShapeTokens::OUTLINE_PX,
+            theme.outline,
+            fill,
+        );
     }
 
     fn circle(&mut self, center_x: i32, center_y: i32, radius: i32, color: u32) {
@@ -6425,6 +7851,7 @@ impl Canvas<'_> {
     }
 
     fn text_role(&mut self, x: i32, y: i32, text: &str, role: MobileTextRole, color: u32) {
+        let role = accessible_text_role(role, self.large_text);
         self.text_physical(
             x * SCALE,
             y * SCALE + self.design_offset_y_px,
@@ -6435,6 +7862,7 @@ impl Canvas<'_> {
     }
 
     fn text_center(&mut self, center_x: i32, y: i32, text: &str, role: MobileTextRole, color: u32) {
+        let role = accessible_text_role(role, self.large_text);
         let width = i32::from(measure_mobile_text_px(role, text));
         self.text_physical(
             center_x * SCALE - width / 2,
@@ -6445,7 +7873,41 @@ impl Canvas<'_> {
         );
     }
 
+    fn text_center_fitted(
+        &mut self,
+        center_x: i32,
+        y: i32,
+        text: &str,
+        role: MobileTextRole,
+        maximum_width_px: u16,
+        color: u32,
+    ) {
+        let resolved_role = accessible_text_role(role, self.large_text);
+        let (prefix, truncated) =
+            ellipsized_mobile_text_prefix(text, role, maximum_width_px, self.large_text);
+        let prefix_width = measure_mobile_text_px(resolved_role, prefix);
+        let ellipsis_width = if truncated {
+            measure_mobile_text_px(resolved_role, "...")
+        } else {
+            0
+        };
+        let width = i32::from(prefix_width.saturating_add(ellipsis_width));
+        let start_x = center_x * SCALE - width / 2;
+        let origin_y = y * SCALE + self.design_offset_y_px;
+        self.text_physical(start_x, origin_y, prefix, resolved_role, color);
+        if truncated {
+            self.text_physical(
+                start_x + i32::from(prefix_width),
+                origin_y,
+                "...",
+                resolved_role,
+                color,
+            );
+        }
+    }
+
     fn text_end(&mut self, end_x: i32, y: i32, text: &str, role: MobileTextRole, color: u32) {
+        let role = accessible_text_role(role, self.large_text);
         let width = i32::from(measure_mobile_text_px(role, text));
         self.text_physical(
             end_x * SCALE - width,
@@ -6549,6 +8011,7 @@ fn draw_unavailable_clock(
     role: MobileTextRole,
     color: u32,
 ) {
+    let role = accessible_text_role(role, canvas.large_text);
     let (dash_width, gap, colon_radius, center_y, colon_offset_y) =
         unavailable_clock_geometry(role);
     let dash_height = colon_radius.max(1);
@@ -6597,9 +8060,10 @@ fn draw_time_center(
         let time = snapshot.time_text();
         canvas.text_center(center_x, y, time.as_str(), role, color);
     } else {
+        let effective_role = accessible_text_role(role, canvas.large_text);
         draw_unavailable_clock(
             canvas,
-            center_x - unavailable_clock_width(role) / 2,
+            center_x - unavailable_clock_width(effective_role) / 2,
             y,
             role,
             color,
@@ -6626,7 +8090,8 @@ fn render_system_chrome_state(
     alternate_accent: bool,
     nav_pressed: bool,
 ) {
-    let text = text_color(dark_theme);
+    let theme = mobile_theme_tokens(dark_theme, alternate_accent, canvas.high_contrast);
+    let text = theme.text_primary;
     // A single status layer shared by launcher and apps.
     draw_time_role(canvas, 20, 14, time, MobileTextRole::Label, text);
     // This small preview safe-area outline keeps content clear of a common
@@ -6640,9 +8105,9 @@ fn render_system_chrome_state(
 
     // Gesture navigation is rendered once, in the system layer.
     let nav_back = if dark_theme {
-        blend(COLOR_DARK_BOTTOM, COLOR_BLACK, 68)
+        blend(theme.background_bottom, COLOR_BLACK, 68)
     } else {
-        blend(COLOR_LIGHT_BOTTOM, COLOR_WHITE, 148)
+        blend(theme.background_bottom, COLOR_WHITE, 148)
     };
     canvas.fill_rect(DRect::new(0, 774, 360, 26), nav_back);
     if nav_pressed {
@@ -6650,7 +8115,7 @@ fn render_system_chrome_state(
             DRect::new(122, 776, 116, 22),
             11,
             blend(
-                card_color(dark_theme, true),
+                theme.surface_raised,
                 if alternate_accent {
                     COLOR_BLUE_ALT
                 } else {
@@ -6660,7 +8125,11 @@ fn render_system_chrome_state(
             ),
         );
     }
-    canvas.rounded_rect(DRect::new(130, 787, 100, 4), 2, text);
+    canvas.rounded_rect(
+        DRect::new(130, 787, 100, MobileSpacingTokens::XS),
+        MobileSpacingTokens::XXS,
+        text,
+    );
 }
 
 fn render_back_gesture(canvas: &mut Canvas<'_>, model: MobileModel) {
@@ -6675,15 +8144,19 @@ fn render_back_gesture(canvas: &mut Canvas<'_>, model: MobileModel) {
     let center_y = (i32::from(model.back_origin_y) / SCALE).clamp(88, 744);
     let width = 32 + reveal * 20 / (i32::from(BACK_GESTURE_REVEAL_MAX) / SCALE);
     let center_x = (width - 18).clamp(18, 34);
-    let surface = blend(card_color(model.dark_theme, true), model.accent(), 92);
-    canvas.rounded_rect(DRect::new(-10, center_y - 24, width, 48), 24, COLOR_SHADOW);
+    let surface = blend(model.surface_color(true), model.accent(), 92);
+    canvas.rounded_rect(
+        DRect::new(-10, center_y - 24, width, 48),
+        MobileShapeTokens::RADIUS_LARGE,
+        model.theme_tokens().shadow,
+    );
     canvas.rounded_rect(DRect::new(-12, center_y - 25, width, 48), 24, surface);
     draw_icon(
         canvas,
         center_x,
         center_y - 1,
         IconSize::List,
-        text_color(model.dark_theme),
+        model.text_primary(),
         Icon::ChevronLeft,
     );
     canvas.clip_bottom_y_px = previous_clip_bottom_y_px;
@@ -6721,26 +8194,28 @@ fn render_screen_corner_mask(canvas: &mut Canvas<'_>) {
 
 #[inline(never)]
 fn render_home(canvas: &mut Canvas<'_>, model: MobileModel) {
-    let text = text_color(model.dark_theme);
-    let muted = muted_text(model.dark_theme);
+    let text = model.text_primary();
+    let muted = model.text_secondary();
     let date = model.time.long_date_text();
 
     draw_time_role(canvas, 22, 68, model.time, MobileTextRole::Display, text);
 
     // Keep the launcher quiet and wallpaper-led. Runtime diagnostics belong
     // in About; the Home surface must not advertise inert controls.
-    canvas.rounded_rect(
-        DRect::new(18, 164, 324, 80),
-        24,
-        card_color(model.dark_theme, true),
+    canvas.elevated_surface(
+        DRect::screen_inset(MobileSpacingTokens::PAGE_GUTTER, 164, 80),
+        MobileShapeTokens::RADIUS_LARGE,
+        model.surface_color(true),
+        model.dark_theme,
+        false,
     );
     let calendar_surface = if model.time.is_available() {
         model.accent()
     } else {
-        card_color(model.dark_theme, false)
+        model.surface_color(false)
     };
     let calendar_ink = if model.time.is_available() {
-        COLOR_WHITE
+        model.on_accent()
     } else {
         muted
     };
@@ -6761,10 +8236,12 @@ fn render_home(canvas: &mut Canvas<'_>, model: MobileModel) {
     canvas.circle(180, 646, 3, muted);
 
     // Bottom dock and its hit targets use the same geometry as the shell.
-    canvas.rounded_rect(
-        DRect::new(14, 676, 332, 84),
-        26,
-        card_color(model.dark_theme, true),
+    canvas.elevated_surface(
+        DRect::screen_inset(14, 676, 84),
+        MobileShapeTokens::RADIUS_LARGE,
+        model.surface_color(true),
+        model.dark_theme,
+        false,
     );
     for (target, x) in [
         (MobilePressedTarget::Phone, 52),
@@ -6788,15 +8265,12 @@ fn render_home(canvas: &mut Canvas<'_>, model: MobileModel) {
 
 #[inline(never)]
 fn render_lock_screen(canvas: &mut Canvas<'_>, model: MobileModel) {
-    let text = text_color(model.dark_theme);
-    let muted = muted_text(model.dark_theme);
-    let weak = weak_text(model.dark_theme);
+    let text = model.text_primary();
+    let muted = model.text_secondary();
+    let weak = model.text_tertiary();
     let date = model.time.long_date_text();
-    let sheet = if model.dark_theme {
-        0x0007_0d1c
-    } else {
-        0x00ec_f3ff
-    };
+    let theme = model.theme_tokens();
+    let sheet = theme.background_top;
     let reveal_px = model.effective_unlock_reveal_px();
     let previous_offset_y_px = canvas.design_offset_y_px;
     let previous_clip_bottom_y_px = canvas.clip_bottom_y_px;
@@ -6805,36 +8279,94 @@ fn render_lock_screen(canvas: &mut Canvas<'_>, model: MobileModel) {
 
     // The oversized rounded sheet fully covers the stable display. Its bottom
     // edge becomes visible only while the contact-follow unlock preview moves.
-    canvas.rounded_rect(DRect::new(-24, -20, 408, 850), 40, COLOR_SHADOW);
+    canvas.rounded_rect(DRect::new(-24, -20, 408, 850), 40, theme.shadow);
     canvas.rounded_rect(DRect::new(-24, -24, 408, 850), 40, sheet);
-    if model.dark_theme {
-        canvas.radial_glow(304, 92, 248, COLOR_PURPLE_GLOW, 78);
-        canvas.radial_glow(42, 510, 220, COLOR_CYAN_GLOW, 42);
-    } else {
-        canvas.radial_glow(304, 82, 238, 0x00a8_c2ff, 58);
-        canvas.radial_glow(38, 500, 210, 0x00b4_ebf2, 38);
-    }
+    canvas.radial_glow(
+        304,
+        if model.dark_theme { 92 } else { 82 },
+        if model.dark_theme { 248 } else { 238 },
+        theme.wallpaper_glow_primary,
+        if model.dark_theme { 78 } else { 58 },
+    );
+    canvas.radial_glow(
+        if model.dark_theme { 42 } else { 38 },
+        if model.dark_theme { 510 } else { 500 },
+        if model.dark_theme { 220 } else { 210 },
+        theme.wallpaper_glow_secondary,
+        if model.dark_theme { 42 } else { 38 },
+    );
 
-    canvas.circle(180, 82, 22, card_color(model.dark_theme, true));
+    canvas.circle(180, 82, 22, model.surface_color(true));
     draw_icon(canvas, 180, 82, IconSize::List, text, Icon::Lock);
     draw_time_center(canvas, 180, 126, model.time, MobileTextRole::Display, text);
     canvas.text_center(180, 194, date.as_str(), MobileTextRole::Body, muted);
 
-    canvas.card(DRect::new(24, 326, 312, 116), 26, model.dark_theme, true);
+    let notification_offset = if model.boot_notification_visible {
+        i32::from(model.boot_notification_offset_px) / SCALE
+    } else {
+        0
+    };
+    if model.boot_notification_visible && notification_offset != 0 {
+        let underlay = blend(model.surface_color(true), model.accent(), 72);
+        canvas.rounded_rect(
+            DRect::screen_inset(MobileSpacingTokens::CONTENT_GUTTER, 326, 116),
+            26,
+            underlay,
+        );
+        canvas.text_center(
+            if notification_offset > 0 { 58 } else { 302 },
+            382,
+            "Dismiss",
+            MobileTextRole::Label,
+            COLOR_WHITE,
+        );
+    }
+    canvas.card(
+        DRect::new(24 + notification_offset, 326, 312, 116),
+        26,
+        model.dark_theme,
+        true,
+    );
     if model.boot_notification_visible {
-        canvas.circle(58, 384, 22, model.accent());
-        draw_icon(canvas, 58, 384, IconSize::List, COLOR_WHITE, Icon::Info);
-        canvas.text_role(92, 338, "System UI", MobileTextRole::Label, weak);
-        canvas.text_role(92, 362, "Local preview", MobileTextRole::Body, text);
+        if model.is_pressed(MobilePressedTarget::BootNotification) {
+            canvas.rounded_rect(
+                DRect::new(28 + notification_offset, 330, 304, 108),
+                24,
+                pressed_surface_color(model),
+            );
+        }
+        canvas.circle(58 + notification_offset, 384, 22, model.accent());
+        draw_icon(
+            canvas,
+            58 + notification_offset,
+            384,
+            IconSize::List,
+            model.on_accent(),
+            Icon::Info,
+        );
         canvas.text_role(
-            92,
+            92 + notification_offset,
+            338,
+            "System UI",
+            MobileTextRole::Label,
+            weak,
+        );
+        canvas.text_role(
+            92 + notification_offset,
+            362,
+            "Local preview",
+            MobileTextRole::Body,
+            text,
+        );
+        canvas.text_role(
+            92 + notification_offset,
             397,
             "Unlock to review limits",
             MobileTextRole::Caption,
             muted,
         );
     } else {
-        canvas.circle(58, 384, 22, card_color(model.dark_theme, false));
+        canvas.circle(58, 384, 22, model.surface_color(false));
         draw_icon(canvas, 58, 384, IconSize::List, muted, Icon::Bell);
         canvas.text_role(92, 350, "No notifications", MobileTextRole::Body, text);
         canvas.text_role(
@@ -6862,19 +8394,12 @@ fn render_overview(canvas: &mut Canvas<'_>, model: MobileModel, reveal_px: u16) 
         return;
     }
 
-    let text = text_color(model.dark_theme);
-    let muted = muted_text(model.dark_theme);
-    let weak = weak_text(model.dark_theme);
-    let neutral = if model.dark_theme {
-        COLOR_DARK_TOP
-    } else {
-        COLOR_LIGHT_TOP
-    };
-    let panel = if model.dark_theme {
-        0x000d_1629
-    } else {
-        0x00f3_f7ff
-    };
+    let text = model.text_primary();
+    let muted = model.text_secondary();
+    let weak = model.text_tertiary();
+    let theme = model.theme_tokens();
+    let neutral = theme.background_top;
+    let panel = theme.panel;
     let sheet_top_px = SYSTEM_NAV_TOP_PX.saturating_sub(
         ((u32::from(SYSTEM_NAV_TOP_PX - 240) * u32::from(reveal_px))
             / u32::from(OVERVIEW_RENDER_MAX_PX)) as u16,
@@ -6897,11 +8422,7 @@ fn render_overview(canvas: &mut Canvas<'_>, model: MobileModel, reveal_px: u16) 
     canvas.rounded_rect(
         DRect::new(0, 124, 360, 654),
         (corner_radius_px / SCALE).max(0),
-        if model.dark_theme {
-            COLOR_SHADOW
-        } else {
-            0x00c8_d3e4
-        },
+        theme.shadow,
     );
     canvas.rounded_rect(
         DRect::new(0, 120, 360, 654),
@@ -6912,6 +8433,9 @@ fn render_overview(canvas: &mut Canvas<'_>, model: MobileModel, reveal_px: u16) 
     canvas.text_role(24, 148, "Overview", MobileTextRole::Title, text);
     canvas.text_role(24, 176, "This session", MobileTextRole::Label, weak);
 
+    let overview_sheet_offset_y_px = canvas.design_offset_y_px;
+    canvas.design_offset_y_px =
+        overview_sheet_offset_y_px - i32::from(model.effective_overview_recent_offset_px());
     canvas.card(DRect::new(24, 212, 312, 380), 28, model.dark_theme, true);
     if model.is_pressed(MobilePressedTarget::OverviewRecent) {
         canvas.rounded_rect(
@@ -6922,8 +8446,15 @@ fn render_overview(canvas: &mut Canvas<'_>, model: MobileModel, reveal_px: u16) 
     }
 
     if let Some(recent) = model.system_ui_recent {
-        let (app_color, app_icon, app_name, recent_label, open_label, boundary_label) = match recent
-        {
+        let (
+            app_color,
+            app_icon,
+            use_installed_icon,
+            app_name,
+            recent_label,
+            open_label,
+            boundary_label,
+        ) = match recent {
             UiRecentIdentity::Shell(app) => {
                 let (color, icon, name) = match app {
                     ShellAppId::Phone => (COLOR_PHONE, Icon::Phone, "Phone"),
@@ -6933,6 +8464,7 @@ fn render_overview(canvas: &mut Canvas<'_>, model: MobileModel, reveal_px: u16) 
                 (
                     color,
                     icon,
+                    false,
                     name,
                     "Recent app",
                     "Opened this session",
@@ -6946,10 +8478,12 @@ fn render_overview(canvas: &mut Canvas<'_>, model: MobileModel, reveal_px: u16) 
                 (
                     COLOR_ANDROIDBOX,
                     Icon::DroidCode,
-                    fitted_mobile_text(
+                    true,
+                    fitted_mobile_text_for_scale(
                         model.android_installed_app.title.as_str(),
                         MobileTextRole::Title,
                         520,
+                        model.large_text,
                     ),
                     "Recent compatible app",
                     "Open re-verifies the APK",
@@ -6959,25 +8493,29 @@ fn render_overview(canvas: &mut Canvas<'_>, model: MobileModel, reveal_px: u16) 
             UiRecentIdentity::CompatibleAndroid(_) => (
                 COLOR_SETTINGS,
                 Icon::Info,
+                false,
                 "Recent app unavailable",
                 "Package identity changed",
                 "Open again from All apps",
                 "No cached content is shown",
             ),
         };
-        canvas.rounded_rect(DRect::new(148, 276, 64, 64), 18, app_color);
-        draw_icon(
-            canvas,
-            180,
-            308,
-            IconSize::App,
-            if app_color == COLOR_CALCULATOR {
-                COLOR_TEXT_LIGHT
-            } else {
-                COLOR_WHITE
-            },
-            app_icon,
-        );
+        if use_installed_icon {
+            // Reuse only the package-catalog icon already admitted for the
+            // exact compatible session. This is launcher metadata, never an
+            // Activity surface, screenshot, thumbnail, or background task.
+            draw_installed_app_icon(canvas, 180, 308, model.android_installed_app);
+        } else {
+            canvas.rounded_rect(DRect::new(148, 276, 64, 64), 18, app_color);
+            draw_icon(
+                canvas,
+                180,
+                308,
+                IconSize::App,
+                accessible_surface_ink(app_color),
+                app_icon,
+            );
+        }
         canvas.text_center(180, 366, app_name, MobileTextRole::Title, text);
         canvas.text_center(180, 400, recent_label, MobileTextRole::Caption, muted);
         if !matches!(
@@ -6986,12 +8524,13 @@ fn render_overview(canvas: &mut Canvas<'_>, model: MobileModel, reveal_px: u16) 
                 if !model.compatible_android_recent_ready()
         ) {
             canvas.rounded_rect(DRect::new(108, 448, 144, 48), 24, model.accent());
-            canvas.text_center(180, 461, "Open", MobileTextRole::Body, COLOR_WHITE);
+            canvas.text_center(180, 461, "Open", MobileTextRole::Body, model.on_accent());
         }
         canvas.text_center(180, 520, open_label, MobileTextRole::Caption, muted);
         canvas.text_center(180, 555, boundary_label, MobileTextRole::Label, weak);
+        canvas.rounded_rect(DRect::new(162, 575, 36, 3), 2, weak);
     } else {
-        canvas.circle(180, 312, 32, card_color(model.dark_theme, false));
+        canvas.circle(180, 312, 32, model.surface_color(false));
         draw_icon(canvas, 180, 312, IconSize::App, muted, Icon::Info);
         canvas.text_center(180, 366, "No recent app", MobileTextRole::Title, text);
         canvas.text_center(
@@ -7003,10 +8542,15 @@ fn render_overview(canvas: &mut Canvas<'_>, model: MobileModel, reveal_px: u16) 
         );
         canvas.text_center(180, 435, "This session only", MobileTextRole::Label, weak);
     }
+    canvas.design_offset_y_px = overview_sheet_offset_y_px;
     canvas.text_center(
         180,
         630,
-        "No background tasks",
+        if model.system_ui_recent.is_some() {
+            "Swipe card up to remove"
+        } else {
+            "No background tasks"
+        },
         MobileTextRole::Caption,
         muted,
     );
@@ -7020,13 +8564,10 @@ fn render_app_drawer(canvas: &mut Canvas<'_>, model: MobileModel, reveal_px: u16
     if model.page != MobilePage::Home {
         return;
     }
-    let text = text_color(model.dark_theme);
-    let muted = muted_text(model.dark_theme);
-    let panel = if model.dark_theme {
-        0x000d_1629
-    } else {
-        0x00f3_f7ff
-    };
+    let text = model.text_primary();
+    let muted = model.text_secondary();
+    let theme = model.theme_tokens();
+    let panel = theme.panel;
     let previous_offset_y_px = canvas.design_offset_y_px;
     let previous_clip_bottom_y_px = canvas.clip_bottom_y_px;
     canvas.design_offset_y_px =
@@ -7034,7 +8575,11 @@ fn render_app_drawer(canvas: &mut Canvas<'_>, model: MobileModel, reveal_px: u16
     canvas.clip_bottom_y_px = previous_clip_bottom_y_px.min(i32::from(SYSTEM_NAV_TOP_PX));
 
     canvas.rounded_rect(DRect::new(0, 68, 360, 760), 30, COLOR_SHADOW);
-    canvas.rounded_rect(DRect::new(0, 64, 360, 756), 28, panel);
+    canvas.rounded_rect(
+        DRect::new(0, 64, 360, 756),
+        MobileShapeTokens::RADIUS_PANEL,
+        panel,
+    );
     if model.is_pressed(MobilePressedTarget::DrawerHandle) {
         canvas.rounded_rect(
             DRect::new(120, 66, 120, 50),
@@ -7092,7 +8637,8 @@ fn render_app_drawer(canvas: &mut Canvas<'_>, model: MobileModel, reveal_px: u16
         #[cfg(not(feature = "androidbox-multipackage4"))]
         let installed = model.android_installed_app;
         draw_installed_app_icon(canvas, 52, 335, installed);
-        let (title_first, title_second) = split_installed_app_label(installed.title.as_str());
+        let (title_first, title_second) =
+            split_installed_app_label(installed.title.as_str(), model.large_text);
         canvas.text_center(52, 369, title_first, MobileTextRole::Label, text);
         if !title_second.is_empty() {
             canvas.text_center(52, 390, title_second, MobileTextRole::Label, muted);
@@ -7105,7 +8651,7 @@ fn render_app_drawer(canvas: &mut Canvas<'_>, model: MobileModel, reveal_px: u16
             390,
             "Demo",
             MobileTextRole::Label,
-            weak_text(model.dark_theme),
+            model.text_tertiary(),
         );
     }
 
@@ -7117,7 +8663,8 @@ fn render_app_drawer(canvas: &mut Canvas<'_>, model: MobileModel, reveal_px: u16
             canvas.circle(138, 335, 31, pressed_surface_color(model));
         }
         draw_installed_app_icon(canvas, 138, 335, installed);
-        let (title_first, title_second) = split_installed_app_label(installed.title.as_str());
+        let (title_first, title_second) =
+            split_installed_app_label(installed.title.as_str(), model.large_text);
         canvas.text_center(138, 369, title_first, MobileTextRole::Label, text);
         if !title_second.is_empty() {
             canvas.text_center(138, 390, title_second, MobileTextRole::Label, muted);
@@ -7128,40 +8675,92 @@ fn render_app_drawer(canvas: &mut Canvas<'_>, model: MobileModel, reveal_px: u16
     canvas.clip_bottom_y_px = previous_clip_bottom_y_px;
 }
 
-fn fitted_mobile_text(value: &str, role: MobileTextRole, maximum_width_px: u16) -> &str {
+fn fitted_mobile_text_for_scale(
+    value: &str,
+    role: MobileTextRole,
+    maximum_width_px: u16,
+    large_text: bool,
+) -> &str {
+    let role = accessible_text_role(role, large_text);
     let mut length = value.len();
-    while length != 0 && measure_mobile_text_px(role, &value[..length]) > maximum_width_px {
+    while length != 0
+        && (!value.is_char_boundary(length)
+            || measure_mobile_text_px(role, &value[..length]) > maximum_width_px)
+    {
         length -= 1;
     }
     &value[..length]
 }
 
-fn split_installed_app_label(value: &str) -> (&str, &str) {
+fn ellipsized_mobile_text_prefix(
+    value: &str,
+    role: MobileTextRole,
+    maximum_width_px: u16,
+    large_text: bool,
+) -> (&str, bool) {
+    let role = accessible_text_role(role, large_text);
+    if measure_mobile_text_px(role, value) <= maximum_width_px {
+        return (value, false);
+    }
+    let ellipsis_width = measure_mobile_text_px(role, "...");
+    (
+        fitted_mobile_text_for_scale(
+            value,
+            role,
+            maximum_width_px.saturating_sub(ellipsis_width),
+            false,
+        ),
+        true,
+    )
+}
+
+#[cfg(test)]
+fn fitted_mobile_text(value: &str, role: MobileTextRole, maximum_width_px: u16) -> &str {
+    fitted_mobile_text_for_scale(value, role, maximum_width_px, false)
+}
+
+fn split_installed_app_label(value: &str, large_text: bool) -> (&str, &str) {
     let Some(first_space) = value.as_bytes().iter().position(|byte| *byte == b' ') else {
-        return (fitted_mobile_text(value, MobileTextRole::Label, 160), "");
+        return (
+            fitted_mobile_text_for_scale(value, MobileTextRole::Label, 160, large_text),
+            "",
+        );
     };
     if first_space == 0 {
-        return (fitted_mobile_text(value, MobileTextRole::Label, 160), "");
+        return (
+            fitted_mobile_text_for_scale(value, MobileTextRole::Label, 160, large_text),
+            "",
+        );
     }
     let mut second_start = first_space + 1;
     while second_start < value.len() && value.as_bytes()[second_start] == b' ' {
         second_start += 1;
     }
     (
-        fitted_mobile_text(&value[..first_space], MobileTextRole::Label, 160),
-        fitted_mobile_text(&value[second_start..], MobileTextRole::Label, 160),
+        fitted_mobile_text_for_scale(
+            &value[..first_space],
+            MobileTextRole::Label,
+            160,
+            large_text,
+        ),
+        fitted_mobile_text_for_scale(
+            &value[second_start..],
+            MobileTextRole::Label,
+            160,
+            large_text,
+        ),
     )
 }
 
 fn render_app_header(canvas: &mut Canvas<'_>, model: &MobileModel, title: &str) {
-    let text = text_color(model.dark_theme);
+    let text = model.text_primary();
     if model.is_pressed(MobilePressedTarget::Back) {
         canvas.circle(
             28,
             60,
             22,
             blend(
-                card_color(model.dark_theme, true),
+                model.surface_color(true),
                 model.accent(),
                 if model.dark_theme { 112 } else { 58 },
             ),
@@ -7174,16 +8773,16 @@ fn render_app_header(canvas: &mut Canvas<'_>, model: &MobileModel, title: &str) 
 #[inline(never)]
 fn render_phone(canvas: &mut Canvas<'_>, model: MobileModel) {
     render_app_header(canvas, &model, "Phone");
-    let text = text_color(model.dark_theme);
-    let muted = muted_text(model.dark_theme);
-    let weak = weak_text(model.dark_theme);
+    let text = model.text_primary();
+    let muted = model.text_secondary();
+    let weak = model.text_tertiary();
 
     if model.phone_digit_count == 0 {
         canvas.text_center(180, 143, "Enter a number", MobileTextRole::Body, muted);
     } else {
         canvas.text_center(180, 138, model.phone_number(), MobileTextRole::Title, text);
     }
-    canvas.fill_rect(DRect::new(32, 187, 296, 1), border_color(model.dark_theme));
+    canvas.fill_rect(DRect::new(32, 187, 296, 1), model.outline_color());
 
     let digits = [
         ("1", ""),
@@ -7208,7 +8807,7 @@ fn render_phone(canvas: &mut Canvas<'_>, model: MobileModel) {
         let surface = if model.is_pressed(key_target) {
             pressed_surface_color(model)
         } else {
-            card_color(model.dark_theme, true)
+            model.surface_color(true)
         };
         canvas.circle(x, y, 35, surface);
         match index {
@@ -7233,7 +8832,7 @@ fn render_phone(canvas: &mut Canvas<'_>, model: MobileModel) {
             canvas.text_center(x, y + 15, letters, MobileTextRole::Label, muted);
         }
     }
-    canvas.circle(180, 688, 34, card_color(model.dark_theme, false));
+    canvas.circle(180, 688, 34, model.surface_color(false));
     draw_icon(canvas, 180, 688, IconSize::App, weak, Icon::Phone);
     canvas.circle(
         258,
@@ -7242,7 +8841,7 @@ fn render_phone(canvas: &mut Canvas<'_>, model: MobileModel) {
         if model.is_pressed(MobilePressedTarget::PhoneBackspace) {
             pressed_surface_color(model)
         } else {
-            card_color(model.dark_theme, false)
+            model.surface_color(false)
         },
     );
     draw_icon(canvas, 258, 688, IconSize::List, muted, Icon::Backspace);
@@ -7340,17 +8939,13 @@ const fn calculator_operation_text(operation: CalculatorOperation) -> &'static s
 #[inline(never)]
 fn render_calculator(canvas: &mut Canvas<'_>, model: MobileModel) {
     render_app_header(canvas, &model, "Calculator");
-    let text = text_color(model.dark_theme);
-    let muted = muted_text(model.dark_theme);
-    let weak = weak_text(model.dark_theme);
+    let text = model.text_primary();
+    let muted = model.text_secondary();
+    let weak = model.text_tertiary();
     let mut display_buffer = [0u8; 32];
     let display = calculator_value_text(model, &mut display_buffer);
 
-    canvas.rounded_rect(
-        DRect::new(16, 96, 328, 132),
-        24,
-        card_color(model.dark_theme, true),
-    );
+    canvas.rounded_rect(DRect::new(16, 96, 328, 132), 24, model.surface_color(true));
     if model.calculator_pending != CalculatorOperation::None && !model.calculator_error {
         let mut accumulator_buffer = [0u8; 32];
         let accumulator = fixed_calculator_text(
@@ -7389,13 +8984,18 @@ fn render_calculator(canvas: &mut Canvas<'_>, model: MobileModel) {
             COLOR_AMBER,
         );
     }
-    if model.is_pressed(MobilePressedTarget::CalculatorKey(19)) {
-        canvas.rounded_rect(
-            DRect::new(260, 190, 76, 38),
-            18,
-            pressed_surface_color(model),
-        );
-    }
+    let backspace_pressed = model.is_pressed(MobilePressedTarget::CalculatorKey(19));
+    canvas.elevated_surface(
+        DRect::new(260, 190, 76, 38),
+        18,
+        if backspace_pressed {
+            pressed_surface_color(model)
+        } else {
+            model.surface_color(false)
+        },
+        model.dark_theme,
+        backspace_pressed,
+    );
     draw_icon(
         canvas,
         300,
@@ -7431,12 +9031,18 @@ fn render_calculator(canvas: &mut Canvas<'_>, model: MobileModel) {
         } else if operator {
             model.accent()
         } else if utility {
-            card_color(model.dark_theme, false)
+            model.surface_color(false)
         } else {
-            card_color(model.dark_theme, true)
+            model.surface_color(true)
         };
-        canvas.rounded_rect(rect, 25, surface);
-        let foreground = if operator { COLOR_WHITE } else { text };
+        canvas.elevated_surface(
+            rect,
+            MobileShapeTokens::RADIUS_LARGE,
+            surface,
+            model.dark_theme,
+            model.is_pressed(MobilePressedTarget::CalculatorKey(index)),
+        );
+        let foreground = if operator { model.on_accent() } else { text };
         match index {
             0 => canvas.text_center(
                 center_x,
@@ -7703,16 +9309,19 @@ fn render_installed_android_legacy_content(
     installed: &AndroidInstalledAppStatus,
     text: u32,
 ) {
-    canvas.rounded_rect(
+    canvas.elevated_surface(
         DRect::new(34, 224, 292, 112),
-        22,
-        card_color(model.dark_theme, true),
+        MobileShapeTokens::RADIUS_CONTROL,
+        model.surface_color(true),
+        model.dark_theme,
+        false,
     );
-    canvas.text_center(
+    canvas.text_center_fitted(
         180,
         267,
-        fitted_mobile_text(installed.text.as_str(), MobileTextRole::Body, 520),
+        installed.text.as_str(),
         MobileTextRole::Body,
+        520,
         text,
     );
 }
@@ -7724,18 +9333,14 @@ fn render_installed_android_interactive_content(
     text: u32,
 ) {
     let view = model.android_installed_activity_view;
-    canvas.rounded_rect(
+    canvas.elevated_surface(
         DRect::new(34, 224, 292, 88),
-        20,
-        card_color(model.dark_theme, true),
+        MobileShapeTokens::RADIUS_CONTROL,
+        model.surface_color(true),
+        model.dark_theme,
+        false,
     );
-    canvas.text_center(
-        180,
-        255,
-        fitted_mobile_text(view.label_text(), MobileTextRole::Body, 520),
-        MobileTextRole::Body,
-        text,
-    );
+    canvas.text_center_fitted(180, 255, view.label_text(), MobileTextRole::Body, 520, text);
 
     let button_target = MobilePressedTarget::InstalledAndroidButton(view.button_view_id());
     let button_background = if model.is_pressed(button_target) {
@@ -7743,13 +9348,20 @@ fn render_installed_android_interactive_content(
     } else {
         model.accent()
     };
-    canvas.rounded_rect(DRect::new(34, 332, 292, 64), 24, button_background);
-    canvas.text_center(
+    canvas.elevated_surface(
+        DRect::new(34, 332, 292, 64),
+        MobileShapeTokens::RADIUS_LARGE,
+        button_background,
+        model.dark_theme,
+        model.is_pressed(button_target),
+    );
+    canvas.text_center_fitted(
         180,
         351,
-        fitted_mobile_text(view.button_text(), MobileTextRole::Body, 500),
+        view.button_text(),
         MobileTextRole::Body,
-        COLOR_WHITE,
+        500,
+        model.on_accent(),
     );
 }
 
@@ -7782,12 +9394,19 @@ fn render_installed_android_scene_content(
         match node.kind() {
             AndroidSceneViewKind::LinearLayout => {}
             AndroidSceneViewKind::TextView => {
-                canvas.rounded_rect(rect, radius, card_color(model.dark_theme, true));
-                canvas.text_center(
+                canvas.elevated_surface(
+                    rect,
+                    radius,
+                    model.surface_color(true),
+                    model.dark_theme,
+                    false,
+                );
+                canvas.text_center_fitted(
                     rect.x + rect.width / 2,
                     text_y,
-                    fitted_mobile_text(node.text(), text_role, maximum_text_width_px),
+                    node.text(),
                     text_role,
+                    maximum_text_width_px,
                     text,
                 );
             }
@@ -7800,18 +9419,29 @@ fn render_installed_android_scene_content(
                     model.accent()
                 } else {
                     blend(
-                        card_color(model.dark_theme, true),
+                        model.surface_color(true),
                         muted,
                         if model.dark_theme { 54 } else { 30 },
                     )
                 };
-                canvas.rounded_rect(rect, radius, background);
-                canvas.text_center(
+                canvas.elevated_surface(
+                    rect,
+                    radius,
+                    background,
+                    model.dark_theme,
+                    callback_enabled && model.is_pressed(target),
+                );
+                canvas.text_center_fitted(
                     rect.x + rect.width / 2,
                     text_y,
-                    fitted_mobile_text(node.text(), text_role, maximum_text_width_px),
+                    node.text(),
                     text_role,
-                    if callback_enabled { COLOR_WHITE } else { muted },
+                    maximum_text_width_px,
+                    if callback_enabled {
+                        model.on_accent()
+                    } else {
+                        muted
+                    },
                 );
             }
         }
@@ -7822,12 +9452,17 @@ fn render_installed_android_scene_content(
 fn render_installed_android_app(canvas: &mut Canvas<'_>, model: &MobileModel) {
     let installed = &model.android_installed_app;
     let content_ready = model.installed_android_foreground_content_ready();
-    let text = text_color(model.dark_theme);
-    let muted = muted_text(model.dark_theme);
+    let text = model.text_primary();
+    let muted = model.text_secondary();
     render_app_header(
         canvas,
         model,
-        fitted_mobile_text(installed.title.as_str(), MobileTextRole::Title, 420),
+        fitted_mobile_text_for_scale(
+            installed.title.as_str(),
+            MobileTextRole::Title,
+            420,
+            model.large_text,
+        ),
     );
     draw_installed_app_icon(canvas, 320, 60, *installed);
 
@@ -7871,9 +9506,9 @@ fn render_android_demo(canvas: &mut Canvas<'_>, model: &MobileModel) {
         return;
     }
     render_app_header(canvas, model, "AndroidBox Demo");
-    let text = text_color(model.dark_theme);
-    let muted = muted_text(model.dark_theme);
-    let weak = weak_text(model.dark_theme);
+    let text = model.text_primary();
+    let muted = model.text_secondary();
+    let weak = model.text_tertiary();
     let dex_failed = model.androidbox_error != AndroidBoxError::None;
     let activity_failed = model.androidbox_activity_error != AndroidBoxActivityError::None;
     let manifest_verified = androidbox_launcher_manifest_verified(model);
@@ -7960,7 +9595,7 @@ fn render_android_demo(canvas: &mut Canvas<'_>, model: &MobileModel) {
         MobileTextRole::Caption,
         if activity_failed { COLOR_AMBER } else { muted },
     );
-    canvas.fill_rect(DRect::new(36, 328, 288, 1), border_color(model.dark_theme));
+    canvas.fill_rect(DRect::new(36, 328, 288, 1), model.outline_color());
     canvas.text_role(
         36,
         338,
@@ -8145,7 +9780,7 @@ fn render_android_demo(canvas: &mut Canvas<'_>, model: &MobileModel) {
         DRect::new(24, 620, 312, 72),
         24,
         if model.is_pressed(MobilePressedTarget::AndroidBoxExecute) {
-            pressed_surface_color(*model)
+            pressed_surface_color_ref(model)
         } else {
             COLOR_ANDROIDBOX
         },
@@ -8185,16 +9820,16 @@ fn render_messages(canvas: &mut Canvas<'_>, model: MobileModel) {
         MessageView::OfflineStatus => "Connection status",
     };
     render_app_header(canvas, &model, title);
-    let text = text_color(model.dark_theme);
-    let muted = muted_text(model.dark_theme);
-    let weak = weak_text(model.dark_theme);
+    let text = model.text_primary();
+    let muted = model.text_secondary();
+    let weak = model.text_tertiary();
 
     match model.message_view {
         MessageView::Inbox => {
             // Keep the conversation surface genuinely empty. Preview help is
             // separated into a settings-style information group below it, so
             // local documentation cannot be mistaken for real messages.
-            canvas.circle(180, 157, 32, card_color(model.dark_theme, true));
+            canvas.circle(180, 157, 32, model.surface_color(true));
             draw_icon(canvas, 180, 157, IconSize::App, muted, Icon::Messages);
             canvas.text_center(180, 207, "No conversations", MobileTextRole::Body, text);
             canvas.text_center(
@@ -8244,7 +9879,7 @@ fn render_messages(canvas: &mut Canvas<'_>, model: MobileModel) {
                     Icon::ChevronRight,
                 );
             }
-            canvas.fill_rect(DRect::new(78, 409, 248, 1), border_color(model.dark_theme));
+            canvas.fill_rect(DRect::new(78, 409, 248, 1), model.outline_color());
         }
         MessageView::PreviewGuide => {
             canvas.text_role(24, 105, "Local preview", MobileTextRole::Label, muted);
@@ -8276,14 +9911,14 @@ fn render_messages(canvas: &mut Canvas<'_>, model: MobileModel) {
                 337,
                 "No messages are sent",
                 MobileTextRole::Body,
-                COLOR_TEXT_LIGHT,
+                model.on_accent(),
             );
             canvas.text_role(
                 96,
                 372,
                 "or received.",
                 MobileTextRole::Caption,
-                COLOR_TEXT_LIGHT,
+                model.on_accent(),
             );
         }
         MessageView::OfflineStatus => {
@@ -8310,130 +9945,138 @@ fn render_messages(canvas: &mut Canvas<'_>, model: MobileModel) {
 }
 
 #[inline(never)]
-fn render_settings(canvas: &mut Canvas<'_>, model: MobileModel) {
-    render_app_header(canvas, &model, "Settings");
-    let text = text_color(model.dark_theme);
-    let muted = muted_text(model.dark_theme);
-    let weak = weak_text(model.dark_theme);
-    let scroll_offset_px = model.effective_page_scroll_offset_px();
-    let previous_offset_y_px = canvas.design_offset_y_px;
-    let previous_clip_top_y_px = canvas.clip_top_y_px;
-    let previous_clip_bottom_y_px = canvas.clip_bottom_y_px;
-    canvas.clip_top_y_px =
-        previous_clip_top_y_px.max(previous_offset_y_px + i32::from(PAGE_SCROLL_VIEWPORT_TOP_PX));
-    canvas.clip_bottom_y_px =
-        previous_clip_bottom_y_px.min(i32::from(PAGE_SCROLL_VIEWPORT_BOTTOM_PX));
-    canvas.design_offset_y_px = previous_offset_y_px - i32::from(scroll_offset_px);
-
-    canvas.rounded_rect(
-        DRect::new(16, 94, 328, 72),
-        20,
-        card_color(model.dark_theme, true),
+fn render_settings_identity_card(
+    canvas: &mut Canvas<'_>,
+    model: &MobileModel,
+    text: u32,
+    muted: u32,
+) {
+    canvas.card(
+        DRect::screen_inset(MobileSpacingTokens::LG, 94, 72),
+        MobileShapeTokens::RADIUS_CONTROL,
+        model.dark_theme,
+        true,
     );
     canvas.circle(54, 130, 24, model.accent());
-    canvas.text_center(54, 119, "BN", MobileTextRole::Label, COLOR_WHITE);
+    canvas.text_center(54, 119, "BN", MobileTextRole::Label, model.on_accent());
     canvas.text_role(91, 108, "Bndroid OS", MobileTextRole::Title, text);
     canvas.text_role(91, 139, "Local preview", MobileTextRole::Caption, muted);
+}
 
-    canvas.text_role(24, 181, "Appearance", MobileTextRole::Label, muted);
-    canvas.rounded_rect(
-        DRect::new(16, 204, 328, 226),
-        20,
-        card_color(model.dark_theme, false),
+#[inline(never)]
+fn render_settings_display_entry(
+    canvas: &mut Canvas<'_>,
+    model: &MobileModel,
+    text: u32,
+    muted: u32,
+    weak: u32,
+) {
+    canvas.text_role(24, 181, "Personalization", MobileTextRole::Label, muted);
+    canvas.card(
+        DRect::screen_inset(MobileSpacingTokens::LG, 204, 66),
+        MobileShapeTokens::RADIUS_CONTROL,
+        model.dark_theme,
+        false,
     );
-    if model.is_pressed(MobilePressedTarget::Theme) {
+    if model.is_pressed(MobilePressedTarget::Display) {
         canvas.rounded_rect(
             DRect::new(20, 208, 320, 58),
             20,
-            pressed_surface_color(model),
+            pressed_surface_color_ref(model),
         );
     }
-    draw_setting_icon(canvas, 50, 237, model.accent(), Icon::Moon);
-    canvas.text_role(82, 221, "Dark mode", MobileTextRole::Body, text);
+    draw_setting_icon(canvas, 50, 237, model.accent(), Icon::Sun);
+    canvas.text_role(82, 217, "Display & appearance", MobileTextRole::Body, text);
     canvas.text_role(
         82,
-        251,
-        if model.dark_theme { "On" } else { "Off" },
+        247,
+        "Theme, color and software dimming",
         MobileTextRole::Caption,
         muted,
     );
-    canvas.toggle(274, 222, model.dark_theme, model.accent());
-    canvas.fill_rect(DRect::new(78, 269, 248, 1), border_color(model.dark_theme));
-    if model.is_pressed(MobilePressedTarget::Accent) {
-        canvas.rounded_rect(
-            DRect::new(20, 274, 320, 58),
-            20,
-            pressed_surface_color(model),
-        );
-    }
-    draw_setting_icon(canvas, 50, 303, model.accent(), Icon::Palette);
-    canvas.text_role(82, 287, "Accent color", MobileTextRole::Body, text);
-    canvas.text_role(
-        82,
-        317,
-        if model.alternate_accent {
-            "Violet"
-        } else {
-            "Ocean blue"
-        },
-        MobileTextRole::Caption,
-        muted,
-    );
-    canvas.circle(302, 303, 12, model.accent());
-    canvas.circle(302, 303, 5, COLOR_WHITE);
-    canvas.fill_rect(DRect::new(78, 335, 248, 1), border_color(model.dark_theme));
-    if model.is_pressed(MobilePressedTarget::SoftwareDimming) {
-        canvas.rounded_rect(
-            DRect::new(168, 372, 168, 56),
-            18,
-            pressed_surface_color(model),
-        );
-    }
-    draw_setting_icon(canvas, 50, 378, model.accent(), Icon::Sun);
-    canvas.text_role(82, 346, "Software dimming", MobileTextRole::Body, text);
-    canvas.text_role(82, 376, "Session only", MobileTextRole::Caption, muted);
-    canvas.text_end(
-        318,
-        346,
-        software_dimming_percentage(model.software_dimming),
-        MobileTextRole::Label,
-        text,
-    );
-    draw_software_dimming_slider(canvas, model, 407);
+    draw_icon(canvas, 318, 237, IconSize::Status, weak, Icon::ChevronRight);
+}
 
-    canvas.text_role(24, 451, "Connections", MobileTextRole::Label, muted);
-    canvas.rounded_rect(
-        DRect::new(16, 474, 328, 142),
-        20,
-        card_color(model.dark_theme, false),
+#[inline(never)]
+fn render_settings_connections(
+    canvas: &mut Canvas<'_>,
+    model: &MobileModel,
+    muted: u32,
+    weak: u32,
+) {
+    canvas.text_role(24, 293, "Connections", MobileTextRole::Label, muted);
+    canvas.card(
+        DRect::screen_inset(MobileSpacingTokens::LG, 316, 142),
+        MobileShapeTokens::RADIUS_CONTROL,
+        model.dark_theme,
+        false,
     );
-    draw_setting_icon(canvas, 50, 509, weak, Icon::Wifi);
-    canvas.text_role(82, 493, "Wi-Fi", MobileTextRole::Body, muted);
-    canvas.text_role(82, 523, "Not available", MobileTextRole::Caption, weak);
-    canvas.text_end(316, 502, "Off", MobileTextRole::Label, weak);
-    canvas.fill_rect(DRect::new(78, 545, 248, 1), border_color(model.dark_theme));
-    draw_setting_icon(canvas, 50, 580, weak, Icon::Airplane);
-    canvas.text_role(82, 564, "Network access", MobileTextRole::Body, muted);
+    draw_setting_icon(canvas, 50, 351, weak, Icon::Wifi);
+    canvas.text_role(82, 335, "Network & internet", MobileTextRole::Body, muted);
     canvas.text_role(
         82,
-        594,
-        "Disabled in preview",
+        365,
+        "Unavailable in QEMU",
         MobileTextRole::Caption,
         weak,
     );
-    canvas.text_end(316, 573, "Off", MobileTextRole::Label, weak);
+    canvas.text_end(316, 344, "Off", MobileTextRole::Label, weak);
+    canvas.fill_rect(DRect::new(78, 387, 248, 1), model.outline_color());
+    draw_setting_icon(canvas, 50, 422, weak, Icon::Airplane);
+    canvas.text_role(82, 406, "Connected devices", MobileTextRole::Body, muted);
+    canvas.text_role(
+        82,
+        436,
+        "No device transport",
+        MobileTextRole::Caption,
+        weak,
+    );
+    canvas.text_end(316, 415, "Off", MobileTextRole::Label, weak);
+}
 
-    canvas.text_role(24, 629, "Device", MobileTextRole::Label, muted);
-    canvas.rounded_rect(
-        DRect::new(16, 642, 328, 132),
-        20,
-        card_color(model.dark_theme, false),
+#[inline(never)]
+fn render_settings_phone_status(
+    canvas: &mut Canvas<'_>,
+    model: &MobileModel,
+    muted: u32,
+    weak: u32,
+) {
+    canvas.text_role(24, 481, "This phone", MobileTextRole::Label, muted);
+    canvas.card(
+        DRect::screen_inset(MobileSpacingTokens::LG, 504, 112),
+        MobileShapeTokens::RADIUS_CONTROL,
+        model.dark_theme,
+        false,
+    );
+    draw_setting_icon(canvas, 50, 539, weak, Icon::Bell);
+    canvas.text_role(82, 523, "Sound & vibration", MobileTextRole::Body, muted);
+    canvas.text_role(82, 553, "Not implemented", MobileTextRole::Caption, weak);
+    canvas.fill_rect(DRect::new(78, 575, 248, 1), model.outline_color());
+    draw_setting_icon(canvas, 50, 590, weak, Icon::Info);
+    canvas.text_role(82, 578, "Hardware status", MobileTextRole::Body, muted);
+    canvas.text_end(316, 581, "QEMU", MobileTextRole::Label, weak);
+}
+
+#[inline(never)]
+fn render_settings_system_rows(
+    canvas: &mut Canvas<'_>,
+    model: &MobileModel,
+    text: u32,
+    muted: u32,
+    weak: u32,
+) {
+    canvas.text_role(24, 629, "System", MobileTextRole::Label, muted);
+    canvas.card(
+        DRect::screen_inset(MobileSpacingTokens::LG, 642, 132),
+        MobileShapeTokens::RADIUS_CONTROL,
+        model.dark_theme,
+        false,
     );
     if model.is_pressed(MobilePressedTarget::Apps) {
         canvas.rounded_rect(
             DRect::new(24, 646, 320, 58),
             20,
-            pressed_surface_color(model),
+            pressed_surface_color_ref(model),
         );
     }
     draw_setting_icon(canvas, 50, 675, COLOR_ANDROIDBOX, Icon::DroidCode);
@@ -8463,19 +10106,28 @@ fn render_settings(canvas: &mut Canvas<'_>, model: MobileModel) {
         muted,
     );
     draw_icon(canvas, 318, 675, IconSize::Status, weak, Icon::ChevronRight);
-    canvas.fill_rect(DRect::new(78, 708, 248, 1), border_color(model.dark_theme));
+    canvas.fill_rect(DRect::new(78, 708, 248, 1), model.outline_color());
     if model.is_pressed(MobilePressedTarget::About) {
         canvas.rounded_rect(
             DRect::new(24, 712, 320, 58),
             20,
-            pressed_surface_color(model),
+            pressed_surface_color_ref(model),
         );
     }
     draw_setting_icon(canvas, 50, 741, model.accent(), Icon::Info);
     canvas.text_role(82, 717, "About phone", MobileTextRole::Body, text);
     canvas.text_role(82, 747, "Bndroid OS", MobileTextRole::Caption, muted);
     draw_icon(canvas, 318, 741, IconSize::Status, weak, Icon::ChevronRight);
+}
 
+#[inline(never)]
+fn render_settings_local_status(
+    canvas: &mut Canvas<'_>,
+    model: &MobileModel,
+    text: u32,
+    muted: u32,
+    weak: u32,
+) {
     // This static, explicitly local-only status card occupies the exact
     // below-fold extent that backs the bounded scroll range. It advertises no
     // unavailable service and introduces no inert control.
@@ -8489,7 +10141,7 @@ fn render_settings(canvas: &mut Canvas<'_>, model: MobileModel) {
         MobileTextRole::Caption,
         muted,
     );
-    canvas.fill_rect(DRect::new(36, 858, 288, 1), border_color(model.dark_theme));
+    canvas.fill_rect(DRect::new(36, 858, 288, 1), model.outline_color());
     canvas.text_role(
         36,
         866,
@@ -8497,6 +10149,30 @@ fn render_settings(canvas: &mut Canvas<'_>, model: MobileModel) {
         MobileTextRole::Label,
         weak,
     );
+}
+
+#[inline(never)]
+fn render_settings(canvas: &mut Canvas<'_>, model: &MobileModel) {
+    render_app_header(canvas, model, "Settings");
+    let text = model.text_primary();
+    let muted = model.text_secondary();
+    let weak = model.text_tertiary();
+    let scroll_offset_px = model.effective_page_scroll_offset_px();
+    let previous_offset_y_px = canvas.design_offset_y_px;
+    let previous_clip_top_y_px = canvas.clip_top_y_px;
+    let previous_clip_bottom_y_px = canvas.clip_bottom_y_px;
+    canvas.clip_top_y_px =
+        previous_clip_top_y_px.max(previous_offset_y_px + i32::from(PAGE_SCROLL_VIEWPORT_TOP_PX));
+    canvas.clip_bottom_y_px =
+        previous_clip_bottom_y_px.min(i32::from(PAGE_SCROLL_VIEWPORT_BOTTOM_PX));
+    canvas.design_offset_y_px = previous_offset_y_px - i32::from(scroll_offset_px);
+
+    render_settings_identity_card(canvas, model, text, muted);
+    render_settings_display_entry(canvas, model, text, muted, weak);
+    render_settings_connections(canvas, model, muted, weak);
+    render_settings_phone_status(canvas, model, muted, weak);
+    render_settings_system_rows(canvas, model, text, muted, weak);
+    render_settings_local_status(canvas, model, text, muted, weak);
 
     canvas.design_offset_y_px = previous_offset_y_px;
     canvas.clip_top_y_px = previous_clip_top_y_px;
@@ -8507,6 +10183,349 @@ fn render_settings(canvas: &mut Canvas<'_>, model: MobileModel) {
         SETTINGS_SCROLL_MAX_PX,
         model.dark_theme,
     );
+}
+
+#[inline(never)]
+fn render_display_identity_card(
+    canvas: &mut Canvas<'_>,
+    model: &MobileModel,
+    text: u32,
+    muted: u32,
+) {
+    canvas.card(
+        DRect::screen_inset(MobileSpacingTokens::LG, 94, 72),
+        MobileShapeTokens::RADIUS_CONTROL,
+        model.dark_theme,
+        true,
+    );
+    draw_setting_icon(canvas, 54, 130, model.accent(), Icon::Sun);
+    canvas.text_role(91, 108, "Screen & appearance", MobileTextRole::Title, text);
+    canvas.text_role(
+        91,
+        139,
+        "720 x 1600 / 2x UI scale",
+        MobileTextRole::Caption,
+        muted,
+    );
+}
+
+#[inline(never)]
+fn render_display_appearance_shell(canvas: &mut Canvas<'_>, model: &MobileModel, muted: u32) {
+    canvas.text_role(24, 181, "Appearance", MobileTextRole::Label, muted);
+    canvas.card(
+        DRect::screen_inset(MobileSpacingTokens::LG, 204, 226),
+        MobileShapeTokens::RADIUS_CONTROL,
+        model.dark_theme,
+        false,
+    );
+}
+
+#[inline(never)]
+fn render_display_theme_row(canvas: &mut Canvas<'_>, model: &MobileModel, text: u32, muted: u32) {
+    if model.is_pressed(MobilePressedTarget::Theme) {
+        canvas.rounded_rect(
+            DRect::new(20, 208, 320, 58),
+            20,
+            pressed_surface_color_ref(model),
+        );
+    }
+    draw_setting_icon(canvas, 50, 237, model.accent(), Icon::Moon);
+    canvas.text_role(82, 221, "Dark mode", MobileTextRole::Body, text);
+    canvas.text_role(
+        82,
+        251,
+        if model.dark_theme { "On" } else { "Off" },
+        MobileTextRole::Caption,
+        muted,
+    );
+    canvas.toggle(274, 222, model.dark_theme, model.accent());
+    canvas.fill_rect(DRect::new(78, 269, 248, 1), model.outline_color());
+}
+
+#[inline(never)]
+fn render_display_accent_row(canvas: &mut Canvas<'_>, model: &MobileModel, text: u32, muted: u32) {
+    if model.is_pressed(MobilePressedTarget::Accent) {
+        canvas.rounded_rect(
+            DRect::new(20, 274, 320, 58),
+            20,
+            pressed_surface_color_ref(model),
+        );
+    }
+    draw_setting_icon(canvas, 50, 303, model.accent(), Icon::Palette);
+    canvas.text_role(82, 287, "Accent color", MobileTextRole::Body, text);
+    canvas.text_role(
+        82,
+        317,
+        if model.alternate_accent {
+            "Violet"
+        } else {
+            "Ocean blue"
+        },
+        MobileTextRole::Caption,
+        muted,
+    );
+    canvas.circle(302, 303, 12, model.accent());
+    canvas.circle(302, 303, 5, model.on_accent());
+    canvas.fill_rect(DRect::new(78, 335, 248, 1), model.outline_color());
+}
+
+#[inline(never)]
+fn render_display_dimming_row(canvas: &mut Canvas<'_>, model: &MobileModel, text: u32, muted: u32) {
+    if model.is_pressed(MobilePressedTarget::SoftwareDimming) {
+        canvas.rounded_rect(
+            DRect::new(168, 372, 168, 56),
+            18,
+            pressed_surface_color_ref(model),
+        );
+    }
+    draw_setting_icon(canvas, 50, 378, model.accent(), Icon::Sun);
+    canvas.text_role(82, 346, "Software dimming", MobileTextRole::Body, text);
+    canvas.text_role(82, 376, "Session only", MobileTextRole::Caption, muted);
+    canvas.text_end(
+        318,
+        346,
+        software_dimming_percentage(model.software_dimming),
+        MobileTextRole::Label,
+        text,
+    );
+    draw_software_dimming_slider(canvas, model, 407);
+}
+
+#[inline(never)]
+fn render_display_screen_facts(
+    canvas: &mut Canvas<'_>,
+    model: &MobileModel,
+    text: u32,
+    muted: u32,
+) {
+    canvas.text_role(24, 451, "Screen", MobileTextRole::Label, muted);
+    canvas.card(
+        DRect::screen_inset(MobileSpacingTokens::LG, 474, 132),
+        MobileShapeTokens::RADIUS_CONTROL,
+        model.dark_theme,
+        false,
+    );
+    canvas.text_role(36, 493, "Resolution", MobileTextRole::Body, text);
+    canvas.text_end(324, 502, "720 x 1600", MobileTextRole::Label, muted);
+    canvas.fill_rect(DRect::new(36, 540, 288, 1), model.outline_color());
+    canvas.text_role(36, 559, "Interface scale", MobileTextRole::Body, text);
+    canvas.text_end(324, 568, "360 x 800 dp", MobileTextRole::Label, muted);
+}
+
+#[inline(never)]
+fn render_display_accessibility_entry(
+    canvas: &mut Canvas<'_>,
+    model: &MobileModel,
+    text: u32,
+    muted: u32,
+    weak: u32,
+) {
+    canvas.text_role(24, 629, "Accessibility", MobileTextRole::Label, muted);
+    canvas.card(DRect::new(16, 652, 328, 96), 20, model.dark_theme, false);
+    if model.is_pressed(MobilePressedTarget::Accessibility) {
+        canvas.rounded_rect(
+            DRect::new(20, 656, 320, 88),
+            MobileShapeTokens::RADIUS_CONTROL,
+            pressed_surface_color_ref(model),
+        );
+    }
+    draw_setting_icon(canvas, 50, 692, model.accent(), Icon::Accessibility);
+    canvas.text_role(82, 670, "Text & contrast", MobileTextRole::Body, text);
+    canvas.text_role(
+        82,
+        704,
+        match (model.large_text, model.high_contrast) {
+            (false, false) => "Standard",
+            (true, false) => "Larger text",
+            (false, true) => "High contrast",
+            (true, true) => "Larger text / High contrast",
+        },
+        MobileTextRole::Caption,
+        weak,
+    );
+    draw_icon(canvas, 318, 692, IconSize::Status, weak, Icon::ChevronRight);
+}
+
+#[inline(never)]
+fn render_display(canvas: &mut Canvas<'_>, model: &MobileModel) {
+    render_app_header(canvas, model, "Display");
+    let text = model.text_primary();
+    let muted = model.text_secondary();
+    let weak = model.text_tertiary();
+
+    render_display_identity_card(canvas, model, text, muted);
+    render_display_appearance_shell(canvas, model, muted);
+    render_display_theme_row(canvas, model, text, muted);
+    render_display_accent_row(canvas, model, text, muted);
+    render_display_dimming_row(canvas, model, text, muted);
+    render_display_screen_facts(canvas, model, text, muted);
+    render_display_accessibility_entry(canvas, model, text, muted, weak);
+}
+
+#[inline(never)]
+fn render_accessibility_identity_card(
+    canvas: &mut Canvas<'_>,
+    model: &MobileModel,
+    text: u32,
+    muted: u32,
+) {
+    canvas.card(
+        DRect::screen_inset(MobileSpacingTokens::LG, 94, 72),
+        MobileShapeTokens::RADIUS_CONTROL,
+        model.dark_theme,
+        true,
+    );
+    draw_setting_icon(canvas, 54, 130, model.accent(), Icon::Accessibility);
+    canvas.text_role(91, 108, "Visual accessibility", MobileTextRole::Title, text);
+    canvas.text_role(
+        91,
+        139,
+        "Session-wide and reversible",
+        MobileTextRole::Caption,
+        muted,
+    );
+}
+
+#[inline(never)]
+fn render_accessibility_preferences(
+    canvas: &mut Canvas<'_>,
+    model: &MobileModel,
+    text: u32,
+    muted: u32,
+) {
+    canvas.text_role(24, 181, "Reading", MobileTextRole::Label, muted);
+    canvas.card(
+        DRect::screen_inset(MobileSpacingTokens::LG, 204, 132),
+        MobileShapeTokens::RADIUS_CONTROL,
+        model.dark_theme,
+        false,
+    );
+    if model.is_pressed(MobilePressedTarget::LargeText) {
+        canvas.rounded_rect(
+            DRect::new(20, 208, 320, 58),
+            MobileShapeTokens::RADIUS_CONTROL,
+            pressed_surface_color_ref(model),
+        );
+    }
+    draw_setting_icon(canvas, 50, 237, model.accent(), Icon::TextSize);
+    canvas.text_role(82, 221, "Larger text", MobileTextRole::Body, text);
+    canvas.text_role(
+        82,
+        251,
+        if model.large_text { "On" } else { "Off" },
+        MobileTextRole::Caption,
+        muted,
+    );
+    canvas.toggle(274, 222, model.large_text, model.accent());
+    canvas.fill_rect(DRect::new(78, 269, 248, 1), model.outline_color());
+
+    if model.is_pressed(MobilePressedTarget::HighContrast) {
+        canvas.rounded_rect(
+            DRect::new(20, 274, 320, 58),
+            MobileShapeTokens::RADIUS_CONTROL,
+            pressed_surface_color_ref(model),
+        );
+    }
+    draw_setting_icon(canvas, 50, 303, model.accent(), Icon::Contrast);
+    canvas.text_role(82, 287, "High contrast", MobileTextRole::Body, text);
+    canvas.text_role(
+        82,
+        317,
+        if model.high_contrast { "On" } else { "Off" },
+        MobileTextRole::Caption,
+        muted,
+    );
+    canvas.toggle(274, 288, model.high_contrast, model.accent());
+}
+
+#[inline(never)]
+fn render_accessibility_preview(
+    canvas: &mut Canvas<'_>,
+    model: &MobileModel,
+    text: u32,
+    muted: u32,
+) {
+    canvas.text_role(24, 359, "Preview", MobileTextRole::Label, muted);
+    canvas.card(
+        DRect::screen_inset(MobileSpacingTokens::LG, 382, 154),
+        MobileShapeTokens::RADIUS_LARGE,
+        model.dark_theme,
+        true,
+    );
+    canvas.rounded_rect(DRect::new(34, 404, 64, 64), 22, model.accent());
+    canvas.text_center(66, 413, "Aa", MobileTextRole::Title, model.on_accent());
+    canvas.text_role(116, 404, "Readable by design", MobileTextRole::Body, text);
+    canvas.text_role(
+        116,
+        440,
+        if model.large_text {
+            "Larger semantic type"
+        } else {
+            "Standard semantic type"
+        },
+        MobileTextRole::Caption,
+        muted,
+    );
+    canvas.fill_rect(DRect::new(34, 484, 292, 1), model.outline_color());
+    canvas.text_role(
+        34,
+        502,
+        "The same preference reaches Shell and apps.",
+        MobileTextRole::Label,
+        muted,
+    );
+}
+
+#[inline(never)]
+fn render_accessibility_boundary(
+    canvas: &mut Canvas<'_>,
+    model: &MobileModel,
+    text: u32,
+    muted: u32,
+    weak: u32,
+) {
+    canvas.text_role(24, 565, "Scope", MobileTextRole::Label, muted);
+    canvas.card(
+        DRect::screen_inset(MobileSpacingTokens::LG, 588, 128),
+        MobileShapeTokens::RADIUS_CONTROL,
+        model.dark_theme,
+        false,
+    );
+    draw_setting_icon(canvas, 50, 626, model.accent(), Icon::Info);
+    canvas.text_role(
+        82,
+        604,
+        "Software UI preference",
+        MobileTextRole::Body,
+        text,
+    );
+    canvas.text_role(
+        82,
+        638,
+        "No device or service authority",
+        MobileTextRole::Caption,
+        weak,
+    );
+    canvas.fill_rect(DRect::new(36, 668, 288, 1), model.outline_color());
+    canvas.text_role(
+        36,
+        682,
+        "Screen reader semantics are still pending",
+        MobileTextRole::Label,
+        weak,
+    );
+}
+
+#[inline(never)]
+fn render_accessibility(canvas: &mut Canvas<'_>, model: &MobileModel) {
+    render_app_header(canvas, model, "Accessibility");
+    let text = model.text_primary();
+    let muted = model.text_secondary();
+    let weak = model.text_tertiary();
+    render_accessibility_identity_card(canvas, model, text, muted);
+    render_accessibility_preferences(canvas, model, text, muted);
+    render_accessibility_preview(canvas, model, text, muted);
+    render_accessibility_boundary(canvas, model, text, muted, weak);
 }
 
 fn render_single_installed_apps_summary(
@@ -8521,14 +10540,24 @@ fn render_single_installed_apps_summary(
     canvas.text_role(
         94,
         126,
-        fitted_mobile_text(installed.title.as_str(), MobileTextRole::Body, 470),
+        fitted_mobile_text_for_scale(
+            installed.title.as_str(),
+            MobileTextRole::Body,
+            470,
+            model.large_text,
+        ),
         MobileTextRole::Body,
         text,
     );
     canvas.text_role(
         94,
         158,
-        fitted_mobile_text(installed.package.as_str(), MobileTextRole::Caption, 470),
+        fitted_mobile_text_for_scale(
+            installed.package.as_str(),
+            MobileTextRole::Caption,
+            470,
+            model.large_text,
+        ),
         MobileTextRole::Caption,
         muted,
     );
@@ -8588,7 +10617,7 @@ fn render_multi_installed_apps_summary(
                     pressed_surface_color(model)
                 } else {
                     blend(
-                        card_color(model.dark_theme, true),
+                        model.surface_color(true),
                         installed_app_fallback_color(app),
                         if model.dark_theme { 58 } else { 30 },
                     )
@@ -8596,11 +10625,12 @@ fn render_multi_installed_apps_summary(
             );
         }
         draw_installed_app_icon(canvas, left + 36, 154, app);
-        let (title_first, title_second) = split_installed_app_label(app.title.as_str());
+        let (title_first, title_second) =
+            split_installed_app_label(app.title.as_str(), model.large_text);
         canvas.text_role(
             left + 70,
             126,
-            fitted_mobile_text(title_first, MobileTextRole::Label, 166),
+            fitted_mobile_text_for_scale(title_first, MobileTextRole::Label, 166, model.large_text),
             MobileTextRole::Label,
             text,
         );
@@ -8608,7 +10638,12 @@ fn render_multi_installed_apps_summary(
             canvas.text_role(
                 left + 70,
                 149,
-                fitted_mobile_text(title_second, MobileTextRole::Label, 166),
+                fitted_mobile_text_for_scale(
+                    title_second,
+                    MobileTextRole::Label,
+                    166,
+                    model.large_text,
+                ),
                 MobileTextRole::Label,
                 muted,
             );
@@ -8639,15 +10674,15 @@ fn render_multi_installed_apps_summary(
             },
         );
     }
-    canvas.fill_rect(DRect::new(180, 126, 1, 84), border_color(model.dark_theme));
+    canvas.fill_rect(DRect::new(180, 126, 1, 84), model.outline_color());
 }
 
 #[inline(never)]
 fn render_apps(canvas: &mut Canvas<'_>, model: MobileModel) {
     render_app_header(canvas, &model, "Apps");
-    let text = text_color(model.dark_theme);
-    let muted = muted_text(model.dark_theme);
-    let weak = weak_text(model.dark_theme);
+    let text = model.text_primary();
+    let muted = model.text_secondary();
+    let weak = model.text_tertiary();
     let installed = model.android_installed_app;
     let scroll_offset_px = model.effective_page_scroll_offset_px();
     let previous_offset_y_px = canvas.design_offset_y_px;
@@ -8675,7 +10710,7 @@ fn render_apps(canvas: &mut Canvas<'_>, model: MobileModel) {
         let candidate_present = candidate.present;
         #[cfg(not(feature = "androidbox-runtime-install2"))]
         let candidate_present = false;
-        canvas.circle(180, 178, 34, card_color(model.dark_theme, false));
+        canvas.circle(180, 178, 34, model.surface_color(false));
         draw_icon(
             canvas,
             180,
@@ -8718,7 +10753,12 @@ fn render_apps(canvas: &mut Canvas<'_>, model: MobileModel) {
             if candidate_present {
                 #[cfg(feature = "androidbox-runtime-install2")]
                 {
-                    fitted_mobile_text(candidate.title.as_str(), MobileTextRole::Caption, 520)
+                    fitted_mobile_text_for_scale(
+                        candidate.title.as_str(),
+                        MobileTextRole::Caption,
+                        520,
+                        model.large_text,
+                    )
                 }
                 #[cfg(not(feature = "androidbox-runtime-install2"))]
                 {
@@ -8772,7 +10812,7 @@ fn render_apps(canvas: &mut Canvas<'_>, model: MobileModel) {
             MobileTextRole::Caption,
             muted,
         );
-        canvas.fill_rect(DRect::new(36, 510, 288, 1), border_color(model.dark_theme));
+        canvas.fill_rect(DRect::new(36, 510, 288, 1), model.outline_color());
         canvas.text_role(36, 520, "No app is installed", MobileTextRole::Label, weak);
     } else {
         #[cfg(feature = "androidbox-multipackage4")]
@@ -8814,21 +10854,23 @@ fn render_apps(canvas: &mut Canvas<'_>, model: MobileModel) {
             canvas.text_role(38, y, label, MobileTextRole::Label, muted);
             canvas.text_end(320, y, value, MobileTextRole::Caption, value_color);
             if index != 6 {
-                canvas.fill_rect(
-                    DRect::new(38, y + 23, 284, 1),
-                    border_color(model.dark_theme),
-                );
+                canvas.fill_rect(DRect::new(38, y + 23, 284, 1), model.outline_color());
             }
         }
 
         canvas.text_role(24, 524, "Launch", MobileTextRole::Label, muted);
         canvas.card(DRect::new(18, 546, 324, 122), 22, model.dark_theme, false);
         canvas.text_role(36, 562, "Available in All apps", MobileTextRole::Body, text);
-        canvas.fill_rect(DRect::new(36, 593, 288, 1), border_color(model.dark_theme));
+        canvas.fill_rect(DRect::new(36, 593, 288, 1), model.outline_color());
         canvas.text_role(
             36,
             608,
-            fitted_mobile_text(installed.activity.as_str(), MobileTextRole::Caption, 520),
+            fitted_mobile_text_for_scale(
+                installed.activity.as_str(),
+                MobileTextRole::Caption,
+                520,
+                model.large_text,
+            ),
             MobileTextRole::Caption,
             muted,
         );
@@ -8940,12 +10982,12 @@ fn render_apps_install_dialog(canvas: &mut Canvas<'_>, model: MobileModel) {
     if !state.blocks_apps_page() {
         return;
     }
-    let text = text_color(model.dark_theme);
-    let muted = muted_text(model.dark_theme);
+    let text = model.text_primary();
+    let muted = model.text_secondary();
     let candidate = model.android_install_candidate;
     canvas.fill_rect(DRect::new(0, 88, 360, 686), 0x0010_1524);
     canvas.card(DRect::new(20, 218, 320, 374), 28, model.dark_theme, true);
-    canvas.circle(180, 286, 34, card_color(model.dark_theme, false));
+    canvas.circle(180, 286, 34, model.surface_color(false));
     draw_icon(
         canvas,
         180,
@@ -8966,14 +11008,24 @@ fn render_apps_install_dialog(canvas: &mut Canvas<'_>, model: MobileModel) {
             canvas.text_center(
                 180,
                 386,
-                fitted_mobile_text(candidate.title.as_str(), MobileTextRole::Body, 520),
+                fitted_mobile_text_for_scale(
+                    candidate.title.as_str(),
+                    MobileTextRole::Body,
+                    520,
+                    model.large_text,
+                ),
                 MobileTextRole::Body,
                 text,
             );
             canvas.text_center(
                 180,
                 422,
-                fitted_mobile_text(candidate.package.as_str(), MobileTextRole::Caption, 520),
+                fitted_mobile_text_for_scale(
+                    candidate.package.as_str(),
+                    MobileTextRole::Caption,
+                    520,
+                    model.large_text,
+                ),
                 MobileTextRole::Caption,
                 muted,
             );
@@ -9057,11 +11109,11 @@ fn render_apps_uninstall_dialog(canvas: &mut Canvas<'_>, model: MobileModel) {
     if !state.blocks_apps_page() {
         return;
     }
-    let text = text_color(model.dark_theme);
-    let muted = muted_text(model.dark_theme);
+    let text = model.text_primary();
+    let muted = model.text_secondary();
     canvas.fill_rect(DRect::new(0, 88, 360, 686), 0x0010_1524);
     canvas.card(DRect::new(20, 218, 320, 374), 28, model.dark_theme, true);
-    canvas.circle(180, 286, 34, card_color(model.dark_theme, false));
+    canvas.circle(180, 286, 34, model.surface_color(false));
     draw_icon(
         canvas,
         180,
@@ -9077,10 +11129,11 @@ fn render_apps_uninstall_dialog(canvas: &mut Canvas<'_>, model: MobileModel) {
             canvas.text_center(
                 180,
                 388,
-                fitted_mobile_text(
+                fitted_mobile_text_for_scale(
                     model.android_installed_app.title.as_str(),
                     MobileTextRole::Body,
                     520,
+                    model.large_text,
                 ),
                 MobileTextRole::Body,
                 text,
@@ -9210,12 +11263,12 @@ fn render_page_scroll_indicator(
     canvas.clip_bottom_y_px = previous_clip_bottom_y_px;
 }
 
-fn draw_software_dimming_slider(canvas: &mut Canvas<'_>, model: MobileModel, center_y: i32) {
+fn draw_software_dimming_slider(canvas: &mut Canvas<'_>, model: &MobileModel, center_y: i32) {
     let thumb_x = software_dimming_thumb_x(model.software_dimming);
     canvas.rounded_rect(
         DRect::new(178, center_y - 4, 146, 8),
         4,
-        border_color(model.dark_theme),
+        model.outline_color(),
     );
     if thumb_x > 178 {
         canvas.rounded_rect(
@@ -9232,7 +11285,7 @@ fn draw_software_dimming_slider(canvas: &mut Canvas<'_>, model: MobileModel, cen
             if stop_x <= thumb_x {
                 model.accent()
             } else {
-                muted_text(model.dark_theme)
+                model.text_secondary()
             },
         );
     }
@@ -9243,13 +11296,13 @@ fn draw_software_dimming_slider(canvas: &mut Canvas<'_>, model: MobileModel, cen
 #[inline(never)]
 fn render_about(canvas: &mut Canvas<'_>, model: MobileModel) {
     render_app_header(canvas, &model, "About phone");
-    let text = text_color(model.dark_theme);
-    let muted = muted_text(model.dark_theme);
-    let weak = weak_text(model.dark_theme);
+    let text = model.text_primary();
+    let muted = model.text_secondary();
+    let weak = model.text_tertiary();
 
     canvas.circle(180, 151, 40, model.accent());
     canvas.circle(180, 151, 31, blend(model.accent(), COLOR_WHITE, 32));
-    canvas.text_center(180, 139, "BN", MobileTextRole::Title, COLOR_WHITE);
+    canvas.text_center(180, 139, "BN", MobileTextRole::Title, model.on_accent());
     canvas.text_center(180, 208, "Bndroid OS", MobileTextRole::Title, text);
     canvas.text_center(180, 242, "Preview build", MobileTextRole::Caption, muted);
 
@@ -9267,10 +11320,7 @@ fn render_about(canvas: &mut Canvas<'_>, model: MobileModel) {
         canvas.text_role(38, y, label, MobileTextRole::Label, muted);
         canvas.text_end(316, y, value, MobileTextRole::Caption, text);
         if index + 1 != information.len() {
-            canvas.fill_rect(
-                DRect::new(38, y + 25, 284, 1),
-                border_color(model.dark_theme),
-            );
+            canvas.fill_rect(DRect::new(38, y + 25, 284, 1), model.outline_color());
         }
     }
 
@@ -9303,15 +11353,12 @@ fn render_about(canvas: &mut Canvas<'_>, model: MobileModel) {
 }
 
 fn render_quick_settings(canvas: &mut Canvas<'_>, model: MobileModel, shade_reveal_px: u16) {
-    let text = text_color(model.dark_theme);
-    let muted = muted_text(model.dark_theme);
-    let weak = weak_text(model.dark_theme);
+    let text = model.text_primary();
+    let muted = model.text_secondary();
+    let weak = model.text_tertiary();
     let date = model.time.short_date_text();
-    let panel = if model.dark_theme {
-        0x000d_1629
-    } else {
-        0x00f3_f7ff
-    };
+    let theme = model.theme_tokens();
+    let panel = theme.panel;
 
     let full_tint = if model.dark_theme { 112 } else { 54 };
     let tint = full_tint * u32::from(shade_reveal_px) / u32::from(SHADE_REVEAL_MAX);
@@ -9327,18 +11374,28 @@ fn render_quick_settings(canvas: &mut Canvas<'_>, model: MobileModel, shade_reve
         canvas.rounded_rect(
             DRect::new(-24, -24, 408, reveal_bottom + 28),
             38,
-            COLOR_SHADOW,
+            theme.shadow,
         );
         canvas.clip_bottom_y_px = previous_clip_bottom_y_px.min(i32::from(shade_reveal_px));
         canvas.rounded_rect(DRect::new(-24, -28, 408, reveal_bottom + 28), 38, panel);
     } else {
-        canvas.rounded_rect(DRect::new(-24, -24, 408, 824), 38, COLOR_SHADOW);
+        canvas.rounded_rect(DRect::new(-24, -24, 408, 824), 38, theme.shadow);
         canvas.rounded_rect(DRect::new(-24, -28, 408, 828), 38, panel);
     }
-    if model.dark_theme {
-        canvas.radial_glow(330, 34, 150, COLOR_PURPLE_GLOW, 42);
-        canvas.radial_glow(12, 404, 170, COLOR_CYAN_GLOW, 28);
-    }
+    canvas.radial_glow(
+        330,
+        34,
+        150,
+        theme.wallpaper_glow_primary,
+        if model.dark_theme { 42 } else { 28 },
+    );
+    canvas.radial_glow(
+        12,
+        404,
+        170,
+        theme.wallpaper_glow_secondary,
+        if model.dark_theme { 28 } else { 18 },
+    );
 
     draw_time_role(canvas, 20, 56, model.time, MobileTextRole::Headline, text);
     canvas.text_role(22, 96, date.as_str(), MobileTextRole::Label, muted);
@@ -9349,7 +11406,7 @@ fn render_quick_settings(canvas: &mut Canvas<'_>, model: MobileModel, shade_reve
         if model.is_pressed(MobilePressedTarget::ShadeClose) {
             pressed_surface_color(model)
         } else {
-            card_color(model.dark_theme, true)
+            model.surface_color(true)
         },
     );
     draw_icon(canvas, 324, 80, IconSize::List, text, Icon::ChevronDown);
@@ -9373,7 +11430,7 @@ fn render_quick_settings(canvas: &mut Canvas<'_>, model: MobileModel, shade_reve
         muted,
     );
     canvas.circle(146, 214, 6, model.accent());
-    canvas.circle(146, 214, 2, COLOR_WHITE);
+    canvas.circle(146, 214, 2, model.on_accent());
 
     canvas.card(DRect::new(188, 148, 156, 84), 20, model.dark_theme, true);
     if model.is_pressed(MobilePressedTarget::Accent) {
@@ -9397,7 +11454,7 @@ fn render_quick_settings(canvas: &mut Canvas<'_>, model: MobileModel, shade_reve
         muted,
     );
     canvas.circle(318, 214, 6, model.accent());
-    canvas.circle(318, 214, 2, COLOR_WHITE);
+    canvas.circle(318, 214, 2, model.on_accent());
 
     canvas.card(DRect::new(16, 244, 156, 84), 20, model.dark_theme, false);
     draw_setting_icon(canvas, 50, 277, COLOR_SETTINGS, Icon::Wifi);
@@ -9428,13 +11485,13 @@ fn render_quick_settings(canvas: &mut Canvas<'_>, model: MobileModel, shade_reve
         MobileTextRole::Caption,
         muted,
     );
-    draw_software_dimming_slider(canvas, model, 374);
+    draw_software_dimming_slider(canvas, &model, 374);
 
     canvas.text_role(20, 428, "Notifications", MobileTextRole::Label, muted);
     if model.boot_notification_visible {
         let offset = i32::from(model.boot_notification_offset_px) / SCALE;
         if offset != 0 {
-            let underlay = blend(card_color(model.dark_theme, true), model.accent(), 72);
+            let underlay = blend(model.surface_color(true), model.accent(), 72);
             canvas.rounded_rect(DRect::new(16, 452, 328, 116), 22, underlay);
             canvas.text_center(
                 if offset > 0 { 52 } else { 308 },
@@ -9463,7 +11520,7 @@ fn render_quick_settings(canvas: &mut Canvas<'_>, model: MobileModel, shade_reve
             52 + offset,
             510,
             IconSize::List,
-            COLOR_WHITE,
+            model.on_accent(),
             Icon::Info,
         );
         canvas.text_role(82 + offset, 464, "System UI", MobileTextRole::Label, weak);
@@ -9499,7 +11556,7 @@ fn render_quick_settings(canvas: &mut Canvas<'_>, model: MobileModel, shade_reve
         );
     } else {
         canvas.card(DRect::new(16, 452, 328, 168), 22, model.dark_theme, false);
-        canvas.circle(180, 502, 28, card_color(model.dark_theme, true));
+        canvas.circle(180, 502, 28, model.surface_color(true));
         draw_icon(canvas, 180, 502, IconSize::App, muted, Icon::Bell);
         canvas.text_center(180, 544, "No notifications", MobileTextRole::Body, text);
         canvas.text_center(
@@ -9526,6 +11583,9 @@ enum Icon {
     Moon,
     Palette,
     Sun,
+    Accessibility,
+    TextSize,
+    Contrast,
     Wifi,
     Airplane,
     Info,
@@ -9666,6 +11726,28 @@ fn draw_icon(canvas: &mut Canvas<'_>, x: i32, y: i32, size: IconSize, color: u32
                 canvas.round_line(ox(x0), oy(y0), ox(x1), oy(y1), stroke, color);
             }
         }
+        Icon::Accessibility => {
+            canvas.aa_circle(x, oy(-8), stroke + 1, color);
+            canvas.round_line(x, oy(-4), x, oy(4), stroke, color);
+            canvas.round_line(ox(-9), oy(-2), ox(9), oy(-2), stroke, color);
+            canvas.round_line(x, oy(4), ox(-7), oy(10), stroke, color);
+            canvas.round_line(x, oy(4), ox(7), oy(10), stroke, color);
+        }
+        Icon::TextSize => {
+            canvas.round_line(ox(-10), oy(8), ox(-4), oy(-9), stroke, color);
+            canvas.round_line(ox(-4), oy(-9), ox(2), oy(8), stroke, color);
+            canvas.round_line(ox(-8), oy(2), ox(0), oy(2), stroke, color);
+            canvas.round_line(ox(4), oy(8), ox(7), oy(-2), stroke, color);
+            canvas.round_line(ox(7), oy(-2), ox(10), oy(8), stroke, color);
+            canvas.round_line(ox(5), oy(4), ox(9), oy(4), stroke, color);
+        }
+        Icon::Contrast => {
+            canvas.ring(x, y, icon_offset(10, size_px), stroke, color);
+            canvas.round_line(x, oy(-9), x, oy(9), stroke, color);
+            for dot_y in [-5, 0, 5] {
+                canvas.aa_circle(ox(-4), oy(dot_y), stroke + 1, color);
+            }
+        }
         Icon::Wifi => {
             for (x0, y0, x1, y1) in [
                 (-10, -3, -5, -7),
@@ -9788,12 +11870,12 @@ fn draw_icon(canvas: &mut Canvas<'_>, x: i32, y: i32, size: IconSize, color: u32
 }
 
 fn draw_app_icon(canvas: &mut Canvas<'_>, x: i32, y: i32, color: u32, icon: Icon) {
-    canvas.rounded_rect(DRect::new(x - 25, y - 25, 50, 50), 16, color);
-    let foreground = if color == COLOR_CALCULATOR {
-        COLOR_TEXT_LIGHT
-    } else {
-        COLOR_WHITE
-    };
+    canvas.rounded_rect(
+        DRect::new(x - 25, y - 25, 50, 50),
+        MobileShapeTokens::RADIUS_APP_ICON,
+        color,
+    );
+    let foreground = accessible_surface_ink(color);
     draw_icon(canvas, x, y, IconSize::App, foreground, icon);
 }
 
@@ -9863,69 +11945,39 @@ fn draw_installed_app_icon(
 
     canvas.rounded_rect(
         DRect::new(x - 25, y - 25, 50, 50),
-        16,
+        MobileShapeTokens::RADIUS_APP_ICON,
         installed_app_fallback_color(installed),
     );
-    canvas.text_center(x, y - 10, monogram, MobileTextRole::Title, COLOR_WHITE);
+    canvas.text_center(
+        x,
+        y - 10,
+        monogram,
+        MobileTextRole::Title,
+        accessible_surface_ink(installed_app_fallback_color(installed)),
+    );
 }
 
 fn draw_setting_icon(canvas: &mut Canvas<'_>, x: i32, y: i32, color: u32, icon: Icon) {
-    canvas.rounded_rect(DRect::new(x - 18, y - 18, 36, 36), 11, color);
-    let foreground = if color == COLOR_AMBER {
-        COLOR_TEXT_LIGHT
-    } else {
-        COLOR_WHITE
-    };
+    canvas.rounded_rect(
+        DRect::new(x - 18, y - 18, 36, 36),
+        MobileShapeTokens::RADIUS_SETTING_ICON,
+        color,
+    );
+    let foreground = accessible_surface_ink(color);
     draw_icon(canvas, x, y, IconSize::List, foreground, icon);
 }
 
+#[cfg(feature = "androidbox-runtime-uninstall1")]
 const fn text_color(dark: bool) -> u32 {
-    if dark {
-        COLOR_TEXT_DARK
-    } else {
-        COLOR_TEXT_LIGHT
-    }
-}
-
-const fn muted_text(dark: bool) -> u32 {
-    if dark {
-        COLOR_TEXT_MUTED_DARK
-    } else {
-        COLOR_TEXT_MUTED_LIGHT
-    }
-}
-
-const fn weak_text(dark: bool) -> u32 {
-    if dark {
-        COLOR_TEXT_WEAK_DARK
-    } else {
-        COLOR_TEXT_WEAK_LIGHT
-    }
-}
-
-const fn card_color(dark: bool, raised: bool) -> u32 {
-    match (dark, raised) {
-        (true, true) => COLOR_CARD_RAISED_DARK,
-        (true, false) => COLOR_CARD_DARK,
-        (false, true) => COLOR_CARD_RAISED_LIGHT,
-        (false, false) => COLOR_CARD_LIGHT,
-    }
+    mobile_theme_tokens(dark, false, false).text_primary
 }
 
 fn pressed_surface_color(model: MobileModel) -> u32 {
-    blend(
-        card_color(model.dark_theme, true),
-        model.accent(),
-        if model.dark_theme { 112 } else { 58 },
-    )
+    pressed_surface_color_ref(&model)
 }
 
-const fn border_color(dark: bool) -> u32 {
-    if dark {
-        COLOR_BORDER_DARK
-    } else {
-        COLOR_BORDER_LIGHT
-    }
+fn pressed_surface_color_ref(model: &MobileModel) -> u32 {
+    model.theme_tokens().accent_container
 }
 
 const fn component(color: u32, shift: u32) -> u32 {
@@ -9963,6 +12015,36 @@ mod tests {
         pixels
     }
 
+    #[cfg(feature = "androidbox-multipackage4")]
+    fn assert_planned_damage_is_pixel_exact(
+        previous: MobileModel,
+        current: MobileModel,
+        expected: DamageRect,
+    ) {
+        let expected_regions = DamageRegions::single(expected).unwrap();
+        assert_eq!(
+            damage_plan(Some(previous), current),
+            MobileDamagePlan::Regions(expected_regions)
+        );
+        let previous_pixels = render_model(previous);
+        let current_pixels = render_model(current);
+        assert_ne!(previous_pixels, current_pixels);
+        let mut damaged = previous_pixels;
+        render_damage(&mut damaged, current, expected).unwrap();
+        if let Some((index, (actual, wanted))) = damaged
+            .iter()
+            .zip(current_pixels.iter())
+            .enumerate()
+            .find(|(_, (actual, wanted))| actual != wanted)
+        {
+            panic!(
+                "damage {expected:?} missed pixel {}/{}, actual={actual:#010x}, wanted={wanted:#010x}",
+                index % WIDTH,
+                index / WIDTH,
+            );
+        }
+    }
+
     const fn verified_androidbox_resources() -> AndroidBoxResourceStatus {
         AndroidBoxResourceStatus {
             resource_table_parsed: true,
@@ -9992,6 +12074,32 @@ mod tests {
             [0xa5; 32],
         )
         .unwrap()
+    }
+
+    fn compatible_overview_model(catalog: AndroidInstalledAppStatus) -> MobileModel {
+        let request_sequence = 41;
+        let identity =
+            UiCompatibleActivityIdentity::new(request_sequence, catalog.generation).unwrap();
+        let mut model = MobileModel {
+            android_installed_app: catalog,
+            ..MobileModel::for_page(MobilePage::Home)
+        };
+        assert!(model.begin_android_installed_launch(request_sequence, catalog.generation));
+        assert!(model.succeed_android_installed_launch(
+            request_sequence,
+            catalog.generation,
+            catalog.apk_digest_sha256,
+        ));
+        assert!(model.bind_android_installed_activity_session(identity));
+        assert!(model.apply_system_ui_state_recent(
+            UiSystemUiMode::Overview,
+            Some(UiRecentIdentity::CompatibleAndroid(identity)),
+            false,
+            0,
+            2,
+        ));
+        assert!(model.compatible_android_recent_ready());
+        model
     }
 
     #[cfg(feature = "androidbox-multipackage4")]
@@ -10592,8 +12700,15 @@ mod tests {
         let mut canvas = Canvas {
             pixels: &mut pixels,
             first_row: 0,
+            first_column: 0,
+            row_stride: WIDTH,
             row_count,
+            alternate_accent: false,
+            large_text: false,
+            high_contrast: false,
             design_offset_y_px: 0,
+            clip_left_x_px: 0,
+            clip_right_x_px: WIDTH as i32,
             clip_top_y_px: 0,
             clip_bottom_y_px: row_count as i32,
         };
@@ -10607,8 +12722,15 @@ mod tests {
         let mut canvas = Canvas {
             pixels: &mut pixels,
             first_row: 0,
+            first_column: 0,
+            row_stride: WIDTH,
             row_count,
+            alternate_accent: false,
+            large_text: false,
+            high_contrast: false,
             design_offset_y_px: 0,
+            clip_left_x_px: 0,
+            clip_right_x_px: WIDTH as i32,
             clip_top_y_px: 0,
             clip_bottom_y_px: row_count as i32,
         };
@@ -10659,6 +12781,158 @@ mod tests {
         assert_eq!(PIXEL_COUNT, 1_152_000);
         assert_eq!(WIDTH * 20, HEIGHT * 9);
         assert_eq!(SCREEN_CORNER_RADIUS_PX, 64);
+    }
+
+    #[test]
+    fn semantic_theme_tokens_are_complete_and_preserve_visual_hierarchy() {
+        let luma = |color: u32| {
+            component(color, 16) * 2_126 + component(color, 8) * 7_152 + component(color, 0) * 722
+        };
+        let dark = mobile_theme_tokens(true, false, false);
+        let light = mobile_theme_tokens(false, false, false);
+        let alternate_dark = mobile_theme_tokens(true, true, false);
+        let alternate_light = mobile_theme_tokens(false, true, false);
+        let dark_model = MobileModel::default();
+        let light_model = MobileModel {
+            dark_theme: false,
+            ..MobileModel::default()
+        };
+
+        assert_eq!(dark.text_primary, COLOR_TEXT_DARK);
+        assert_eq!(dark.text_secondary, COLOR_TEXT_MUTED_DARK);
+        assert_eq!(dark.text_tertiary, COLOR_TEXT_WEAK_DARK);
+        assert_eq!(dark.surface, dark_model.surface_color(false));
+        assert_eq!(dark.surface_raised, dark_model.surface_color(true));
+        assert_eq!(dark.outline, dark_model.outline_color());
+        assert!(luma(dark.background_top) < luma(dark.surface));
+        assert!(luma(dark.surface) < luma(dark.surface_raised));
+        assert!(luma(dark.surface_raised) < luma(dark.text_secondary));
+        assert!(luma(dark.text_secondary) < luma(dark.text_primary));
+
+        assert_eq!(light.text_primary, COLOR_TEXT_LIGHT);
+        assert_eq!(light.text_secondary, COLOR_TEXT_MUTED_LIGHT);
+        assert_eq!(light.text_tertiary, COLOR_TEXT_WEAK_LIGHT);
+        assert_eq!(light.surface, light_model.surface_color(false));
+        assert_eq!(light.surface_raised, light_model.surface_color(true));
+        assert_eq!(light.outline, light_model.outline_color());
+        assert!(luma(light.text_primary) < luma(light.text_secondary));
+        assert!(luma(light.text_secondary) < luma(light.outline));
+        assert!(luma(light.outline) < luma(light.surface_raised));
+        assert!(luma(light.surface_raised) < luma(light.background_bottom));
+        assert!(luma(light.background_bottom) < luma(light.surface));
+
+        for (base, alternate) in [(dark, alternate_dark), (light, alternate_light)] {
+            assert_ne!(base.accent, alternate.accent);
+            assert_ne!(base.background_top, alternate.background_top);
+            assert_ne!(base.background_bottom, alternate.background_bottom);
+            assert_ne!(base.surface, alternate.surface);
+            assert_ne!(base.surface_raised, alternate.surface_raised);
+            assert_ne!(base.panel, alternate.panel);
+            assert_ne!(base.outline, alternate.outline);
+            assert_ne!(base.accent_container, alternate.accent_container);
+            assert_ne!(
+                base.wallpaper_glow_primary,
+                alternate.wallpaper_glow_primary
+            );
+            assert_eq!(base.on_accent, COLOR_TEXT_LIGHT);
+            assert_eq!(alternate.on_accent, COLOR_TEXT_LIGHT);
+        }
+    }
+
+    #[test]
+    fn user_accent_recolors_the_complete_phone_scheme_without_moving_targets() {
+        let base = MobileModel {
+            time: MobileTimeSnapshot::from_unix_seconds(1_785_318_060),
+            ..MobileModel::for_page(MobilePage::Home)
+        };
+        let alternate = MobileModel {
+            alternate_accent: true,
+            ..base
+        };
+        let base_pixels = render_model(base);
+        let alternate_pixels = render_model(alternate);
+
+        assert_ne!(digest(&base_pixels), digest(&alternate_pixels));
+        assert_eq!(alternate_pixels, render_model(alternate));
+        let changed = base_pixels
+            .iter()
+            .zip(&alternate_pixels)
+            .filter(|(left, right)| left != right)
+            .count();
+        assert!(changed > PIXEL_COUNT / 2, "only {changed} pixels recolored");
+
+        // Wallpaper, raised Home surface, and trusted bottom chrome all take
+        // part in the same scheme. The physical hit targets remain constants.
+        for (x, y) in [(360, 1_000), (600, 380), (360, 1_550)] {
+            assert_ne!(
+                base_pixels[y * WIDTH + x],
+                alternate_pixels[y * WIDTH + x],
+                "scheme did not reach ({x}, {y})"
+            );
+        }
+        assert_eq!(base_pixels[0], COLOR_BLACK);
+        assert_eq!(alternate_pixels[0], COLOR_BLACK);
+        for (x, y) in [(615, 1_435), (105, 1_435), (360, 1_300)] {
+            assert_eq!(hit_test(base, x, y), hit_test(alternate, x, y));
+        }
+
+        #[cfg(feature = "mobile-ui-runtime")]
+        assert_eq!(damage_plan(Some(base), alternate), MobileDamagePlan::Full);
+    }
+
+    #[test]
+    fn elevated_surface_never_writes_outside_its_authoritative_control_rect() {
+        const ROWS: usize = 200;
+        const SENTINEL: u32 = 0x0012_3456;
+        let rect = DRect::new(20, 20, 80, 48);
+        let physical = (40usize, 40usize, 200usize, 136usize);
+
+        let render_surface = |pressed| {
+            let mut pixels = vec![SENTINEL; WIDTH * ROWS];
+            let mut canvas = Canvas {
+                pixels: &mut pixels,
+                first_row: 0,
+                first_column: 0,
+                row_stride: WIDTH,
+                row_count: ROWS,
+                alternate_accent: false,
+                large_text: false,
+                high_contrast: false,
+                design_offset_y_px: 0,
+                clip_left_x_px: 0,
+                clip_right_x_px: WIDTH as i32,
+                clip_top_y_px: 0,
+                clip_bottom_y_px: ROWS as i32,
+            };
+            canvas.elevated_surface(
+                rect,
+                MobileShapeTokens::RADIUS_CONTROL,
+                COLOR_BLUE,
+                true,
+                pressed,
+            );
+            pixels
+        };
+
+        let stable = render_surface(false);
+        let pressed = render_surface(true);
+        let mut stable_writes = 0;
+        let mut pressed_differences = 0;
+        for (index, (stable_pixel, pressed_pixel)) in stable.iter().zip(&pressed).enumerate() {
+            let x = index % WIDTH;
+            let y = index / WIDTH;
+            let inside = pixel_in_rect(x, y, physical);
+            if *stable_pixel != SENTINEL {
+                stable_writes += 1;
+                assert!(inside, "stable elevation escaped at {x}/{y}");
+            }
+            if stable_pixel != pressed_pixel {
+                pressed_differences += 1;
+                assert!(inside, "pressed elevation escaped at {x}/{y}");
+            }
+        }
+        assert!(stable_writes > 10_000);
+        assert!(pressed_differences > 1_000);
     }
 
     #[test]
@@ -10760,6 +13034,8 @@ mod tests {
 
         for (page, allowed) in [
             (MobilePage::Settings, &[STATUS_TIME][..]),
+            (MobilePage::Display, &[STATUS_TIME][..]),
+            (MobilePage::Accessibility, &[STATUS_TIME][..]),
             (MobilePage::Home, &[STATUS_TIME, HOME_TIME][..]),
             (MobilePage::Lock, &[STATUS_TIME, LOCK_TIME_DATE][..]),
         ] {
@@ -10897,6 +13173,9 @@ mod tests {
             Icon::Moon,
             Icon::Palette,
             Icon::Sun,
+            Icon::Accessibility,
+            Icon::TextSize,
+            Icon::Contrast,
             Icon::Wifi,
             Icon::Airplane,
             Icon::Info,
@@ -10910,7 +13189,7 @@ mod tests {
             Icon::ChevronUp,
             Icon::ChevronDown,
         ];
-        let mut list_digests = [0_u64; 20];
+        let mut list_digests = [0_u64; 23];
         for size in [IconSize::Status, IconSize::List, IconSize::App] {
             for (index, icon) in icons.into_iter().enumerate() {
                 let pixels = render_icon_sample(icon, size, COLOR_WHITE);
@@ -10954,7 +13233,7 @@ mod tests {
     }
 
     #[test]
-    fn amber_icon_surface_uses_accessible_dark_ink() {
+    fn semantic_surface_inks_meet_accessibility_contrast_gate() {
         fn linear_channel(value: u32) -> f64 {
             let value = f64::from(value) / 255.0;
             if value <= 0.04045 {
@@ -10970,15 +13249,173 @@ mod tests {
                 + 0.0722 * linear_channel(component(color, 0))
         }
 
-        for surface in [COLOR_AMBER, COLOR_CALCULATOR] {
-            let lighter = luminance(surface).max(luminance(COLOR_TEXT_LIGHT));
-            let darker = luminance(surface).min(luminance(COLOR_TEXT_LIGHT));
-            assert!((lighter + 0.05) / (darker + 0.05) >= 3.0);
+        let contrast = |left: u32, right: u32| {
+            let lighter = luminance(left).max(luminance(right));
+            let darker = luminance(left).min(luminance(right));
+            (lighter + 0.05) / (darker + 0.05)
+        };
+
+        for surface in [
+            COLOR_BLUE,
+            COLOR_BLUE_ALT,
+            COLOR_PHONE,
+            COLOR_MESSAGES,
+            COLOR_CALCULATOR,
+            COLOR_SETTINGS,
+            COLOR_ANDROIDBOX,
+            COLOR_AMBER,
+        ] {
+            let ink = accessible_surface_ink(surface);
+            assert!(
+                contrast(surface, ink) >= 4.5,
+                "surface {surface:#08x} / ink {ink:#08x} failed text contrast"
+            );
         }
-        for accent in [COLOR_BLUE, COLOR_BLUE_ALT] {
-            let lighter = luminance(accent).max(luminance(COLOR_TEXT_LIGHT));
-            let darker = luminance(accent).min(luminance(COLOR_TEXT_LIGHT));
-            assert!((lighter + 0.05) / (darker + 0.05) >= 4.5);
+
+        for (scheme, high_contrast) in [
+            (mobile_theme_tokens(true, false, false), false),
+            (mobile_theme_tokens(true, true, false), false),
+            (mobile_theme_tokens(false, false, false), false),
+            (mobile_theme_tokens(false, true, false), false),
+            (mobile_theme_tokens(true, false, true), true),
+            (mobile_theme_tokens(true, true, true), true),
+            (mobile_theme_tokens(false, false, true), true),
+            (mobile_theme_tokens(false, true, true), true),
+        ] {
+            assert!(contrast(scheme.accent, scheme.on_accent) >= 4.5);
+            assert!(contrast(scheme.surface, scheme.text_primary) >= 7.0);
+            assert!(contrast(scheme.surface_raised, scheme.text_primary) >= 7.0);
+            assert!(contrast(scheme.panel, scheme.text_primary) >= 7.0);
+            assert!(contrast(scheme.surface, scheme.text_secondary) >= 4.5);
+            assert!(contrast(scheme.surface_raised, scheme.text_secondary) >= 4.5);
+            if high_contrast {
+                assert_eq!(scheme.text_secondary, scheme.text_primary);
+                assert!(contrast(scheme.surface, scheme.outline) >= 3.0);
+                assert!(contrast(scheme.surface_raised, scheme.outline) >= 3.0);
+            }
+        }
+    }
+
+    #[test]
+    fn semantic_accessibility_preferences_are_bounded_and_change_real_pixels() {
+        assert_eq!(
+            accessible_text_role(MobileTextRole::Label, true),
+            MobileTextRole::Body
+        );
+        assert_eq!(
+            accessible_text_role(MobileTextRole::Caption, true),
+            MobileTextRole::Body
+        );
+        assert_eq!(
+            accessible_text_role(MobileTextRole::Body, true),
+            MobileTextRole::Title
+        );
+        for role in [
+            MobileTextRole::Title,
+            MobileTextRole::Headline,
+            MobileTextRole::Display,
+        ] {
+            assert_eq!(accessible_text_role(role, true), role);
+            assert_eq!(accessible_text_role(role, false), role);
+        }
+
+        let sample = "WWWWWWWWWWWWWWWWWWWWWWWW";
+        let standard_fit = fitted_mobile_text_for_scale(sample, MobileTextRole::Label, 160, false);
+        let large_fit = fitted_mobile_text_for_scale(sample, MobileTextRole::Label, 160, true);
+        assert!(large_fit.len() < standard_fit.len());
+        assert!(
+            measure_mobile_text_px(accessible_text_role(MobileTextRole::Label, true), large_fit,)
+                <= 160
+        );
+        let (ellipsis_prefix, truncated) =
+            ellipsized_mobile_text_prefix(sample, MobileTextRole::Label, 160, true);
+        assert!(truncated);
+        assert!(ellipsis_prefix.len() < large_fit.len());
+        assert!(
+            measure_mobile_text_px(MobileTextRole::Body, ellipsis_prefix)
+                + measure_mobile_text_px(MobileTextRole::Body, "...")
+                <= 160
+        );
+        assert_eq!(
+            ellipsized_mobile_text_prefix("Readable", MobileTextRole::Label, 160, true),
+            ("Readable", false)
+        );
+
+        let base = MobileModel {
+            time: MobileTimeSnapshot::from_unix_seconds(1_785_318_060),
+            ..MobileModel::for_page(MobilePage::Accessibility)
+        };
+        let standard = render_model(base);
+        let large_model = MobileModel {
+            large_text: true,
+            ..base
+        };
+        let large = render_model(large_model);
+        let high_model = MobileModel {
+            high_contrast: true,
+            ..base
+        };
+        let high = render_model(high_model);
+        let combined_model = MobileModel {
+            large_text: true,
+            high_contrast: true,
+            ..base
+        };
+        let combined = render_model(combined_model);
+
+        for (name, frame) in [("large", &large), ("high", &high), ("combined", &combined)] {
+            let changed = standard
+                .iter()
+                .zip(frame.iter())
+                .filter(|(before, after)| before != after)
+                .count();
+            assert!(changed > 1_000, "{name} changed only {changed} pixels");
+            for (x, y) in [
+                (0, 0),
+                (WIDTH - 1, 0),
+                (0, HEIGHT - 1),
+                (WIDTH - 1, HEIGHT - 1),
+            ] {
+                assert_eq!(frame[y * WIDTH + x], COLOR_BLACK, "{name} {x}/{y}");
+            }
+        }
+        assert_ne!(large, high);
+        assert_ne!(large, combined);
+        assert_ne!(high, combined);
+
+        #[cfg(feature = "mobile-system-chrome0")]
+        for model in [large_model, high_model, combined_model] {
+            assert_eq!(
+                render_split_frame(model, split_chrome_state(model)),
+                render_model(model),
+                "split ownership changed accessibility pixels"
+            );
+        }
+
+        #[cfg(feature = "androidbox-interactive0")]
+        {
+            let activity = interactive_installed_model(
+                "Publisher supplied Android Activity text that must remain bounded",
+                1,
+            );
+            let activity_large = MobileModel {
+                large_text: true,
+                ..activity
+            };
+            assert_ne!(render_model(activity), render_model(activity_large));
+            for (x, y) in [
+                (
+                    INSTALLED_ANDROID_BUTTON_TARGET.x,
+                    INSTALLED_ANDROID_BUTTON_TARGET.y,
+                ),
+                (
+                    INSTALLED_ANDROID_BUTTON_TARGET.x + INSTALLED_ANDROID_BUTTON_TARGET.width - 1,
+                    INSTALLED_ANDROID_BUTTON_TARGET.y + INSTALLED_ANDROID_BUTTON_TARGET.height - 1,
+                ),
+                (360, SYSTEM_NAV_TOP_PX),
+            ] {
+                assert_eq!(hit_test(activity, x, y), hit_test(activity_large, x, y));
+            }
         }
     }
 
@@ -10989,19 +13426,19 @@ mod tests {
             (MobileTextRole::Headline, "Today 1234567890 09:41"),
             (
                 MobileTextRole::Title,
-                "Phone Messages Calculator Settings Apps AndroidBox Demo Restricted DEX Resource-backed Activity About phone Bndroid OS All apps Using Messages Connection status Error Overview No recent app No installed Android apps",
+                "Phone Messages Calculator Settings Display Accessibility Apps AndroidBox Demo Restricted DEX Resource-backed Activity About phone Bndroid OS All apps Using Messages Connection status Error Overview No recent app No installed Android apps Screen & appearance Visual accessibility",
             ),
             (
                 MobileTextRole::Body,
-                "Sunday Monday Tuesday Wednesday Thursday Friday Saturday January February March April May June July August September October November December Time unavailable Swipe up to continue Enter a number Dark mode Accent color Wi-Fi Network access About phone Theme Accent Network No notifications Local QEMU only Local preview No conversations Using Messages Connection status Local, read-only preview No messages are sent Network is disabled Open Not Android ART Execution failed Verified execution Not executed Execute DEX-0 Run onTap MainActivity Activity launch failed Launcher activity verified Waiting for Activity runtime No install / Binder / JNI APK v2 required System status Compatibility boundary Account profile Verify profile Profile status: pending Details unavailable Local scene No network access",
+                "Sunday Monday Tuesday Wednesday Thursday Friday Saturday January February March April May June July August September October November December Time unavailable Swipe up to continue Enter a number Dark mode Accent color Wi-Fi Network access About phone Theme Accent Network No notifications Local QEMU only Local preview No conversations Using Messages Connection status Local, read-only preview No messages are sent Network is disabled Open Not Android ART Execution failed Verified execution Not executed Execute DEX-0 Run onTap MainActivity Activity launch failed Launcher activity verified Waiting for Activity runtime No install / Binder / JNI APK v2 required System status Compatibility boundary Account profile Verify profile Profile status: pending Details unavailable Local scene No network access Display & appearance Network & internet Connected devices Sound & vibration Hardware status Resolution Interface scale Software surface only Text & contrast Larger text High contrast Readable by design Software UI preference",
             ),
             (
                 MobileTextRole::Caption,
-                "Sun Mon Tue Wed Thu Fri Sat Sunday Monday Tuesday Wednesday Thursday Friday Saturday Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec January February March April May June July August September October November December Time unavailable You're all caught up Offline Local preview On Off Ocean blue Not available Disabled in preview Disabled Preview build Nothing is waiting Calling unavailable in preview Messaging is unavailable in this preview Local navigation guide Calls and messages unavailable Swipe from the left edge or use Home to navigate or received No network service is connected Calls and messages cannot be sent Clear to continue 720 x 1600 Unlock to review limits Tap to review system limits No hardware or network Recent app Opened this session Open Phone, Messages, or Settings No background tasks Launcher-local DEX-0 No install / Binder / JNI Invalid DEX Verification failed Unsupported opcode Step limit reached Runtime trap No runtime error Result supplied by runtime Waiting for runtime The runtime owns every result AndroidBox Activity-1 No general Android compatibility Manifest rejected Launcher activity missing Activity verification failed Unsupported framework call Activity step limit Activity runtime trap No Activity error org.bndroid.demo.MainActivity Launcher identity not reported No content installed Waiting for resource view AndroidBox resource-backed view Verified DEX execution DEX execution pending Local sideload only Resources-1 profile 1 installed APK v2 verified Resources-1 bytes Launch not requested Choose this app again in All apps APK verification pending No Activity content is shown yet Launch proof is stale Launch request is stale APK verification failed No Activity content is shown App profile unsupported Installed APK unavailable Fresh durable APK readback Hidden until fresh proof All apps remains available Local preview only Resources-1 packages only",
+                "Sun Mon Tue Wed Thu Fri Sat Sunday Monday Tuesday Wednesday Thursday Friday Saturday Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec January February March April May June July August September October November December Time unavailable You're all caught up Offline Local preview On Off Ocean blue Not available Disabled in preview Disabled Preview build Nothing is waiting Calling unavailable in preview Messaging is unavailable in this preview Local navigation guide Calls and messages unavailable Swipe from the left edge or use Home to navigate or received No network service is connected Calls and messages cannot be sent Clear to continue 720 x 1600 Unlock to review limits Tap to review system limits No hardware or network Recent app Opened this session Open Phone, Messages, or Settings No background tasks Launcher-local DEX-0 No install / Binder / JNI Invalid DEX Verification failed Unsupported opcode Step limit reached Runtime trap No runtime error Result supplied by runtime Waiting for runtime The runtime owns every result AndroidBox Activity-1 No general Android compatibility Manifest rejected Launcher activity missing Activity verification failed Unsupported framework call Activity step limit Activity runtime trap No Activity error org.bndroid.demo.MainActivity Launcher identity not reported No content installed Waiting for resource view AndroidBox resource-backed view Verified DEX execution DEX execution pending Local sideload only Resources-1 profile 1 installed APK v2 verified Resources-1 bytes Launch not requested Choose this app again in All apps APK verification pending No Activity content is shown yet Launch proof is stale Launch request is stale APK verification failed No Activity content is shown App profile unsupported Installed APK unavailable Fresh durable APK readback Hidden until fresh proof All apps remains available Local preview only Resources-1 packages only Theme, color and software dimming Unavailable in QEMU No device transport Not implemented 720 x 1600 / 2x UI scale No panel backlight or HDR control Standard Larger text High contrast Larger text / High contrast Session-wide and reversible Standard semantic type Larger semantic type No device or service authority",
             ),
             (
                 MobileTextRole::Label,
-                "Sun Mon Tue Wed Thu Fri Sat Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec Time unavailable Appearance Connections Device Apps Installed apps Admission profile Package details Launch activity Preview information Local preview Preview environment Preview boundary System UI Dismiss This session No preview is stored This session only Swipe up for Home Bounded interpreter demo Compatibility boundary No framework compatibility claim Execution status Boot value Result Steps Taps AndroidBox Demo Installed Not Android ART Activity lifecycle Manifest verified Manifest pending onCreate complete onCreate pending TextView Activity instructions Compiled resources resources.arsc layout 0x7f020000 Binary XML @string 0x7f030000 Parsed Pending Resolved Verified Mismatch Restricted DEX-0 Restricted shim / no general compatibility Verified packages will appear here No app is installed Local sideload only Version APK size Generation Signature Profile APK digest Signer digest Network services remain unavailable General Android APIs are unavailable",
+                "Sun Mon Tue Wed Thu Fri Sat Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec Time unavailable Appearance Personalization Connections Device This phone System Screen Capability boundary Accessibility Reading Preview Scope The same preference reaches Shell and apps. Screen reader semantics are still pending Apps Installed apps Admission profile Package details Launch activity Preview information Local preview Preview environment Preview boundary System UI Dismiss This session No preview is stored This session only Swipe up for Home Bounded interpreter demo Compatibility boundary No framework compatibility claim Execution status Boot value Result Steps Taps AndroidBox Demo Installed Not Android ART Activity lifecycle Manifest verified Manifest pending onCreate complete onCreate pending TextView Activity instructions Compiled resources resources.arsc layout 0x7f020000 Binary XML @string 0x7f030000 Parsed Pending Resolved Verified Mismatch Restricted DEX-0 Restricted shim / no general compatibility Verified packages will appear here No app is installed Local sideload only Version APK size Generation Signature Profile APK digest Signer digest Network services remain unavailable General Android APIs are unavailable QEMU 360 x 800 dp",
             ),
         ] {
             for character in copy.chars() {
@@ -11045,7 +13482,7 @@ mod tests {
 
     #[test]
     fn every_page_is_canonical_nonflat_and_distinct() {
-        let mut seen = [0_u64; 9];
+        let mut seen = [0_u64; 11];
         for (index, page) in [
             MobilePage::Lock,
             MobilePage::Home,
@@ -11056,6 +13493,8 @@ mod tests {
             MobilePage::Settings,
             MobilePage::Apps,
             MobilePage::About,
+            MobilePage::Display,
+            MobilePage::Accessibility,
         ]
         .into_iter()
         .enumerate()
@@ -11081,6 +13520,13 @@ mod tests {
                 ..MobileModel::locked()
             },
             MobileModel::for_page(MobilePage::Settings),
+            MobileModel::for_page(MobilePage::Display),
+            MobileModel::for_page(MobilePage::Accessibility),
+            MobileModel {
+                large_text: true,
+                high_contrast: true,
+                ..MobileModel::for_page(MobilePage::Accessibility)
+            },
             MobileModel {
                 settings_scroll_offset_px: SETTINGS_SCROLL_MAX_PX,
                 ..MobileModel::for_page(MobilePage::Settings)
@@ -11190,6 +13636,810 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "mobile-ui-runtime")]
+    fn copy_packed_region(frame: &mut [u32], region: DamageRect, packed: &[u32]) {
+        for (row, pixels) in packed.chunks_exact(usize::from(region.width)).enumerate() {
+            let start = (usize::from(region.y) + row) * WIDTH + usize::from(region.x);
+            frame[start..start + pixels.len()].copy_from_slice(pixels);
+        }
+    }
+
+    #[cfg(feature = "mobile-ui-runtime")]
+    #[test]
+    fn packed_regions_equal_full_render_across_layers_and_appearance() {
+        let models = [
+            MobileModel::for_page(MobilePage::Lock),
+            MobileModel::for_page(MobilePage::Home),
+            MobileModel::for_page(MobilePage::Settings),
+            MobileModel {
+                shade_open: true,
+                ..MobileModel::default()
+            },
+            MobileModel {
+                drawer_open: true,
+                ..MobileModel::default()
+            },
+            MobileModel {
+                page_transition_offset_px: 160,
+                ..MobileModel::for_page(MobilePage::Phone)
+            },
+        ];
+        for base in models {
+            for dark in [true, false] {
+                let model = MobileModel {
+                    dark_theme: dark,
+                    alternate_accent: true,
+                    large_text: true,
+                    high_contrast: true,
+                    software_dimming: UiSoftwareDimming::Strong,
+                    ..base
+                };
+                let complete = render_model(model);
+                for region in [
+                    DamageRect {
+                        x: 0,
+                        y: 0,
+                        width: 1,
+                        height: 1,
+                    },
+                    DamageRect {
+                        x: 17,
+                        y: 23,
+                        width: 301,
+                        height: 127,
+                    },
+                    DamageRect {
+                        x: 63,
+                        y: 433,
+                        width: 591,
+                        height: 301,
+                    },
+                    DamageRect {
+                        x: 4,
+                        y: 1203,
+                        width: 713,
+                        height: 293,
+                    },
+                    DamageRect {
+                        x: 620,
+                        y: 1512,
+                        width: 100,
+                        height: 88,
+                    },
+                ] {
+                    let size = usize::from(region.width) * usize::from(region.height);
+                    let mut guarded = vec![0xdead_beef; size + 2];
+                    render_region(&mut guarded[1..size + 1], region, model).unwrap();
+                    assert_eq!(guarded[0], 0xdead_beef);
+                    assert_eq!(guarded[size + 1], 0xdead_beef);
+                    for (row, packed) in guarded[1..size + 1]
+                        .chunks_exact(usize::from(region.width))
+                        .enumerate()
+                    {
+                        let start = (usize::from(region.y) + row) * WIDTH + usize::from(region.x);
+                        assert_eq!(
+                            packed,
+                            &complete[start..start + packed.len()],
+                            "{region:?} row {row}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "mobile-ui-runtime")]
+    #[test]
+    fn copied_raster_cache_repairs_cancelled_backing_and_resets_focus_baseline() {
+        let base = MobileModel::for_page(MobilePage::Phone);
+        let mut cache = MobileRasterCache::new();
+        assert_eq!(cache.raster_plan(base), MobileDamagePlan::Full);
+        cache.record_written(base);
+        assert_eq!(cache.present_plan(base, 1), MobileDamagePlan::Full);
+        cache.record_presented(base, 1);
+
+        let mut cancelled = base;
+        assert!(cancelled.apply(MobileAction::PhoneKey(7)));
+        cache.record_written(cancelled);
+        let next = MobileModel {
+            pressed_target: Some(MobilePressedTarget::PhoneKey(1)),
+            ..base
+        };
+        let mut backing = render_model(cancelled);
+        let MobileDamagePlan::Regions(repair) = cache.raster_plan(next) else {
+            panic!("missing backing repair")
+        };
+        render_damage_regions(&mut backing, next, repair).unwrap();
+        assert_eq!(
+            backing,
+            render_model(next),
+            "cancelled digit survived in backing"
+        );
+        let MobileDamagePlan::Regions(present) = cache.present_plan(next, 1) else {
+            panic!("missing displayed delta")
+        };
+        assert!(repair.pixel_count() > present.pixel_count());
+        assert_eq!(cache.present_plan(next, 2), MobileDamagePlan::Full);
+        assert_eq!(cache.present_plan(next, 0), MobileDamagePlan::Full);
+        cache.record_written(next);
+        cache.record_presented(next, 2);
+        assert_eq!(cache.raster_plan(next), MobileDamagePlan::Unchanged);
+        assert_eq!(cache.present_plan(next, 2), MobileDamagePlan::Unchanged);
+    }
+
+    #[cfg(feature = "mobile-system-chrome0")]
+    #[test]
+    fn packed_layer_regions_reject_cross_owner_and_invalid_geometry_without_writing() {
+        let model = MobileModel::default();
+        let chrome = MobileSystemChromeState::new(
+            model.time,
+            true,
+            false,
+            UiSoftwareDimming::Off,
+            false,
+            false,
+            false,
+        );
+        let mut pixels = [0xdead_beef; 32];
+        for region in [
+            DamageRect {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 1,
+            },
+            DamageRect {
+                x: u16::MAX,
+                y: 64,
+                width: 32,
+                height: 1,
+            },
+            DamageRect {
+                x: 0,
+                y: 1599,
+                width: 16,
+                height: 2,
+            },
+        ] {
+            assert!(render_content_region(&mut pixels, region, model).is_err());
+            assert!(render_system_chrome_region(&mut pixels, region, chrome).is_err());
+            assert!(render_region(&mut pixels, region, model).is_err());
+            assert_eq!(pixels, [0xdead_beef; 32]);
+        }
+        for region in [
+            DamageRect {
+                x: 0,
+                y: 63,
+                width: 16,
+                height: 2,
+            },
+            DamageRect {
+                x: 0,
+                y: 1511,
+                width: 16,
+                height: 2,
+            },
+        ] {
+            assert_eq!(
+                render_content_region(&mut pixels, region, model),
+                Err(RenderError::InvalidRowRange)
+            );
+            assert_eq!(
+                render_system_chrome_region(&mut pixels, region, chrome),
+                Err(RenderError::InvalidRowRange)
+            );
+            assert_eq!(pixels, [0xdead_beef; 32]);
+        }
+        let viewport = DamageRect {
+            x: 0,
+            y: 64,
+            width: 720,
+            height: 1448,
+        };
+        let only_status =
+            MobileDamagePlan::Regions(DamageRegions::single(STATUS_TIME_DAMAGE).unwrap());
+        assert_eq!(
+            clip_damage_plan(only_status, viewport),
+            Ok(MobileDamagePlan::Unchanged)
+        );
+        let crossing = MobileDamagePlan::Regions(
+            DamageRegions::single(DamageRect {
+                x: 20,
+                y: 60,
+                width: 200,
+                height: 12,
+            })
+            .unwrap(),
+        );
+        assert_eq!(
+            clip_damage_plan(crossing, viewport),
+            Ok(MobileDamagePlan::Regions(
+                DamageRegions::single(DamageRect {
+                    x: 20,
+                    y: 64,
+                    width: 200,
+                    height: 8
+                })
+                .unwrap()
+            ))
+        );
+    }
+
+    #[cfg(feature = "mobile-system-chrome0")]
+    #[test]
+    fn cached_chrome_minute_and_navigation_regions_equal_full_layer_render() {
+        let base = MobileSystemChromeState::new(
+            MobileTimeSnapshot::from_unix_seconds(1_785_318_114),
+            true,
+            false,
+            UiSoftwareDimming::Strong,
+            true,
+            true,
+            false,
+        );
+        assert_eq!(
+            system_chrome_damage_plan(None, base),
+            MobileDamagePlan::Full
+        );
+        assert_eq!(
+            system_chrome_damage_plan(Some(base), base),
+            MobileDamagePlan::Unchanged
+        );
+        let same_minute = MobileSystemChromeState {
+            time: MobileTimeSnapshot::from_unix_seconds(1_785_318_115),
+            ..base
+        };
+        assert_eq!(
+            system_chrome_damage_plan(Some(base), same_minute),
+            MobileDamagePlan::Unchanged
+        );
+        for next in [
+            MobileSystemChromeState {
+                time: MobileTimeSnapshot::from_unix_seconds(1_785_318_121),
+                ..base
+            },
+            MobileSystemChromeState {
+                nav_pressed: true,
+                ..base
+            },
+            MobileSystemChromeState {
+                nav_pressed: true,
+                time: MobileTimeSnapshot::from_unix_seconds(1_785_318_121),
+                ..base
+            },
+            MobileSystemChromeState {
+                dark_theme: false,
+                alternate_accent: true,
+                ..base
+            },
+        ] {
+            let plan = system_chrome_damage_plan(Some(base), next);
+            let mut updated = vec![0xdead_beef; PIXEL_COUNT];
+            let mut expected = updated.clone();
+            for viewport in [
+                DamageRect {
+                    x: 0,
+                    y: 0,
+                    width: 720,
+                    height: 64,
+                },
+                DamageRect {
+                    x: 0,
+                    y: 1512,
+                    width: 720,
+                    height: 88,
+                },
+            ] {
+                let start = usize::from(viewport.y) * WIDTH;
+                let end = start + usize::from(viewport.height) * WIDTH;
+                render_system_chrome_rows(&mut updated[start..end], usize::from(viewport.y), base)
+                    .unwrap();
+                render_system_chrome_rows(&mut expected[start..end], usize::from(viewport.y), next)
+                    .unwrap();
+                if let MobileDamagePlan::Regions(regions) =
+                    clip_damage_plan(plan, viewport).unwrap()
+                {
+                    for region in regions.rects() {
+                        let mut packed =
+                            vec![0; usize::from(region.width) * usize::from(region.height)];
+                        render_system_chrome_region(&mut packed, *region, next).unwrap();
+                        copy_packed_region(&mut updated, *region, &packed);
+                    }
+                }
+            }
+            assert_eq!(updated, expected);
+        }
+    }
+
+    #[cfg(feature = "androidbox-scene-rpc2")]
+    #[test]
+    fn copied_scene_callback_regions_reconstruct_real_layout_and_leave_gaps_untouched() {
+        let base = scene_installed_model(8, 7, true);
+        let scene = base.android_installed_activity_scene;
+        let label = scene
+            .nodes()
+            .iter()
+            .find(|node| node.kind() == AndroidSceneViewKind::TextView)
+            .unwrap()
+            .id();
+        let button = scene.callback_button_id().unwrap();
+        let pressed = MobileModel {
+            pressed_target: Some(MobilePressedTarget::InstalledAndroidButton(button)),
+            ..base
+        };
+        let mut next = pressed;
+        assert!(next.update_android_installed_activity_scene_text(
+            label,
+            "Updated by the Android callback",
+            8
+        ));
+        for model in [
+            next,
+            MobileModel {
+                large_text: true,
+                high_contrast: true,
+                ..next
+            },
+        ] {
+            let before = MobileModel {
+                large_text: model.large_text,
+                high_contrast: model.high_contrast,
+                ..pressed
+            };
+            let MobileDamagePlan::Regions(regions) = damage_plan(Some(before), model) else {
+                panic!("scene callback still redraws Full")
+            };
+            assert_eq!(regions.count(), 2);
+            let old_frame = render_model(before);
+            let mut updated = old_frame.clone();
+            for rect in regions.rects() {
+                let mut packed = vec![0; usize::from(rect.width) * usize::from(rect.height)];
+                render_content_region(&mut packed, *rect, model).unwrap();
+                copy_packed_region(&mut updated, *rect, &packed);
+            }
+            assert_eq!(updated, render_model(model));
+            for y in 0..HEIGHT {
+                for x in 0..WIDTH {
+                    if !regions.rects().iter().any(|r| {
+                        ShellRect::new(r.x, r.y, r.width, r.height).contains(x as u16, y as u16)
+                    }) {
+                        assert_eq!(updated[y * WIDTH + x], old_frame[y * WIDTH + x]);
+                    }
+                }
+            }
+        }
+        let mut changed_tree = scene_installed_model(7, 9, true);
+        changed_tree.pressed_target = None;
+        assert_eq!(
+            damage_plan(Some(base), changed_tree),
+            MobileDamagePlan::Full
+        );
+        let mut many = base;
+        for (offset, id) in scene
+            .nodes()
+            .iter()
+            .filter(|node| node.kind() == AndroidSceneViewKind::TextView)
+            .map(|node| node.id())
+            .take(3)
+            .enumerate()
+        {
+            assert!(many.update_android_installed_activity_scene_text(
+                id,
+                "Multiple text updates",
+                8 + offset as u64
+            ));
+        }
+        assert_eq!(damage_plan(Some(base), many), MobileDamagePlan::Full);
+    }
+
+    #[cfg(feature = "androidbox-layout-size18")]
+    #[test]
+    fn scene_text_overflow_requires_full_repaint() {
+        let mut nodes = installed_android_scene_nodes();
+        nodes[1] = AndroidInstalledActivitySceneNode::try_new_sized(
+            AndroidSceneViewKind::TextView,
+            Some(0),
+            nodes[1].id(),
+            AndroidSceneLayoutSize::MatchParent,
+            AndroidSceneLayoutSize::Exact,
+            AndroidSceneOrientation::None,
+            "Tiny",
+            false,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            1,
+        )
+        .unwrap();
+        let mut before = installed_android_foreground_model();
+        assert!(before.set_android_installed_activity_scene(&nodes, 7));
+        let mut after = before;
+        assert!(after.update_android_installed_activity_scene_text(
+            nodes[1].id(),
+            "Changed text",
+            8
+        ));
+        assert_eq!(damage_plan(Some(before), after), MobileDamagePlan::Full);
+    }
+
+    #[cfg(feature = "mobile-ui-runtime")]
+    #[test]
+    fn damage_renderer_is_pixel_exact_inside_and_never_touches_outside() {
+        let base = MobileModel::for_page(MobilePage::Home);
+        let target = MobileModel {
+            pressed_target: Some(MobilePressedTarget::Settings),
+            ..base
+        };
+        let base_pixels = render_model(base);
+        let target_pixels = render_model(target);
+
+        let interaction_damage = DamageRect {
+            x: HOME_SETTINGS_TARGET.x,
+            y: HOME_SETTINGS_TARGET.y,
+            width: HOME_SETTINGS_TARGET.width,
+            height: HOME_SETTINGS_TARGET.height,
+        };
+        assert_eq!(
+            damage_plan(Some(base), target),
+            MobileDamagePlan::Regions(DamageRegions::single(interaction_damage).unwrap())
+        );
+        let mut interaction = base_pixels.clone();
+        render_damage(&mut interaction, target, interaction_damage).unwrap();
+        assert_eq!(interaction, target_pixels);
+        assert_eq!(
+            interaction_damage.width as usize * interaction_damage.height as usize,
+            32_300
+        );
+
+        let narrow = DamageRect {
+            x: 117,
+            y: 203,
+            width: 211,
+            height: 307,
+        };
+        let mut clipped = base_pixels.clone();
+        render_damage(&mut clipped, target, narrow).unwrap();
+        let right = usize::from(narrow.x + narrow.width);
+        let bottom = usize::from(narrow.y + narrow.height);
+        for y in 0..HEIGHT {
+            for x in 0..WIDTH {
+                let index = y * WIDTH + x;
+                if (usize::from(narrow.x)..right).contains(&x)
+                    && (usize::from(narrow.y)..bottom).contains(&y)
+                {
+                    assert_eq!(clipped[index], target_pixels[index], "inside {x}/{y}");
+                } else {
+                    assert_eq!(clipped[index], base_pixels[index], "outside {x}/{y}");
+                }
+            }
+        }
+
+        let mut one_pixel = base_pixels.clone();
+        render_damage(
+            &mut one_pixel,
+            base,
+            DamageRect {
+                x: 0,
+                y: 0,
+                width: 1,
+                height: 1,
+            },
+        )
+        .unwrap();
+        assert_eq!(one_pixel, base_pixels);
+    }
+
+    #[cfg(feature = "mobile-ui-runtime")]
+    #[test]
+    fn damage_planner_is_exact_for_components_unions_scrolling_and_safe_fallbacks() {
+        fn assert_exact(previous: MobileModel, current: MobileModel, expected: &[DamageRect]) {
+            let expected = DamageRegions::try_new(expected).unwrap();
+            assert_eq!(
+                damage_plan(Some(previous), current),
+                MobileDamagePlan::Regions(expected)
+            );
+            let mut damaged = render_model(previous);
+            render_damage_regions(&mut damaged, current, expected).unwrap();
+            assert_eq!(damaged, render_model(current));
+        }
+
+        let home = MobileModel::for_page(MobilePage::Home);
+        assert_eq!(damage_plan(None, home), MobileDamagePlan::Full);
+        assert_eq!(damage_plan(Some(home), home), MobileDamagePlan::Unchanged);
+
+        let settings_pressed = MobileModel {
+            pressed_target: Some(MobilePressedTarget::Settings),
+            ..home
+        };
+        assert_exact(
+            home,
+            settings_pressed,
+            &[DamageRect {
+                x: 530,
+                y: 1_340,
+                width: 170,
+                height: 190,
+            }],
+        );
+
+        let phone_pressed = MobileModel {
+            pressed_target: Some(MobilePressedTarget::Phone),
+            ..home
+        };
+        assert_exact(
+            phone_pressed,
+            settings_pressed,
+            &[
+                DamageRect {
+                    x: 20,
+                    y: 1_340,
+                    width: 170,
+                    height: 190,
+                },
+                DamageRect {
+                    x: 530,
+                    y: 1_340,
+                    width: 170,
+                    height: 190,
+                },
+            ],
+        );
+
+        let scrolled_settings = MobileModel {
+            settings_scroll_offset_px: 128,
+            ..MobileModel::for_page(MobilePage::Settings)
+        };
+        assert_exact(
+            scrolled_settings,
+            MobileModel {
+                pressed_target: Some(MobilePressedTarget::About),
+                ..scrolled_settings
+            },
+            &[DamageRect {
+                x: 48,
+                y: 1_288,
+                width: 640,
+                height: 132,
+            }],
+        );
+
+        let shifted_notification = MobileModel {
+            shade_open: true,
+            boot_notification_offset_px: 160,
+            software_dimming: UiSoftwareDimming::Maximum,
+            ..MobileModel::default()
+        };
+        assert_exact(
+            shifted_notification,
+            MobileModel {
+                pressed_target: Some(MobilePressedTarget::BootNotification),
+                ..shifted_notification
+            },
+            &[DamageRect {
+                x: 192,
+                y: 904,
+                width: 528,
+                height: 232,
+            }],
+        );
+
+        let overview = MobileModel {
+            system_ui_mode: UiSystemUiMode::Overview,
+            ..MobileModel::default()
+        };
+        assert_exact(
+            overview,
+            MobileModel {
+                pressed_target: Some(MobilePressedTarget::OverviewBackground),
+                ..overview
+            },
+            &[DamageRect {
+                x: 360,
+                y: 800,
+                width: 1,
+                height: 1,
+            }],
+        );
+
+        assert_eq!(
+            damage_plan(
+                Some(home),
+                MobileModel {
+                    dark_theme: false,
+                    ..home
+                }
+            ),
+            MobileDamagePlan::Full
+        );
+        assert_eq!(
+            damage_plan(
+                Some(MobileModel::for_page(MobilePage::Phone)),
+                MobileModel {
+                    pressed_target: Some(MobilePressedTarget::PhoneKey(u8::MAX)),
+                    ..MobileModel::for_page(MobilePage::Phone)
+                }
+            ),
+            MobileDamagePlan::Full
+        );
+        assert_eq!(
+            damage_plan(
+                Some(MobileModel {
+                    drawer_reveal_px: DRAWER_RENDER_QUANTUM,
+                    ..home
+                }),
+                MobileModel {
+                    drawer_reveal_px: DRAWER_RENDER_QUANTUM,
+                    pressed_target: Some(MobilePressedTarget::Phone),
+                    ..home
+                }
+            ),
+            MobileDamagePlan::Full
+        );
+    }
+
+    #[cfg(feature = "mobile-ui-runtime")]
+    #[test]
+    fn semantic_damage_regions_cover_clock_phone_and_calculator_without_gap_writes() {
+        fn assert_exact(previous: MobileModel, current: MobileModel, expected: &[DamageRect]) {
+            let expected = DamageRegions::try_new(expected).unwrap();
+            assert_eq!(
+                damage_plan(Some(previous), current),
+                MobileDamagePlan::Regions(expected)
+            );
+
+            let current_pixels = render_model(current);
+            let mut from_previous = render_model(previous);
+            render_damage_regions(&mut from_previous, current, expected).unwrap();
+            assert_eq!(from_previous, current_pixels);
+
+            // A sentinel backing proves that neither the bounding box between
+            // distant regions nor any other undeclared pixel is rewritten.
+            let sentinel = 0x00de_adbe;
+            let mut isolated = vec![sentinel; PIXEL_COUNT];
+            render_damage_regions(&mut isolated, current, expected).unwrap();
+            for y in 0..HEIGHT {
+                for x in 0..WIDTH {
+                    let index = y * WIDTH + x;
+                    let inside = expected.rects().iter().any(|rect| {
+                        (usize::from(rect.x)..usize::from(rect.x + rect.width)).contains(&x)
+                            && (usize::from(rect.y)..usize::from(rect.y + rect.height)).contains(&y)
+                    });
+                    assert_eq!(
+                        isolated[index],
+                        if inside {
+                            current_pixels[index]
+                        } else {
+                            sentinel
+                        },
+                        "semantic damage pixel {x}/{y}"
+                    );
+                }
+            }
+        }
+
+        let minute_41 = MobileTimeSnapshot::from_unix_seconds(1_785_318_060);
+        let minute_42 = MobileTimeSnapshot::from_unix_seconds(1_785_318_120);
+        let home_41 = MobileModel {
+            time: minute_41,
+            ..MobileModel::for_page(MobilePage::Home)
+        };
+        let home_42 = MobileModel {
+            time: minute_42,
+            ..home_41
+        };
+        assert_exact(home_41, home_42, &[STATUS_TIME_DAMAGE, HOME_TIME_DAMAGE]);
+
+        let before_midnight = MobileModel {
+            time: MobileTimeSnapshot::from_unix_seconds(1_785_369_599),
+            ..MobileModel::for_page(MobilePage::Home)
+        };
+        let after_midnight = MobileModel {
+            time: MobileTimeSnapshot::from_unix_seconds(1_785_369_600),
+            ..before_midnight
+        };
+        assert_exact(
+            before_midnight,
+            after_midnight,
+            &[STATUS_TIME_DAMAGE, HOME_TIME_DAMAGE.union(HOME_DATE_DAMAGE)],
+        );
+
+        let phone_before = MobileModel {
+            pressed_target: Some(MobilePressedTarget::PhoneKey(0)),
+            ..MobileModel::for_page(MobilePage::Phone)
+        };
+        let mut phone_after = phone_before;
+        assert!(phone_after.apply(MobileAction::PhoneKey(0)));
+        assert_exact(
+            phone_before,
+            phone_after,
+            &[
+                PHONE_NUMBER_DAMAGE,
+                shell_target_damage(PHONE_KEY_TARGETS[0]).unwrap(),
+            ],
+        );
+        let calculator_before = MobileModel {
+            pressed_target: Some(MobilePressedTarget::CalculatorKey(4)),
+            ..MobileModel::for_page(MobilePage::Calculator)
+        };
+        let mut calculator_after = calculator_before;
+        assert!(calculator_after.apply(MobileAction::CalculatorKey(4)));
+        assert_exact(
+            calculator_before,
+            calculator_after,
+            &[
+                CALCULATOR_DISPLAY_DAMAGE,
+                shell_target_damage(CALCULATOR_KEY_TARGETS[4]).unwrap(),
+            ],
+        );
+
+        let settings_41 = MobileModel {
+            time: minute_41,
+            ..MobileModel::for_page(MobilePage::Settings)
+        };
+        let settings_same_minute = MobileModel {
+            time: MobileTimeSnapshot::from_unix_seconds(1_785_318_119),
+            ..settings_41
+        };
+        assert_eq!(
+            damage_plan(Some(settings_41), settings_same_minute),
+            MobileDamagePlan::Unchanged
+        );
+        assert_exact(
+            settings_same_minute,
+            MobileModel {
+                time: minute_42,
+                ..settings_same_minute
+            },
+            &[STATUS_TIME_DAMAGE],
+        );
+    }
+
+    #[cfg(feature = "mobile-ui-runtime")]
+    #[test]
+    fn damage_renderer_rejects_invalid_geometry_before_writing() {
+        let model = MobileModel::default();
+        let mut pixels = vec![0x0012_3456; PIXEL_COUNT];
+        let original = pixels.clone();
+        for damage in [
+            DamageRect {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 1,
+            },
+            DamageRect {
+                x: WIDTH as u16,
+                y: 0,
+                width: 1,
+                height: 1,
+            },
+            DamageRect {
+                x: 0,
+                y: HEIGHT as u16,
+                width: 1,
+                height: 1,
+            },
+        ] {
+            assert_eq!(
+                render_damage(&mut pixels, model, damage),
+                Err(RenderError::InvalidDamageRect)
+            );
+            assert_eq!(pixels, original);
+        }
+        assert_eq!(
+            render_damage(&mut pixels[..PIXEL_COUNT - 1], model, DamageRect::FULL),
+            Err(RenderError::WrongPixelCount)
+        );
+        assert_eq!(pixels, original);
+    }
+
     #[test]
     fn lock_actions_and_hidden_surfaces_are_fail_closed_until_explicit_unlock() {
         let mut model = MobileModel::locked();
@@ -11204,6 +14454,7 @@ mod tests {
             MobileAction::Open(MobilePage::Settings),
             MobileAction::Open(MobilePage::Apps),
             MobileAction::Open(MobilePage::About),
+            MobileAction::Open(MobilePage::Display),
             MobileAction::OpenDrawer,
             MobileAction::SetDrawerReveal(DRAWER_GESTURE_MIN_TRAVEL),
             MobileAction::Back,
@@ -11399,8 +14650,10 @@ mod tests {
     }
 
     #[test]
-    fn settings_toggles_and_device_rows_navigate_back() {
+    fn settings_display_apps_and_about_navigation_preserves_real_controls() {
         let mut model = MobileModel::for_page(MobilePage::Settings);
+        assert!(model.apply(MobileAction::Open(MobilePage::Display)));
+        assert_eq!(model.page, MobilePage::Display);
         let dark = render_model(model);
         assert!(model.apply(MobileAction::ToggleTheme));
         let light = render_model(model);
@@ -11408,6 +14661,8 @@ mod tests {
         assert!(model.apply(MobileAction::ToggleAccent));
         let alternate = render_model(model);
         assert_ne!(digest(&light), digest(&alternate));
+        assert!(model.apply(MobileAction::Back));
+        assert_eq!(model.page, MobilePage::Settings);
         assert!(model.apply(MobileAction::Open(MobilePage::Apps)));
         assert_eq!(model.page, MobilePage::Apps);
         assert!(model.apply(MobileAction::Back));
@@ -11700,6 +14955,200 @@ mod tests {
         assert!(!apps_package_selection_is_available(model));
         assert!(!model.apply(MobileAction::SelectInstalledAndroid(0)));
         assert_eq!(model.android_installed_app, catalog);
+    }
+
+    #[cfg(feature = "androidbox-multipackage4")]
+    #[test]
+    fn advanced_interactive_targets_have_pixel_exact_component_damage() {
+        const fn fixed(target: ShellRect) -> DamageRect {
+            DamageRect {
+                x: target.x,
+                y: target.y,
+                width: target.width,
+                height: target.height,
+            }
+        }
+
+        let mut uninstall = MobileModel {
+            apps_scroll_offset_px: APPS_SCROLL_MAX_PX,
+            android_installed_app: installed_android_app(7),
+            ..MobileModel::for_page(MobilePage::Apps)
+        };
+        assert_planned_damage_is_pixel_exact(
+            uninstall,
+            MobileModel {
+                pressed_target: Some(MobilePressedTarget::AppsUninstall),
+                ..uninstall
+            },
+            DamageRect {
+                y: APPS_UNINSTALL_TARGET.y - APPS_SCROLL_MAX_PX,
+                ..fixed(APPS_UNINSTALL_TARGET)
+            },
+        );
+        assert!(uninstall.begin_android_installed_uninstall(7));
+        for (target, rect) in [
+            (
+                MobilePressedTarget::AppsUninstallCancel,
+                APPS_UNINSTALL_CANCEL_TARGET,
+            ),
+            (
+                MobilePressedTarget::AppsUninstallConfirm,
+                APPS_UNINSTALL_CONFIRM_TARGET,
+            ),
+        ] {
+            assert_planned_damage_is_pixel_exact(
+                uninstall,
+                MobileModel {
+                    pressed_target: Some(target),
+                    ..uninstall
+                },
+                fixed(rect),
+            );
+        }
+
+        let install_candidate =
+            android_install_candidate(AndroidInstallCandidateAction::Install, 0, 0, 7, [0xa5; 32]);
+        let mut install = MobileModel::for_page(MobilePage::Apps);
+        assert!(install.apply_android_install_candidate_status(install_candidate));
+        assert_planned_damage_is_pixel_exact(
+            install,
+            MobileModel {
+                pressed_target: Some(MobilePressedTarget::AppsInstall),
+                ..install
+            },
+            fixed(APPS_INSTALL_TARGET),
+        );
+        assert!(install.begin_android_install(install_candidate.candidate_id));
+        for (target, rect) in [
+            (
+                MobilePressedTarget::AppsInstallCancel,
+                APPS_INSTALL_CANCEL_TARGET,
+            ),
+            (
+                MobilePressedTarget::AppsInstallConfirm,
+                APPS_INSTALL_CONFIRM_TARGET,
+            ),
+        ] {
+            assert_planned_damage_is_pixel_exact(
+                install,
+                MobileModel {
+                    pressed_target: Some(target),
+                    ..install
+                },
+                fixed(rect),
+            );
+        }
+
+        let update_candidate =
+            android_install_candidate(AndroidInstallCandidateAction::Update, 7, 7, 8, [0xb6; 32]);
+        let mut clipped_update = MobileModel {
+            apps_scroll_offset_px: 192,
+            android_installed_app: installed_android_app(7),
+            ..MobileModel::for_page(MobilePage::Apps)
+        };
+        assert!(clipped_update.apply_android_install_candidate_status(update_candidate));
+        assert_planned_damage_is_pixel_exact(
+            clipped_update,
+            MobileModel {
+                pressed_target: Some(MobilePressedTarget::AppsInstall),
+                ..clipped_update
+            },
+            DamageRect {
+                x: APPS_UPDATE_TARGET.x,
+                y: PAGE_SCROLL_VIEWPORT_TOP_PX,
+                width: APPS_UPDATE_TARGET.width,
+                height: APPS_UPDATE_TARGET.y + APPS_UPDATE_TARGET.height
+                    - 192
+                    - PAGE_SCROLL_VIEWPORT_TOP_PX,
+            },
+        );
+
+        let envelope = installed_android_app_named(
+            1,
+            "org.bndroid.envelope",
+            "org.bndroid.envelope.MainActivity",
+            "Envelope demo",
+            0x11,
+        );
+        let catalog = installed_android_app_named(
+            1,
+            "org.bndroid.catalog",
+            "org.bndroid.catalog.MainActivity",
+            "Component catalog",
+            0x22,
+        );
+        let mut apps = MobileModel::for_page(MobilePage::Apps);
+        assert!(apps.apply_android_installed_directory_status([envelope, catalog], 2, 9, 0));
+        for (index, rect) in [APPS_INSTALLED_FIRST_TARGET, APPS_INSTALLED_SECOND_TARGET]
+            .into_iter()
+            .enumerate()
+        {
+            assert_planned_damage_is_pixel_exact(
+                apps,
+                MobileModel {
+                    pressed_target: Some(MobilePressedTarget::AppsInstalledAndroid(index as u8)),
+                    ..apps
+                },
+                fixed(rect),
+            );
+        }
+
+        let mut drawer = MobileModel {
+            drawer_open: true,
+            ..MobileModel::default()
+        };
+        assert!(drawer.apply_android_installed_directory_status([envelope, catalog], 2, 9, 0));
+        for (selector, rect) in [
+            (1, DRAWER_ANDROIDBOX_TARGET),
+            (2, DRAWER_ANDROIDBOX_SECOND_TARGET),
+        ] {
+            assert_planned_damage_is_pixel_exact(
+                drawer,
+                MobileModel {
+                    pressed_target: Some(MobilePressedTarget::DrawerInstalledAndroid(selector)),
+                    ..drawer
+                },
+                fixed(rect),
+            );
+        }
+
+        let legacy = interactive_installed_model("Ready", 1);
+        let legacy_button_id = legacy.android_installed_activity_view.button_view_id();
+        assert_planned_damage_is_pixel_exact(
+            legacy,
+            MobileModel {
+                pressed_target: Some(MobilePressedTarget::InstalledAndroidButton(
+                    legacy_button_id,
+                )),
+                ..legacy
+            },
+            fixed(INSTALLED_ANDROID_BUTTON_TARGET),
+        );
+
+        let scene = scene_installed_model(8, 7, true);
+        let scene_button_id = scene
+            .android_installed_activity_scene
+            .callback_button_id()
+            .unwrap();
+        let scene_target = installed_android_scene_button_target(scene, scene_button_id).unwrap();
+        assert_planned_damage_is_pixel_exact(
+            scene,
+            MobileModel {
+                pressed_target: Some(MobilePressedTarget::InstalledAndroidButton(scene_button_id)),
+                ..scene
+            },
+            fixed(scene_target),
+        );
+        assert_eq!(
+            damage_plan(
+                Some(scene),
+                MobileModel {
+                    pressed_target: Some(MobilePressedTarget::InstalledAndroidButton(u32::MAX)),
+                    ..scene
+                }
+            ),
+            MobileDamagePlan::Full
+        );
     }
 
     #[cfg(feature = "androidbox-multipackage4")]
@@ -12287,6 +15736,56 @@ mod tests {
             AndroidInstalledActivityViewState::empty()
         );
         assert!(!model.clear_android_installed_activity_view());
+    }
+
+    #[cfg(all(feature = "mobile-ui-runtime", feature = "androidbox-interactive0"))]
+    #[test]
+    fn installed_activity_callback_uses_two_exact_disjoint_damage_regions() {
+        let previous = interactive_installed_model("Ready for callback", 1);
+        let mut current = previous;
+        assert!(current.set_android_installed_activity_view(
+            0x7f01_0001,
+            "Button callback executed",
+            0x7f01_0002,
+            "Tap me",
+            true,
+            2,
+        ));
+        let expected = DamageRegions::try_new(&[
+            INSTALLED_ANDROID_BUTTON_DAMAGE,
+            INSTALLED_ANDROID_LABEL_DAMAGE,
+        ])
+        .unwrap();
+        assert_eq!(
+            damage_plan(Some(previous), current),
+            MobileDamagePlan::Regions(expected)
+        );
+
+        let current_pixels = render_model(current);
+        let mut damaged = render_model(previous);
+        render_damage_regions(&mut damaged, current, expected).unwrap();
+        assert_eq!(damaged, current_pixels);
+
+        let sentinel = 0x00de_adbe;
+        let mut isolated = vec![sentinel; PIXEL_COUNT];
+        render_damage_regions(&mut isolated, current, expected).unwrap();
+        for y in 0..HEIGHT {
+            for x in 0..WIDTH {
+                let inside = expected.rects().iter().any(|rect| {
+                    (usize::from(rect.x)..usize::from(rect.x + rect.width)).contains(&x)
+                        && (usize::from(rect.y)..usize::from(rect.y + rect.height)).contains(&y)
+                });
+                assert_eq!(
+                    isolated[y * WIDTH + x],
+                    if inside {
+                        current_pixels[y * WIDTH + x]
+                    } else {
+                        sentinel
+                    },
+                    "installed Activity damage pixel {x}/{y}"
+                );
+            }
+        }
     }
 
     #[cfg(feature = "androidbox-interactive0")]
@@ -13257,6 +16756,82 @@ mod tests {
     }
 
     #[test]
+    fn compatible_overview_uses_package_derived_icon_fallback_not_generic_android_badge() {
+        let catalog = installed_android_app(7);
+        let expected = installed_app_fallback_color(catalog);
+        let model = compatible_overview_model(catalog);
+        let rendered = render_model(model);
+        let sample_x = (180 - 17) * SCALE;
+        let sample_y = 308 * SCALE;
+        assert_eq!(
+            rendered[sample_y as usize * WIDTH + sample_x as usize],
+            expected,
+        );
+        assert_ne!(expected, COLOR_ANDROIDBOX);
+
+        let mut changed_activity_text = model;
+        changed_activity_text.android_installed_app.text =
+            AndroidInstalledText::from_ascii("HIDDEN ACTIVITY PIXELS").unwrap();
+        assert_eq!(
+            render_model(changed_activity_text),
+            rendered,
+            "Overview may use package metadata but must never read Activity content"
+        );
+    }
+
+    #[cfg(feature = "androidbox-icon-resources5")]
+    #[test]
+    fn compatible_overview_uses_exact_catalog_icon_only_for_matching_session() {
+        let mut first_pixels = [0xff8e_24aa; ANDROID_INSTALLED_ICON_PIXEL_COUNT];
+        first_pixels[1] = 0xffff_ffff;
+        first_pixels[2] = 0;
+        let first_icon =
+            AndroidInstalledIcon::try_new(0x7f01_0000, 0x1357_2468, first_pixels).unwrap();
+        let catalog = installed_android_app(7)
+            .with_icon(Some(first_icon))
+            .unwrap();
+        let model = compatible_overview_model(catalog);
+        let rendered = render_model(model);
+        let icon_left = (180 - 24) * SCALE;
+        let icon_top = (308 - 24) * SCALE;
+        assert_eq!(
+            rendered[icon_top as usize * WIDTH + icon_left as usize],
+            0x008e_24aa,
+        );
+
+        let mut second_pixels = [0xff0b_57d0; ANDROID_INSTALLED_ICON_PIXEL_COUNT];
+        second_pixels[1] = 0xffff_ffff;
+        second_pixels[2] = 0;
+        let second_icon =
+            AndroidInstalledIcon::try_new(0x7f01_0000, 0x2468_1357, second_pixels).unwrap();
+        let mut changed_icon = model;
+        changed_icon.android_installed_app.icon = Some(second_icon);
+        assert!(changed_icon.compatible_android_recent_ready());
+        let changed = render_model(changed_icon);
+        assert_pixel_differences_are_bounded(&rendered, &changed, &[(312, 568, 408, 664)]);
+        assert_eq!(
+            changed[icon_top as usize * WIDTH + icon_left as usize],
+            0x000b_57d0,
+        );
+
+        let stale_identity = UiCompatibleActivityIdentity::new(42, 8).unwrap();
+        let mut stale = model;
+        assert!(stale.apply_system_ui_state_recent(
+            UiSystemUiMode::Overview,
+            Some(UiRecentIdentity::CompatibleAndroid(stale_identity)),
+            false,
+            0,
+            3,
+        ));
+        assert!(!stale.compatible_android_recent_ready());
+        assert_ne!(
+            render_model(stale)[icon_top as usize * WIDTH + icon_left as usize],
+            0x008e_24aa,
+            "a stale recent identity must render the unavailable fallback"
+        );
+    }
+
+    #[test]
     fn androidbox_render_path_keeps_the_large_model_snapshot_borrowed() {
         type BorrowedRenderer =
             for<'canvas, 'pixels, 'model> fn(&'canvas mut Canvas<'pixels>, &'model MobileModel);
@@ -13270,7 +16845,27 @@ mod tests {
     }
 
     #[test]
-    fn settings_apps_and_about_rows_are_exact_safe_and_navigate() {
+    fn settings_display_apps_and_about_rows_are_exact_safe_and_navigate() {
+        assert_eq!(
+            SETTINGS_DISPLAY_TARGET.y + SETTINGS_DISPLAY_TARGET.height,
+            540
+        );
+        assert_eq!(
+            hit_test(
+                MobileModel::for_page(MobilePage::Settings),
+                SETTINGS_DISPLAY_TARGET.x,
+                SETTINGS_DISPLAY_TARGET.y,
+            ),
+            Some(MobilePressedTarget::Display)
+        );
+        assert_eq!(
+            hit_test(
+                MobileModel::for_page(MobilePage::Settings),
+                SETTINGS_DISPLAY_TARGET.x + SETTINGS_DISPLAY_TARGET.width - 1,
+                SETTINGS_DISPLAY_TARGET.y + SETTINGS_DISPLAY_TARGET.height - 1,
+            ),
+            Some(MobilePressedTarget::Display)
+        );
         assert_eq!(
             SETTINGS_APPS_TARGET.y + SETTINGS_APPS_TARGET.height,
             SETTINGS_ABOUT_TARGET.y
@@ -13315,6 +16910,26 @@ mod tests {
         let x = SETTINGS_APPS_TARGET.x + SETTINGS_APPS_TARGET.width / 2;
         let y = SETTINGS_APPS_TARGET.y + SETTINGS_APPS_TARGET.height / 2;
         let mut model = MobileModel::for_page(MobilePage::Settings);
+        let mut display_touch = TouchController::new();
+        let display_x = SETTINGS_DISPLAY_TARGET.x + SETTINGS_DISPLAY_TARGET.width / 2;
+        let display_y = SETTINGS_DISPLAY_TARGET.y + SETTINGS_DISPLAY_TARGET.height / 2;
+        let down = display_touch
+            .observe(model, display_x, display_y, true)
+            .unwrap();
+        assert_eq!(
+            down,
+            MobileAction::SetPressed(Some(MobilePressedTarget::Display))
+        );
+        assert!(model.apply(down));
+        assert_eq!(
+            display_touch.observe(model, display_x, display_y, false),
+            Some(MobileAction::Open(MobilePage::Display))
+        );
+        assert!(model.apply(MobileAction::Open(MobilePage::Display)));
+        assert!(model.has_in_app_back());
+        assert!(model.apply(MobileAction::Back));
+        assert_eq!(model.page, MobilePage::Settings);
+
         let mut touch = TouchController::new();
         let down = touch.observe(model, x, y, true).unwrap();
         assert_eq!(
@@ -13351,6 +16966,193 @@ mod tests {
         );
         assert!(apps.apply(MobileAction::Back));
         assert_eq!(apps.page, MobilePage::Settings);
+    }
+
+    #[test]
+    fn display_controls_are_page_scoped_half_open_and_return_to_settings() {
+        assert_eq!(
+            DISPLAY_THEME_TARGET.y + DISPLAY_THEME_TARGET.height,
+            DISPLAY_ACCENT_TARGET.y
+        );
+        let display = MobileModel::for_page(MobilePage::Display);
+        for (target, pressed) in [
+            (DISPLAY_THEME_TARGET, MobilePressedTarget::Theme),
+            (DISPLAY_ACCENT_TARGET, MobilePressedTarget::Accent),
+            (DISPLAY_DIMMING_TARGET, MobilePressedTarget::SoftwareDimming),
+            (
+                DISPLAY_ACCESSIBILITY_TARGET,
+                MobilePressedTarget::Accessibility,
+            ),
+        ] {
+            assert_eq!(hit_test(display, target.x, target.y), Some(pressed));
+            assert_eq!(
+                hit_test(
+                    display,
+                    target.x + target.width - 1,
+                    target.y + target.height - 1,
+                ),
+                Some(pressed)
+            );
+            assert_ne!(
+                hit_test(display, target.x + target.width, target.y),
+                Some(pressed)
+            );
+        }
+        assert_eq!(
+            hit_test(
+                MobileModel::for_page(MobilePage::Settings),
+                DISPLAY_THEME_TARGET.x,
+                DISPLAY_THEME_TARGET.y,
+            ),
+            Some(MobilePressedTarget::Display)
+        );
+        assert_eq!(page_scroll_max_px(MobilePage::Display), 0);
+
+        let mut model = display;
+        assert!(model.has_in_app_back());
+        assert!(model.apply(MobileAction::Back));
+        assert_eq!(model.page, MobilePage::Settings);
+    }
+
+    #[cfg(feature = "mobile-ui-runtime")]
+    #[test]
+    fn accessibility_controls_are_exact_shared_reversible_and_geometry_neutral() {
+        assert_eq!(
+            DISPLAY_DIMMING_TARGET.y + DISPLAY_DIMMING_TARGET.height,
+            856
+        );
+        assert_eq!(DISPLAY_ACCESSIBILITY_TARGET.y, 1_304);
+        assert_eq!(
+            DISPLAY_ACCESSIBILITY_TARGET.y + DISPLAY_ACCESSIBILITY_TARGET.height,
+            1_496
+        );
+        assert_eq!(SYSTEM_NAV_TOP_PX, 1_548);
+        assert_eq!(
+            ACCESSIBILITY_LARGE_TEXT_TARGET.y + ACCESSIBILITY_LARGE_TEXT_TARGET.height,
+            ACCESSIBILITY_HIGH_CONTRAST_TARGET.y
+        );
+        assert_eq!(
+            ACCESSIBILITY_HIGH_CONTRAST_TARGET.y + ACCESSIBILITY_HIGH_CONTRAST_TARGET.height,
+            672
+        );
+
+        let display = MobileModel::for_page(MobilePage::Display);
+        let entry_x = DISPLAY_ACCESSIBILITY_TARGET.x + DISPLAY_ACCESSIBILITY_TARGET.width / 2;
+        let entry_y = DISPLAY_ACCESSIBILITY_TARGET.y + DISPLAY_ACCESSIBILITY_TARGET.height / 2;
+        let mut entry_touch = TouchController::new();
+        assert_eq!(
+            entry_touch.observe(display, entry_x, entry_y, true),
+            Some(MobileAction::SetPressed(Some(
+                MobilePressedTarget::Accessibility
+            )))
+        );
+        let mut model = display;
+        assert!(model.apply(MobileAction::SetPressed(Some(
+            MobilePressedTarget::Accessibility,
+        ))));
+        assert_eq!(
+            entry_touch.observe(model, entry_x, entry_y, false),
+            Some(MobileAction::Open(MobilePage::Accessibility))
+        );
+        assert!(model.apply(MobileAction::Open(MobilePage::Accessibility)));
+        assert_eq!(model.page, MobilePage::Accessibility);
+        assert!(model.has_in_app_back());
+        assert_eq!(page_scroll_max_px(MobilePage::Accessibility), 0);
+
+        for (target, pressed) in [
+            (
+                ACCESSIBILITY_LARGE_TEXT_TARGET,
+                MobilePressedTarget::LargeText,
+            ),
+            (
+                ACCESSIBILITY_HIGH_CONTRAST_TARGET,
+                MobilePressedTarget::HighContrast,
+            ),
+        ] {
+            assert_eq!(hit_test(model, target.x, target.y), Some(pressed));
+            assert_eq!(
+                hit_test(
+                    model,
+                    target.x + target.width - 1,
+                    target.y + target.height - 1,
+                ),
+                Some(pressed)
+            );
+            assert_ne!(
+                hit_test(model, target.x + target.width, target.y),
+                Some(pressed)
+            );
+        }
+
+        let standard = model;
+        let large_x = ACCESSIBILITY_LARGE_TEXT_TARGET.x + ACCESSIBILITY_LARGE_TEXT_TARGET.width / 2;
+        let large_y =
+            ACCESSIBILITY_LARGE_TEXT_TARGET.y + ACCESSIBILITY_LARGE_TEXT_TARGET.height / 2;
+        let mut large_touch = TouchController::new();
+        let down = large_touch.observe(model, large_x, large_y, true).unwrap();
+        assert_eq!(
+            down,
+            MobileAction::SetPressed(Some(MobilePressedTarget::LargeText))
+        );
+        assert!(model.apply(down));
+        assert_eq!(
+            large_touch.observe(model, large_x, large_y, false),
+            Some(MobileAction::ToggleLargeText)
+        );
+        assert!(model.apply(MobileAction::ToggleLargeText));
+        assert!(model.large_text);
+        assert_eq!(damage_plan(Some(standard), model), MobileDamagePlan::Full);
+
+        let large = model;
+        let contrast_x =
+            ACCESSIBILITY_HIGH_CONTRAST_TARGET.x + ACCESSIBILITY_HIGH_CONTRAST_TARGET.width / 2;
+        let contrast_y =
+            ACCESSIBILITY_HIGH_CONTRAST_TARGET.y + ACCESSIBILITY_HIGH_CONTRAST_TARGET.height / 2;
+        let mut contrast_touch = TouchController::new();
+        let down = contrast_touch
+            .observe(model, contrast_x, contrast_y, true)
+            .unwrap();
+        assert_eq!(
+            down,
+            MobileAction::SetPressed(Some(MobilePressedTarget::HighContrast))
+        );
+        assert!(model.apply(down));
+        assert_eq!(
+            contrast_touch.observe(model, contrast_x, contrast_y, false),
+            Some(MobileAction::ToggleHighContrast)
+        );
+        assert!(model.apply(MobileAction::ToggleHighContrast));
+        assert!(model.high_contrast);
+        assert_eq!(damage_plan(Some(large), model), MobileDamagePlan::Full);
+
+        for (x, y) in [
+            (
+                ACCESSIBILITY_LARGE_TEXT_TARGET.x,
+                ACCESSIBILITY_LARGE_TEXT_TARGET.y,
+            ),
+            (large_x, large_y),
+            (
+                ACCESSIBILITY_HIGH_CONTRAST_TARGET.x,
+                ACCESSIBILITY_HIGH_CONTRAST_TARGET.y,
+            ),
+            (contrast_x, contrast_y),
+            (360, SYSTEM_NAV_TOP_PX),
+        ] {
+            assert_eq!(
+                hit_test(standard, x, y),
+                hit_test(model, x, y),
+                "appearance changed authority at {x}/{y}"
+            );
+        }
+
+        assert!(model.apply(MobileAction::ToggleHighContrast));
+        assert!(model.apply(MobileAction::ToggleLargeText));
+        assert!(!model.large_text);
+        assert!(!model.high_contrast);
+        assert!(model.apply(MobileAction::Back));
+        assert_eq!(model.page, MobilePage::Display);
+        assert!(model.apply(MobileAction::Back));
+        assert_eq!(model.page, MobilePage::Settings);
     }
 
     #[test]
@@ -13534,12 +17336,8 @@ mod tests {
             Some(MobileAction::Home)
         );
 
-        let mut dimming_model = MobileModel {
-            settings_scroll_offset_px: 128,
-            ..settings
-        };
-        let slider_y = SETTINGS_DIMMING_TARGET.y + SETTINGS_DIMMING_TARGET.height / 2
-            - dimming_model.effective_page_scroll_offset_px();
+        let mut dimming_model = MobileModel::for_page(MobilePage::Display);
+        let slider_y = DISPLAY_DIMMING_TARGET.y + DISPLAY_DIMMING_TARGET.height / 2;
         let mut dimming = TouchController::new();
         let down = dimming.observe(dimming_model, 502, slider_y, true).unwrap();
         assert_eq!(
@@ -13551,7 +17349,7 @@ mod tests {
             dimming.observe(dimming_model, 575, slider_y, true),
             Some(MobileAction::SetSoftwareDimming(UiSoftwareDimming::Light))
         );
-        assert_eq!(dimming_model.settings_scroll_offset_px, 128);
+        assert_eq!(dimming_model.page, MobilePage::Display);
     }
 
     #[test]
@@ -13674,10 +17472,10 @@ mod tests {
         assert!(fitted.len() < long_title.as_str().len());
         assert!(measure_mobile_text_px(MobileTextRole::Label, fitted) <= 136);
         assert_eq!(
-            split_installed_app_label("Mac-built Android app"),
+            split_installed_app_label("Mac-built Android app", false),
             ("Mac-built", "Android app")
         );
-        assert_eq!(split_installed_app_label("OneWord"), ("OneWord", ""));
+        assert_eq!(split_installed_app_label("OneWord", false), ("OneWord", ""));
     }
 
     #[test]
@@ -13810,7 +17608,7 @@ mod tests {
         assert_eq!(software_dimming_for_x(0), UiSoftwareDimming::Maximum);
         assert_eq!(software_dimming_for_x(u16::MAX), UiSoftwareDimming::Off);
 
-        let mut settings = MobileModel::for_page(MobilePage::Settings);
+        let mut settings = MobileModel::for_page(MobilePage::Display);
         let mut tap = TouchController::new();
         assert_eq!(
             tap.observe(settings, DIMMING_TRACK_START_X_PX, 800, true),
@@ -13893,7 +17691,7 @@ mod tests {
         let pressed = touch.observe(settings, 600, 474, true).unwrap();
         assert_eq!(
             pressed,
-            MobileAction::SetPressed(Some(MobilePressedTarget::Theme))
+            MobileAction::SetPressed(Some(MobilePressedTarget::Display))
         );
         assert!(settings.apply(pressed));
         assert_eq!(
@@ -13905,6 +17703,20 @@ mod tests {
         assert!(settings.apply(pressed));
         assert_eq!(
             touch.observe(settings, 600, 474, false),
+            Some(MobileAction::Open(MobilePage::Display))
+        );
+        assert!(settings.apply(MobileAction::Open(MobilePage::Display)));
+        assert_eq!(settings.pressed_target, None);
+
+        let mut display_touch = TouchController::new();
+        let pressed = display_touch.observe(settings, 600, 474, true).unwrap();
+        assert_eq!(
+            pressed,
+            MobileAction::SetPressed(Some(MobilePressedTarget::Theme))
+        );
+        assert!(settings.apply(pressed));
+        assert_eq!(
+            display_touch.observe(settings, 600, 474, false),
             Some(MobileAction::ToggleTheme)
         );
         assert!(settings.apply(MobileAction::ToggleTheme));
@@ -14237,7 +18049,7 @@ mod tests {
         let mut settings_row = TouchController::new();
         assert_eq!(
             settings_row.observe(settings, 32, 474, true),
-            Some(MobileAction::SetPressed(Some(MobilePressedTarget::Theme)))
+            Some(MobileAction::SetPressed(Some(MobilePressedTarget::Display)))
         );
         let mut bottom_nav = TouchController::new();
         assert_eq!(bottom_nav.observe(settings, 32, 1_548, true), None);
@@ -14273,7 +18085,7 @@ mod tests {
         assert_eq!(cancelled.observe(model, 600, 474, false), None);
         assert_eq!(
             cancelled.observe(model, 600, 474, true),
-            Some(MobileAction::SetPressed(Some(MobilePressedTarget::Theme)))
+            Some(MobileAction::SetPressed(Some(MobilePressedTarget::Display)))
         );
 
         let mut invalid_release_model = settings;
@@ -14397,6 +18209,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "mobile-ui-runtime")]
     fn every_interactive_target_has_a_distinct_pressed_frame() {
         fn assert_pressed_frame(
             model: MobileModel,
@@ -14407,6 +18220,20 @@ mod tests {
             let mut pressed = model;
             assert!(pressed.apply(MobileAction::SetPressed(Some(target))));
             let pressed_pixels = render_model(pressed);
+            let expected_damage = DamageRect {
+                x: target_rect.x,
+                y: target_rect.y,
+                width: target_rect.width,
+                height: target_rect.height,
+            };
+            assert_eq!(
+                damage_plan(Some(model), pressed),
+                MobileDamagePlan::Regions(DamageRegions::single(expected_damage).unwrap()),
+                "press {target:?}"
+            );
+            let mut damaged = stable.clone();
+            render_damage(&mut damaged, pressed, expected_damage).unwrap();
+            assert_eq!(damaged, pressed_pixels, "damage press {target:?}");
             let mut changed = 0;
             for (index, (before, after)) in stable.iter().zip(pressed_pixels.iter()).enumerate() {
                 if before == after {
@@ -14427,6 +18254,17 @@ mod tests {
                 "{target:?} changed only {changed} pixels"
             );
             assert!(pressed.apply(MobileAction::SetPressed(None)));
+            assert_eq!(
+                damage_plan(
+                    Some(MobileModel {
+                        pressed_target: Some(target),
+                        ..model
+                    }),
+                    pressed
+                ),
+                MobileDamagePlan::Regions(DamageRegions::single(expected_damage).unwrap()),
+                "release {target:?}"
+            );
             assert_eq!(render_model(pressed), stable, "{target:?}");
         }
 
@@ -14472,18 +18310,38 @@ mod tests {
             ),
             (
                 MobileModel::for_page(MobilePage::Settings),
+                MobilePressedTarget::Display,
+                SETTINGS_DISPLAY_TARGET,
+            ),
+            (
+                MobileModel::for_page(MobilePage::Display),
                 MobilePressedTarget::Theme,
-                SETTINGS_THEME_TARGET,
+                DISPLAY_THEME_TARGET,
             ),
             (
-                MobileModel::for_page(MobilePage::Settings),
+                MobileModel::for_page(MobilePage::Display),
                 MobilePressedTarget::Accent,
-                SETTINGS_ACCENT_TARGET,
+                DISPLAY_ACCENT_TARGET,
             ),
             (
-                MobileModel::for_page(MobilePage::Settings),
+                MobileModel::for_page(MobilePage::Display),
                 MobilePressedTarget::SoftwareDimming,
-                SETTINGS_DIMMING_TARGET,
+                DISPLAY_DIMMING_TARGET,
+            ),
+            (
+                MobileModel::for_page(MobilePage::Display),
+                MobilePressedTarget::Accessibility,
+                DISPLAY_ACCESSIBILITY_TARGET,
+            ),
+            (
+                MobileModel::for_page(MobilePage::Accessibility),
+                MobilePressedTarget::LargeText,
+                ACCESSIBILITY_LARGE_TEXT_TARGET,
+            ),
+            (
+                MobileModel::for_page(MobilePage::Accessibility),
+                MobilePressedTarget::HighContrast,
+                ACCESSIBILITY_HIGH_CONTRAST_TARGET,
             ),
             (
                 MobileModel::for_page(MobilePage::Settings),
@@ -14526,6 +18384,11 @@ mod tests {
                 },
                 MobilePressedTarget::BootNotification,
                 QUICK_BOOT_NOTIFICATION_TARGET,
+            ),
+            (
+                MobileModel::locked(),
+                MobilePressedTarget::BootNotification,
+                LOCK_BOOT_NOTIFICATION_TARGET,
             ),
             (
                 MobileModel {
@@ -14652,9 +18515,13 @@ mod tests {
             HOME_CALCULATOR_TARGET,
             HOME_SETTINGS_TARGET,
             APP_BACK_TARGET,
-            SETTINGS_THEME_TARGET,
-            SETTINGS_ACCENT_TARGET,
-            SETTINGS_DIMMING_TARGET,
+            SETTINGS_DISPLAY_TARGET,
+            DISPLAY_THEME_TARGET,
+            DISPLAY_ACCENT_TARGET,
+            DISPLAY_DIMMING_TARGET,
+            DISPLAY_ACCESSIBILITY_TARGET,
+            ACCESSIBILITY_LARGE_TEXT_TARGET,
+            ACCESSIBILITY_HIGH_CONTRAST_TARGET,
             SETTINGS_APPS_TARGET,
             SETTINGS_ABOUT_TARGET,
             QUICK_THEME_TARGET,
@@ -15561,6 +19428,47 @@ mod tests {
     }
 
     #[test]
+    fn overview_reserves_top_edge_for_the_same_finger_follow_shade() {
+        let mut model = MobileModel::for_page(MobilePage::Phone);
+        assert!(model.apply_system_ui_state(
+            UiSystemUiMode::Overview,
+            Some(ShellAppId::Phone),
+            false,
+            0,
+            2,
+        ));
+        let overview = render_model(model);
+
+        assert_eq!(hit_test(model, 360, 0), None);
+        assert_eq!(hit_test(model, 360, SHADE_GESTURE_START_MAX_Y - 1), None);
+        assert_eq!(
+            hit_test(model, 360, SHADE_GESTURE_START_MAX_Y),
+            Some(MobilePressedTarget::OverviewBackground)
+        );
+
+        let mut touch = TouchController::new();
+        assert_eq!(touch.observe(model, 360, 80, true), None);
+        let reveal = touch.observe(model, 360, 700, true).unwrap();
+        assert_eq!(reveal, MobileAction::SetShadeReveal(620));
+        assert!(model.apply(reveal));
+        assert_eq!(model.effective_shade_reveal_px(), 620);
+        assert_ne!(render_model(model), overview);
+
+        assert_eq!(
+            touch.observe(model, 360, 700, false),
+            Some(MobileAction::OpenShade)
+        );
+        assert!(model.apply(MobileAction::OpenShade));
+        assert!(model.overview_open());
+        assert_eq!(model.effective_shade_reveal_px(), SHADE_REVEAL_MAX);
+
+        // The settled opaque system sheet must not leak any Overview pixels.
+        let mut home = MobileModel::default();
+        assert!(home.apply(MobileAction::OpenShade));
+        assert_eq!(render_model(model), render_model(home));
+    }
+
+    #[test]
     fn shade_gesture_rejects_short_diagonal_and_non_edge_drags() {
         let model = MobileModel::default();
         for ((start_x, start_y), (end_x, end_y)) in [
@@ -15846,6 +19754,37 @@ mod tests {
                 Some(MobilePressedTarget::BootNotification)
             );
         }
+        let stable_lock = MobileModel::locked();
+        for (x, y) in [(48, 652), (671, 883), (360, 770)] {
+            assert_eq!(
+                hit_test(stable_lock, x, y),
+                Some(MobilePressedTarget::BootNotification)
+            );
+        }
+        for (x, y) in [(47, 652), (672, 883), (360, 651), (360, 884)] {
+            assert_ne!(
+                hit_test(stable_lock, x, y),
+                Some(MobilePressedTarget::BootNotification)
+            );
+        }
+
+        let mut stable_lock_tap = stable_lock;
+        let mut stable_lock_touch = TouchController::new();
+        let down = stable_lock_touch
+            .observe(stable_lock_tap, 360, 770, true)
+            .unwrap();
+        assert_eq!(
+            down,
+            MobileAction::SetPressed(Some(MobilePressedTarget::BootNotification))
+        );
+        assert!(stable_lock_tap.apply(down));
+        assert_eq!(
+            stable_lock_touch.observe(stable_lock_tap, 360, 770, false),
+            Some(MobileAction::SetPressed(None))
+        );
+        assert!(stable_lock_tap.apply(MobileAction::SetPressed(None)));
+        assert_eq!(stable_lock_tap.page, MobilePage::Lock);
+        assert!(stable_lock_tap.boot_notification_visible);
 
         let mut settings = shade;
         let mut settings_touch = TouchController::new();
@@ -15928,6 +19867,99 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "mobile-ui-runtime")]
+    fn lock_notification_reuses_swipe_thresholds_without_unlock_authority() {
+        let base = MobileModel::locked();
+        let stable = render_model(base);
+
+        let mut short_model = base;
+        let mut short = TouchController::new();
+        let down = short.observe(short_model, 360, 770, true).unwrap();
+        assert_eq!(
+            down,
+            MobileAction::SetPressed(Some(MobilePressedTarget::BootNotification))
+        );
+        assert!(short_model.apply(down));
+        let drag = short.observe(short_model, 519, 770, true).unwrap();
+        assert_eq!(drag, MobileAction::SetBootNotificationOffset(159));
+        assert!(short_model.apply(drag));
+        assert_eq!(short_model.boot_notification_offset_px, 152);
+        assert_eq!(short_model.page, MobilePage::Lock);
+        assert_eq!(short_model.effective_unlock_reveal_px(), 0);
+        let transient = render_model(short_model);
+        assert_ne!(transient, stable);
+        assert_pixel_differences_are_bounded(&stable, &transient, &[(48, 652, 720, 892)]);
+        let short_damage = DamageRect {
+            x: 48,
+            y: 652,
+            width: 672,
+            height: 240,
+        };
+        assert_eq!(
+            damage_plan(Some(base), short_model),
+            MobileDamagePlan::Regions(DamageRegions::single(short_damage).unwrap())
+        );
+        let mut damaged = stable.clone();
+        render_damage(&mut damaged, short_model, short_damage).unwrap();
+        assert_eq!(damaged, transient);
+        assert_eq!(
+            short.observe(short_model, 519, 770, false),
+            Some(MobileAction::SetBootNotificationOffset(0))
+        );
+        let held_short = short_model;
+        assert!(short_model.apply(MobileAction::SetBootNotificationOffset(0)));
+        assert_eq!(
+            damage_plan(Some(held_short), short_model),
+            MobileDamagePlan::Regions(DamageRegions::single(short_damage).unwrap())
+        );
+        assert_eq!(render_model(short_model), stable);
+
+        let mut dismissed = base;
+        let mut swipe = TouchController::new();
+        let down = swipe.observe(dismissed, 360, 770, true).unwrap();
+        assert!(dismissed.apply(down));
+        let drag = swipe.observe(dismissed, 200, 770, true).unwrap();
+        assert_eq!(drag, MobileAction::SetBootNotificationOffset(-160));
+        assert!(dismissed.apply(drag));
+        assert_eq!(
+            swipe.observe(dismissed, 200, 770, false),
+            Some(MobileAction::DismissBootNotification)
+        );
+        let held_dismiss = dismissed;
+        assert!(dismissed.apply(MobileAction::DismissBootNotification));
+        assert!(!dismissed.boot_notification_visible);
+        assert_eq!(dismissed.page, MobilePage::Lock);
+        assert_eq!(dismissed.effective_unlock_reveal_px(), 0);
+        let dismiss_damage = DamageRect {
+            x: 0,
+            y: 652,
+            width: 672,
+            height: 240,
+        };
+        assert_eq!(
+            damage_plan(Some(held_dismiss), dismissed),
+            MobileDamagePlan::Regions(DamageRegions::single(dismiss_damage).unwrap())
+        );
+        let mut damage_dismissed = render_model(held_dismiss);
+        render_damage(&mut damage_dismissed, dismissed, dismiss_damage).unwrap();
+        assert_eq!(damage_dismissed, render_model(dismissed));
+
+        let mut vertical_model = base;
+        let mut vertical = TouchController::new();
+        let down = vertical.observe(vertical_model, 360, 770, true).unwrap();
+        assert!(vertical_model.apply(down));
+        assert_eq!(
+            vertical.observe(vertical_model, 360, 520, true),
+            Some(MobileAction::SetPressed(None))
+        );
+        assert!(vertical_model.apply(MobileAction::SetPressed(None)));
+        assert_eq!(vertical.observe(vertical_model, 360, 520, false), None);
+        assert_eq!(vertical_model.page, MobilePage::Lock);
+        assert_eq!(vertical_model.effective_unlock_reveal_px(), 0);
+        assert!(vertical_model.boot_notification_visible);
+    }
+
+    #[test]
     fn boot_notification_vertical_drag_yields_to_shade_and_cancel_restores() {
         let mut model = MobileModel {
             shade_open: true,
@@ -15963,13 +19995,31 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "mobile-ui-runtime")]
     fn boot_notification_offset_is_row_partition_independent_and_dismissal_stays_local() {
+        let shade_stable = MobileModel {
+            shade_open: true,
+            ..MobileModel::default()
+        };
         let offset = MobileModel {
             shade_open: true,
             boot_notification_offset_px: -80,
             ..MobileModel::default()
         };
         let expected = render_model(offset);
+        let offset_damage = DamageRect {
+            x: 0,
+            y: 904,
+            width: 688,
+            height: 240,
+        };
+        assert_eq!(
+            damage_plan(Some(shade_stable), offset),
+            MobileDamagePlan::Regions(DamageRegions::single(offset_damage).unwrap())
+        );
+        let mut damaged = render_model(shade_stable);
+        render_damage(&mut damaged, offset, offset_damage).unwrap();
+        assert_eq!(damaged, expected);
         let mut rows = vec![0_u32; PIXEL_COUNT];
         let starts: Vec<_> = (0..HEIGHT).step_by(17).collect();
         for first_row in starts.into_iter().rev() {
@@ -15985,6 +20035,19 @@ mod tests {
 
         let mut dismissed = offset;
         assert!(dismissed.apply(MobileAction::DismissBootNotification));
+        let dismiss_damage = DamageRect {
+            x: 0,
+            y: 904,
+            width: 688,
+            height: 344,
+        };
+        assert_eq!(
+            damage_plan(Some(offset), dismissed),
+            MobileDamagePlan::Regions(DamageRegions::single(dismiss_damage).unwrap())
+        );
+        let mut damage_dismissed = expected.clone();
+        render_damage(&mut damage_dismissed, dismissed, dismiss_damage).unwrap();
+        assert_eq!(damage_dismissed, render_model(dismissed));
         assert!(dismissed.apply(MobileAction::ToggleTheme));
         assert!(dismissed.apply(MobileAction::ToggleAccent));
         assert!(!dismissed.boot_notification_visible);
@@ -16106,6 +20169,8 @@ mod tests {
             MobilePage::AndroidDemo,
             MobilePage::Settings,
             MobilePage::Apps,
+            MobilePage::Display,
+            MobilePage::Accessibility,
         ] {
             let stable_model = MobileModel::for_page(page);
             let stable = render_model(stable_model);
@@ -16175,6 +20240,8 @@ mod tests {
             MobilePage::Settings,
             MobilePage::Apps,
             MobilePage::About,
+            MobilePage::Display,
+            MobilePage::Accessibility,
         ] {
             assert_eq!(
                 MobileModel::for_page(page).system_ui_mode,
@@ -16315,6 +20382,143 @@ mod tests {
     }
 
     #[test]
+    fn overview_recent_swipe_follows_finger_rebounds_and_commits_only_after_threshold() {
+        let mut model = MobileModel::for_page(MobilePage::Phone);
+        assert!(model.apply_system_ui_state(
+            UiSystemUiMode::Overview,
+            Some(ShellAppId::Phone),
+            false,
+            0,
+            2,
+        ));
+        let stable = render_model(model);
+
+        let mut touch = TouchController::new();
+        assert_eq!(
+            touch.observe(model, 360, 900, true),
+            Some(MobileAction::SetPressed(Some(
+                MobilePressedTarget::OverviewRecent
+            )))
+        );
+        assert!(model.apply(MobileAction::SetPressed(Some(
+            MobilePressedTarget::OverviewRecent,
+        ))));
+        assert_eq!(
+            touch.observe(model, 360, 860, true),
+            Some(MobileAction::SetOverviewRecentOffset(40))
+        );
+        assert!(model.apply(MobileAction::SetOverviewRecentOffset(40)));
+        assert_eq!(model.effective_overview_recent_offset_px(), 40);
+        assert_eq!(model.pressed_target, None);
+        assert_ne!(render_model(model), stable);
+
+        assert_eq!(
+            touch.observe(
+                model,
+                360,
+                900 - OVERVIEW_RECENT_DISMISS_THRESHOLD_PX + 8,
+                false,
+            ),
+            Some(MobileAction::SetOverviewRecentOffset(0)),
+            "a sub-threshold release must rebound instead of removing the card"
+        );
+        assert!(model.apply(MobileAction::SetOverviewRecentOffset(0)));
+        assert_eq!(render_model(model), stable);
+
+        let mut touch = TouchController::new();
+        assert!(touch.observe(model, 360, 900, true).is_some());
+        assert!(model.apply(MobileAction::SetPressed(Some(
+            MobilePressedTarget::OverviewRecent,
+        ))));
+        let committed_y = 900 - OVERVIEW_RECENT_DISMISS_THRESHOLD_PX - 16;
+        assert_eq!(
+            touch.observe(model, 360, committed_y, true),
+            Some(MobileAction::SetOverviewRecentOffset(
+                OVERVIEW_RECENT_DISMISS_THRESHOLD_PX + 16
+            ))
+        );
+        assert!(model.apply(MobileAction::SetOverviewRecentOffset(
+            OVERVIEW_RECENT_DISMISS_THRESHOLD_PX + 16,
+        )));
+        assert_eq!(
+            touch.observe(model, 360, committed_y, false),
+            Some(MobileAction::DismissRecentApp)
+        );
+        assert!(model.apply(MobileAction::DismissRecentApp));
+        assert_eq!(
+            model.system_ui_recent,
+            Some(UiRecentIdentity::Shell(ShellAppId::Phone)),
+            "the UI action alone must not mutate SurfaceServer-owned identity"
+        );
+        assert!(model.overview_open());
+        assert_eq!(model.overview_recent_offset_px, 0);
+
+        assert!(model.apply_system_ui_state(UiSystemUiMode::Overview, None, false, 0, 3));
+        assert_eq!(model.system_ui_recent, None);
+        assert_eq!(model.effective_overview_recent_offset_px(), 0);
+    }
+
+    #[test]
+    fn overview_swipe_can_remove_stale_compatible_identity_but_never_activates_it() {
+        let identity = UiCompatibleActivityIdentity::new(17, 5).unwrap();
+        let recent = UiRecentIdentity::CompatibleAndroid(identity);
+        let mut model = MobileModel::for_page(MobilePage::AndroidDemo);
+        assert!(model.apply_system_ui_state_recent(
+            UiSystemUiMode::Overview,
+            Some(recent),
+            false,
+            0,
+            2,
+        ));
+        assert_eq!(hit_test(model, 360, 900), None);
+
+        let mut touch = TouchController::new();
+        assert_eq!(touch.observe(model, 360, 900, true), None);
+        assert_eq!(
+            touch.observe(model, 360, 640, true),
+            Some(MobileAction::SetOverviewRecentOffset(260))
+        );
+        assert!(model.apply(MobileAction::SetOverviewRecentOffset(260)));
+        assert_eq!(
+            touch.observe(model, 360, 640, false),
+            Some(MobileAction::DismissRecentApp)
+        );
+    }
+
+    #[test]
+    fn overview_card_offset_is_bounded_and_never_changes_system_chrome() {
+        let mut model = MobileModel::for_page(MobilePage::Messages);
+        assert!(model.apply_system_ui_state(
+            UiSystemUiMode::Overview,
+            Some(ShellAppId::Messages),
+            false,
+            0,
+            2,
+        ));
+        let stable = render_model(model);
+        assert!(model.apply(MobileAction::SetOverviewRecentOffset(u16::MAX)));
+        assert_eq!(
+            model.effective_overview_recent_offset_px(),
+            OVERVIEW_RECENT_MAX_OFFSET_PX
+        );
+        let shifted = render_model(model);
+        assert_pixel_differences_are_bounded(&stable, &shifted, &[(48, 104, 672, 1_184)]);
+        assert_eq!(&stable[..64 * WIDTH], &shifted[..64 * WIDTH]);
+        assert_eq!(
+            &stable[usize::from(SYSTEM_NAV_TOP_PX) * WIDTH..],
+            &shifted[usize::from(SYSTEM_NAV_TOP_PX) * WIDTH..]
+        );
+        assert!(model.apply_system_ui_state(
+            UiSystemUiMode::Overview,
+            Some(ShellAppId::Messages),
+            false,
+            0,
+            3,
+        ));
+        assert_eq!(model.overview_recent_offset_px, 0);
+    }
+
+    #[test]
     fn overview_background_requests_close_without_mutating_server_owned_mode_locally() {
         let mut model = MobileModel::default();
         assert!(model.apply_system_ui_state(UiSystemUiMode::Overview, None, false, 0, 2));
@@ -16387,7 +20591,7 @@ mod tests {
         assert_pixel_differences_are_bounded(
             &render_model(identity),
             &render_model(empty),
-            &[(48, 424, 672, 1_184)],
+            &[(48, 424, 672, 1_184), (0, 1_220, 720, 1_300)],
         );
     }
 
@@ -16406,7 +20610,10 @@ mod tests {
             - (usize::from(SYSTEM_NAV_TOP_PX - 240) * 160 / usize::from(OVERVIEW_RENDER_MAX_PX));
         assert_eq!(sheet_top, 894);
         let complete = render_model(model);
-        assert_eq!(complete[sheet_top * WIDTH + WIDTH / 2], 0x000d_1629);
+        assert_eq!(
+            complete[sheet_top * WIDTH + WIDTH / 2],
+            model.theme_tokens().panel
+        );
 
         let mut rows = vec![0_u32; PIXEL_COUNT];
         for first_row in (0..HEIGHT).step_by(29).rev() {
@@ -16462,6 +20669,8 @@ mod tests {
             model.dark_theme,
             model.alternate_accent,
             model.software_dimming,
+            model.large_text,
+            model.high_contrast,
             model.system_nav_pressed,
         )
     }
@@ -16542,6 +20751,8 @@ mod tests {
             phone.dark_theme,
             phone.alternate_accent,
             phone.software_dimming,
+            phone.large_text,
+            phone.high_contrast,
             true,
         );
         let pressed_frame = render_split_frame(phone, pressed_chrome);

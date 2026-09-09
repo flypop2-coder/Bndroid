@@ -4,6 +4,7 @@ use crate::framebuffer::{HEIGHT, PIXEL_COUNT, WIDTH, pixel_digest};
 
 pub const CURSOR_WIDTH: usize = 12;
 pub const CURSOR_HEIGHT: usize = 22;
+pub const MAX_SCENE_DAMAGE_RECTS: usize = 2;
 pub const COLOR_CURSOR: u32 = 0x00f8_fafc;
 pub const COLOR_CURSOR_PRESSED: u32 = 0x00f9_7316;
 pub const COLOR_CURSOR_OUTLINE: u32 = 0x0011_1827;
@@ -127,7 +128,10 @@ pub enum CompositorError {
     WrongScenePixelCount,
     WrongScanoutPixelCount,
     EmptyDamage,
+    TooManyDamageRects,
     DamageOutOfBounds,
+    OverlappingDamageRects,
+    NonCanonicalDamageRects,
 }
 
 impl CompositorError {
@@ -136,7 +140,12 @@ impl CompositorError {
             Self::WrongScenePixelCount => "compositor scene surface has the wrong pixel count",
             Self::WrongScanoutPixelCount => "compositor scanout surface has the wrong pixel count",
             Self::EmptyDamage => "compositor scene damage is empty",
+            Self::TooManyDamageRects => "compositor scene has too many damage rectangles",
             Self::DamageOutOfBounds => "compositor scene damage is outside the scanout",
+            Self::OverlappingDamageRects => "compositor scene damage rectangles overlap",
+            Self::NonCanonicalDamageRects => {
+                "compositor scene damage rectangles are not canonically ordered"
+            }
         }
     }
 }
@@ -152,6 +161,35 @@ pub struct ValidatedSceneDamage(Rect);
 impl ValidatedSceneDamage {
     pub const fn rect(self) -> Rect {
         self.0
+    }
+}
+
+/// One or two nonempty, in-bounds, sorted and non-overlapping scene regions.
+/// Construction completes every fallible geometry check before either the
+/// retained scene or scanout can be mutated.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ValidatedSceneDamageRegions {
+    rects: [Rect; MAX_SCENE_DAMAGE_RECTS],
+    count: u8,
+    bounds: Rect,
+    pixels: usize,
+}
+
+impl ValidatedSceneDamageRegions {
+    pub fn rects(&self) -> &[Rect] {
+        &self.rects[..usize::from(self.count)]
+    }
+
+    pub const fn count(self) -> u8 {
+        self.count
+    }
+
+    pub const fn bounds(self) -> Rect {
+        self.bounds
+    }
+
+    pub const fn pixels(self) -> usize {
+        self.pixels
     }
 }
 
@@ -177,7 +215,11 @@ pub struct SceneUpdateEvidence {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ScenePublishEvidence {
     pub damage: Rect,
+    pub damage_regions: u8,
+    pub damage_pixels: usize,
     pub composition: Rect,
+    pub composition_regions: u8,
+    pub composition_pixels: usize,
     pub restored_pixels: usize,
     pub blended_pixels: usize,
     pub scene_digest: u64,
@@ -329,6 +371,53 @@ pub fn validate_scene_damage(damage: Rect) -> Result<ValidatedSceneDamage, Compo
     Ok(ValidatedSceneDamage(damage))
 }
 
+/// Strictly validates one canonical multi-region scene update.
+pub fn validate_scene_damage_regions(
+    damages: &[Rect],
+) -> Result<ValidatedSceneDamageRegions, CompositorError> {
+    if damages.is_empty() {
+        return Err(CompositorError::EmptyDamage);
+    }
+    if damages.len() > MAX_SCENE_DAMAGE_RECTS {
+        return Err(CompositorError::TooManyDamageRects);
+    }
+    let mut rects = [Rect::default(); MAX_SCENE_DAMAGE_RECTS];
+    let mut bounds = Rect::default();
+    let mut pixels = 0_usize;
+    for (index, damage) in damages.iter().copied().enumerate() {
+        let validated = validate_scene_damage(damage)?.rect();
+        if index != 0 {
+            let previous = rects[index - 1];
+            if rect_sort_key(validated) <= rect_sort_key(previous) {
+                return Err(CompositorError::NonCanonicalDamageRects);
+            }
+            if previous.intersects(validated) {
+                return Err(CompositorError::OverlappingDamageRects);
+            }
+        }
+        rects[index] = validated;
+        bounds = bounds.union(validated);
+        pixels = pixels
+            .checked_add(
+                validated
+                    .width
+                    .checked_mul(validated.height)
+                    .ok_or(CompositorError::DamageOutOfBounds)?,
+            )
+            .ok_or(CompositorError::DamageOutOfBounds)?;
+    }
+    Ok(ValidatedSceneDamageRegions {
+        rects,
+        count: damages.len() as u8,
+        bounds,
+        pixels,
+    })
+}
+
+const fn rect_sort_key(rect: Rect) -> (usize, usize, usize, usize) {
+    (rect.y, rect.x, rect.height, rect.width)
+}
+
 /// Publishes damage from an already-updated opaque scene and preserves the
 /// cursor layer.
 ///
@@ -343,22 +432,61 @@ pub fn publish_scene_damage(
     damage: ValidatedSceneDamage,
 ) -> ScenePublishEvidence {
     let damage = damage.rect();
+    let regions = validate_scene_damage_regions(&[damage])
+        .expect("one previously validated scene damage rectangle remains valid");
+    publish_scene_damage_regions(scene, scanout, cursor, regions)
+}
+
+/// Publishes one canonical set of disjoint scene regions while preserving the
+/// cursor exactly once. Pixels in the bounding-box gaps are never rewritten.
+pub fn publish_scene_damage_regions(
+    scene: &[u32; PIXEL_COUNT],
+    scanout: &mut [u32; PIXEL_COUNT],
+    cursor: CursorState,
+    damage: ValidatedSceneDamageRegions,
+) -> ScenePublishEvidence {
     let cursor_bounds = cursor.bounds();
-    let cursor_affected = damage.intersects(cursor_bounds);
+    let cursor_affected = damage
+        .rects()
+        .iter()
+        .any(|rect| rect.intersects(cursor_bounds));
     let composition = if cursor_affected {
-        damage.union(cursor_bounds)
+        damage.bounds().union(cursor_bounds)
     } else {
-        damage
+        damage.bounds()
     };
-    let restored_pixels = restore_scene_rect(scene, scanout, composition);
+    let mut restored_pixels = 0_usize;
+    for rect in damage.rects() {
+        restored_pixels += restore_scene_rect(scene, scanout, *rect);
+    }
+    let mut cursor_extension_pixels = 0_usize;
+    if cursor_affected {
+        let cursor_right = cursor_bounds.x + cursor_bounds.width;
+        let cursor_bottom = cursor_bounds.y + cursor_bounds.height;
+        for y in cursor_bounds.y..cursor_bottom {
+            for x in cursor_bounds.x..cursor_right {
+                if damage.rects().iter().any(|rect| rect.contains(x, y)) {
+                    continue;
+                }
+                let index = y * WIDTH + x;
+                scanout[index] = scene[index];
+                restored_pixels += 1;
+                cursor_extension_pixels += 1;
+            }
+        }
+    }
     let blended_pixels = if cursor_affected {
         draw_cursor(scanout, cursor)
     } else {
         0
     };
     ScenePublishEvidence {
-        damage,
+        damage: damage.bounds(),
+        damage_regions: damage.count(),
+        damage_pixels: damage.pixels(),
         composition,
+        composition_regions: damage.count() + u8::from(cursor_extension_pixels != 0),
+        composition_pixels: restored_pixels,
         restored_pixels,
         blended_pixels,
         scene_digest: pixel_digest(scene),
@@ -772,5 +900,100 @@ mod tests {
         assert_eq!(evidence.restored_pixels, CURSOR_WIDTH * CURSOR_HEIGHT);
         assert!(evidence.blended_pixels > 0);
         assert_eq!(evidence.scanout_digest, pixel_digest(&expected));
+    }
+
+    #[test]
+    fn disjoint_scene_regions_never_publish_their_bounding_box_gap() {
+        let first = Rect::new(10, 20, 4, 3);
+        let second = Rect::new(600, 1_400, 5, 2);
+        let damage = validate_scene_damage_regions(&[first, second]).unwrap();
+        let scene = vec![0x0011_2233; PIXEL_COUNT];
+        let mut scanout = vec![0x0044_5566; PIXEL_COUNT];
+        let scene: &[u32; PIXEL_COUNT] = scene.as_slice().try_into().unwrap();
+        let scanout: &mut [u32; PIXEL_COUNT] = scanout.as_mut_slice().try_into().unwrap();
+
+        let evidence = publish_scene_damage_regions(scene, scanout, CursorState::hidden(), damage);
+
+        assert_eq!(evidence.damage, Rect::new(10, 20, 595, 1_382));
+        assert_eq!(evidence.damage_regions, 2);
+        assert_eq!(evidence.damage_pixels, 22);
+        assert_eq!(evidence.composition, evidence.damage);
+        assert_eq!(evidence.composition_regions, 2);
+        assert_eq!(evidence.composition_pixels, 22);
+        assert_eq!(evidence.restored_pixels, 22);
+        assert_eq!(evidence.blended_pixels, 0);
+        for y in 0..HEIGHT {
+            for x in 0..WIDTH {
+                let expected = if first.contains(x, y) || second.contains(x, y) {
+                    0x0011_2233
+                } else {
+                    0x0044_5566
+                };
+                assert_eq!(scanout[y * WIDTH + x], expected, "scanout pixel {x}/{y}");
+            }
+        }
+    }
+
+    #[test]
+    fn disjoint_scene_regions_recompose_one_intersecting_cursor_exactly_once() {
+        let first = Rect::new(104, 206, 2, 2);
+        let second = Rect::new(520, 1_300, 3, 4);
+        let mut scene = vec![0x0001_0203; PIXEL_COUNT];
+        let cursor = CursorState::visible(100, 200, true);
+        let mut scanout = scene.clone();
+        compose_full(&scene, &mut scanout, cursor).unwrap();
+        for rect in [first, second] {
+            for y in rect.y..rect.y + rect.height {
+                scene[y * WIDTH + rect.x..y * WIDTH + rect.x + rect.width].fill(0x0012_3456);
+            }
+        }
+        let mut expected = vec![0_u32; PIXEL_COUNT];
+        compose_full(&scene, &mut expected, cursor).unwrap();
+        let scene: &[u32; PIXEL_COUNT] = scene.as_slice().try_into().unwrap();
+        let scanout: &mut [u32; PIXEL_COUNT] = scanout.as_mut_slice().try_into().unwrap();
+
+        let evidence = publish_scene_damage_regions(
+            scene,
+            scanout,
+            cursor,
+            validate_scene_damage_regions(&[first, second]).unwrap(),
+        );
+
+        assert_eq!(&scanout[..], &expected);
+        assert_eq!(evidence.damage_regions, 2);
+        assert_eq!(evidence.damage_pixels, 16);
+        assert_eq!(evidence.composition_regions, 3);
+        assert_eq!(
+            evidence.composition_pixels,
+            16 + CURSOR_WIDTH * CURSOR_HEIGHT - 4
+        );
+        assert_eq!(evidence.restored_pixels, evidence.composition_pixels);
+        assert!(evidence.blended_pixels > 0);
+    }
+
+    #[test]
+    fn scene_region_validation_rejects_empty_excess_reversed_overlap_and_bounds() {
+        let first = Rect::new(10, 20, 30, 40);
+        let second = Rect::new(100, 200, 20, 30);
+        assert_eq!(
+            validate_scene_damage_regions(&[]),
+            Err(CompositorError::EmptyDamage)
+        );
+        assert_eq!(
+            validate_scene_damage_regions(&[first, second, Rect::new(300, 400, 1, 1)]),
+            Err(CompositorError::TooManyDamageRects)
+        );
+        assert_eq!(
+            validate_scene_damage_regions(&[second, first]),
+            Err(CompositorError::NonCanonicalDamageRects)
+        );
+        assert_eq!(
+            validate_scene_damage_regions(&[first, Rect::new(20, 30, 30, 40)]),
+            Err(CompositorError::OverlappingDamageRects)
+        );
+        assert_eq!(
+            validate_scene_damage_regions(&[Rect::new(WIDTH - 1, 0, 2, 1)]),
+            Err(CompositorError::DamageOutOfBounds)
+        );
     }
 }

@@ -1,43 +1,36 @@
-# 贡献指南
+# Contributing to Bndroid OS
 
-感谢你愿意参与 Bndroid OS。这个项目仍处在研究阶段，最需要的是清晰、可验证、边界
-明确的改进。
+Bndroid is research software. Contributions should make a focused, reproducible improvement with clear ownership and compatibility boundaries.
 
-## 协作流程
+## Workflow
 
-1. 先 fork 仓库。
-2. 从自己的 fork 新建功能分支。
-3. 保持改动聚焦，一次 PR 只解决一个问题或一个小主题。
-4. 在 PR 描述里说明动机、改动范围、验证方式和已知风险。
-5. 等待维护者 review。`main` 分支不接受直接 push。
+1. Fork the repository and create a feature branch in your fork.
+2. Keep each pull request focused on one problem or a small related topic.
+3. Explain the motivation, changed behavior, validation commands, and known risks.
+4. Document ABI, protocol, storage-format, and user-visible compatibility changes.
+5. Wait for maintainer review; external contributions should not push directly to `main`.
 
-## 优先方向
+## Priorities
 
-- 内核对象、进程、内存、调度、通道、事件等基础系统能力。
-- 存储、包状态、应用数据和恢复策略。
-- 图形、输入、surface、compositor 和移动 UI。
-- AndroidBox 的 APK envelope、manifest/resource 解析、DEX 子集执行、Activity
-  生命周期和布局语义。
-- 可重复的 host test、QEMU gate、脚本稳定性和证据记录。
-- 中文文档、架构说明、开发者入口和术语整理。
+- Kernel objects, processes, memory, scheduling, channels, and events.
+- Storage, package state, application data, and recovery.
+- Graphics, input, surfaces, composition, and mobile UI.
+- AndroidBox APK envelopes, manifests, resources, bounded DEX execution, Activity lifecycle, and layout semantics.
+- Reproducible host tests, QEMU gates, stable scripts, and evidence records.
+- English documentation, architecture explanations, and developer onboarding.
 
-## 不接受的内容
+See [TODO.md](TODO.md) for the authoritative roadmap. Keep subsystem documentation next to its code and milestone reports under `docs/milestones/`. Do not add ad-hoc reports, generated binaries, screenshots, or logs to the repository root. Local generated evidence belongs in `target/`.
 
-- 以破坏、规避、攻击或滥用 Android、Google 服务、设备厂商系统或第三方应用为目标
-  的改动。
-- 绕过授权、绕过付费、绕过 DRM、窃取凭据、逃避检测或持久化控制的代码。
-- 未经明确授权下载或嵌入大型第三方代码库、SDK、系统镜像或专有组件。
-- 没有测试、没有边界说明、难以复现的“大改一切”式 PR。
-- 与项目无关的宣传、争吵、挑衅或人身攻击。
+## Validation
 
-## PR 要求
+New behavior needs tests or reproducible validation steps. Security-sensitive changes must describe the threat model and failure modes. Retain negative tests and recovery evidence. Run relevant host tests and QEMU gates, and report exactly which checks passed or could not run.
 
-- 新行为应有测试或可复现验证步骤。
-- 涉及 ABI、协议、存储格式、用户可见行为的改动必须说明兼容性影响。
-- 涉及安全边界的改动必须说明威胁模型和失败模式。
-- 不要在 PR 中提交个人 token、密钥、日志隐私数据或生成的大型 evidence 目录。
+Do not commit personal tokens, private keys, sensitive logs, or large generated evidence directories. Repository-owned test signing fixtures are explicitly documented as public test material and must never be used for production signing.
 
-## 维护原则
+## Contribution boundaries
 
-Bndroid OS 以可验证的系统契约为中心。我们欢迎大胆的方向，但合并标准看证据、边界
-和可维护性，而不是口号。
+The project does not accept changes intended to attack, damage, or abuse Android, Google services, device vendors, third-party applications, or other platforms. This includes unauthorized access, payment or DRM bypass, credential theft, detection evasion, and unauthorized persistent control.
+
+Do not download or embed large third-party source trees, SDKs, system images, or proprietary components without explicit authorization. Avoid broad, untested rewrites and unrelated promotion, arguments, or personal attacks.
+
+Merge decisions depend on evidence, clear boundaries, and maintainability.

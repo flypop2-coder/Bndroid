@@ -35,13 +35,14 @@ pub const USER_STACK_PAGES: usize = 20;
 #[cfg(all(
     not(feature = "storage-server-runtime"),
     not(feature = "androidbox-interactive0"),
-    feature = "androidbox-apk-install0"
+    any(feature = "androidbox-apk-install0", feature = "androidbox-dex0")
 ))]
 pub const USER_STACK_PAGES: usize = 8;
 #[cfg(all(
     not(feature = "storage-server-runtime"),
     not(feature = "androidbox-interactive0"),
-    not(feature = "androidbox-apk-install0")
+    not(feature = "androidbox-apk-install0"),
+    not(feature = "androidbox-dex0")
 ))]
 pub const USER_STACK_PAGES: usize = 4;
 const _: () = assert!(USER_STACK_PAGES <= mmu::USER_STACK_PAGE_LIMIT);

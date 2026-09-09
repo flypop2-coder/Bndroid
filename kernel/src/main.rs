@@ -19407,6 +19407,7 @@ fn monitor_mobile_ui_preview() -> ! {
         let interactive_graphics = process::androidbox_interactive_graphics_evidence();
         let fault = scheduler::user_init_fault_snapshot();
         let pool = bndroid_kernel::graphics_buffer::pool_snapshot();
+        let pacing = display::frame_clock_snapshot();
         if syscalls.failure != 0 {
             crate::kprintln!(
                 "MOBILE_UI_INIT_FAILURE_DIAG reason={} created={} live={} child_pids={}/{}/{}/{}/{}/{}/{}/{}/{} child_images={}/{}/{}/{}/{}/{}/{}/{}/{}",
@@ -19451,6 +19452,7 @@ fn monitor_mobile_ui_preview() -> ! {
                 "the local preview contained an EL0 fault",
             );
         }
+        #[cfg(feature = "androidbox-apk-install0")]
         let pool_ready = pool.slots.iter().all(|slot| {
             slot.occupied
                 && slot.strong_references == 2
@@ -19465,6 +19467,30 @@ fn monitor_mobile_ui_preview() -> ! {
                 .iter()
                 .all(|other| other.producer_pid != slot.producer_pid)
         });
+        #[cfg(all(
+            feature = "mobile-ui-runtime",
+            not(feature = "androidbox-apk-install0")
+        ))]
+        let pool_ready = pool.slots.iter().all(|slot| {
+            slot.occupied
+                && slot.strong_references == 4
+                && slot.producer_pid != 0
+                && slot.write_generation != 0
+                && matches!(
+                    slot.access,
+                    bndroid_kernel::graphics_buffer::GraphicsBufferAccessSnapshot::Writable
+                )
+        }) && pool.slots.iter().all(|slot| {
+            pool.slots
+                .iter()
+                .filter(|other| other.producer_pid == slot.producer_pid)
+                .count()
+                == 2
+        }) && pool.slots.iter().enumerate().all(|(index, slot)| {
+            pool.slots[index + 1..]
+                .iter()
+                .all(|other| other.slot != slot.slot || other.generation != slot.generation)
+        });
         #[cfg(feature = "androidbox-interactive0")]
         let graphics_shape_ready = interactive_graphics.valid
             && interactive_graphics.handle_count == 6
@@ -19476,11 +19502,23 @@ fn monitor_mobile_ui_preview() -> ! {
             && interactive_graphics.server_handle_count == 3
             && processes.resident_graphics_buffer_handle_count == 6
             && syscalls.graphics_buffers_created == 3;
-        #[cfg(not(feature = "androidbox-interactive0"))]
+        #[cfg(all(
+            not(feature = "androidbox-interactive0"),
+            not(all(
+                feature = "mobile-ui-runtime",
+                not(feature = "androidbox-apk-install0")
+            ))
+        ))]
         let graphics_shape_ready = processes.resident_graphics_buffer_handle_count == 4
             && processes.resident_graphics_buffer_identity_count == 2
             && processes.resident_graphics_buffer_identity_handle_counts == [2, 2]
             && syscalls.graphics_buffers_created == 2;
+        #[cfg(all(
+            feature = "mobile-ui-runtime",
+            not(feature = "androidbox-apk-install0")
+        ))]
+        let graphics_shape_ready = processes.resident_graphics_buffer_handle_count == 8
+            && syscalls.graphics_buffers_created == 4;
         #[cfg(feature = "androidbox-process0")]
         let process_shape_ready = processes.created == 10
             && processes.live == 9
@@ -19494,17 +19532,79 @@ fn monitor_mobile_ui_preview() -> ! {
         let process_shape_ready = processes.created == 9
             && processes.live == 8
             && processes.live_image_counts == [1, 1, 1, 2, 1, 1, 1];
+        #[cfg(feature = "androidbox-apk-install0")]
+        let graphics_transport_ready = syscalls.graphics_buffer_write_calls
+            > bndr_abi::GRAPHICS_BUFFER_FRAME_WRITE_CALLS as u64
+            && syscalls.graphics_buffer_write_bytes
+                >= bndr_abi::GRAPHICS_BUFFER_LOGICAL_BYTES as u64 + 4
+            && syscalls.graphics_buffer_presents >= 1;
+        #[cfg(not(feature = "androidbox-apk-install0"))]
+        let graphics_transport_ready = syscalls.graphics_buffer_mappable_created == 4
+            && syscalls.graphics_buffer_map_calls == 8
+            && syscalls.graphics_buffer_map_successes == 8
+            && syscalls.graphics_buffer_unmap_calls == 0
+            && syscalls.graphics_buffer_unmap_successes == 0
+            && syscalls.graphics_buffer_write_calls == 0
+            && syscalls.graphics_buffer_write_bytes == 0
+            && syscalls.graphics_buffer_queue_calls >= 2
+            && syscalls.graphics_buffer_queue_calls == syscalls.graphics_buffer_queue_successes
+            && syscalls.graphics_buffer_acquire_calls == syscalls.graphics_buffer_queue_successes
+            && syscalls.graphics_buffer_acquire_calls == syscalls.graphics_buffer_acquire_successes
+            && syscalls.graphics_buffer_release_calls == syscalls.graphics_buffer_release_successes
+            && syscalls.graphics_buffer_release_successes
+                + syscalls.graphics_buffer_mapped_presents
+                == syscalls.graphics_buffer_releases
+            && syscalls.graphics_buffer_releases == syscalls.graphics_buffer_acquire_successes
+            && syscalls.graphics_buffer_presents == syscalls.graphics_buffer_mapped_presents
+            && syscalls.graphics_buffer_mapped_presents >= 1
+            && syscalls.graphics_buffer_validated_pixels
+                == syscalls.graphics_buffer_queue_successes
+                    * bndr_abi::GRAPHICS_BUFFER_PIXEL_COUNT as u64
+            && syscalls.graphics_buffer_validated_bytes
+                == syscalls.graphics_buffer_queue_successes
+                    * bndr_abi::GRAPHICS_BUFFER_LOGICAL_BYTES as u64;
+        let frame_pacing_ready = pacing.as_ref().is_some_and(|pacing| {
+            let clock = pacing.clock;
+            matches!(
+                clock.phase,
+                bndroid_kernel::frame_clock::FrameClockPhase::Waiting
+                    | bndroid_kernel::frame_clock::FrameClockPhase::Ready
+            ) && clock.raw_boundaries == clock.opportunities + clock.suppressed
+                && clock.signal_edges == clock.opportunities
+                && clock.acquired == syscalls.graphics_buffer_presents
+                && clock.presented == syscalls.graphics_buffer_presents
+                && clock.pending_ready <= 1
+                && clock.outstanding == 0
+                && clock.opportunities == clock.presented + clock.pending_ready
+                && clock.discarded_ready == 0
+                && clock.cancelled_outstanding == 0
+                && clock.last_acquired_epoch == syscalls.graphics_buffer_presents
+                && clock.last_presented_epoch == syscalls.graphics_buffer_presents
+                && clock.last_cancelled_epoch == 0
+                && clock.next_boundary != 0
+                && !clock.overflowed
+                && clock.phase_valid
+                && clock.accounting_valid
+                && pacing.session_id != 0
+                && pacing.process_id == processes.resident_surface_capability_owner_pid
+                && processes.resident_surface_capability_owner_valid
+                && syscalls.surface_frame_acquire_calls == syscalls.graphics_buffer_presents
+                && syscalls.surface_frame_acquire_successes == syscalls.graphics_buffer_presents
+                && syscalls.surface_frame_acquire_should_wait == 0
+                && syscalls.surface_frame_acquire_invalid_state == 0
+                && pacing.ungated_present_rejections == 0
+                && pacing.failed_present_preservations == 0
+        });
         let ready = syscalls.ready
             && process_shape_ready
             && processes.resident_surface_capability_count == 1
             && graphics_shape_ready
-            && syscalls.graphics_buffer_write_calls
-                > bndr_abi::GRAPHICS_BUFFER_FRAME_WRITE_CALLS as u64
-            && syscalls.graphics_buffer_write_bytes
-                >= bndr_abi::GRAPHICS_BUFFER_LOGICAL_BYTES as u64 + 4
-            && syscalls.graphics_buffer_presents >= 1
+            && graphics_transport_ready
+            && frame_pacing_ready
             && pool_ready;
         if ready {
+            let pacing =
+                pacing.unwrap_or_else(|| panic!("validated mobile frame pacing disappeared"));
             #[cfg(feature = "androidbox-process0")]
             crate::kprintln!(
                 "ANDROID_APP_PROCESS_OK format=1 abi={} app_image={} android_app_image={} app_pid={} android_app_pid={} app_asid={} android_app_asid={} app_root={:#018x} android_app_root={:#018x} app_digest={:#018x} android_app_digest={:#018x} elf_distinct=1 pid_distinct=1 asid_distinct=1 root_distinct=1 process_capacity={} dynamic_capacity={} live_processes={} android_app_live={} worker_handles={} worker_channel_count={} worker_unexpected_handle_count={} private_endpoint_count={} private_pair_count={} app_endpoint_count={} unexpected_private_owner_count={} endpoints_unique={} android_app_rights={:#010x} worker_rights_valid={} app_rights=channel-default app_rights_valid={} android_app_duplicate=0 android_app_transfer=0 queues_empty={} objects_valid={} isolation_valid={} valid={} surface_handles=0 graphics_handles=0 input_handles=0 storage_handles=0",
@@ -19543,8 +19643,30 @@ fn monitor_mobile_ui_preview() -> ! {
                 u8::from(processes.android_app_authority.isolation_valid),
                 u8::from(processes.android_app_authority.valid),
             );
+            #[cfg(feature = "androidbox-apk-install0")]
+            let (copy_path, rows_per_write, writes_per_frame) = (
+                "row-batched",
+                bndr_abi::GRAPHICS_BUFFER_WRITE_MAX_ROWS,
+                bndr_abi::GRAPHICS_BUFFER_FRAME_WRITE_CALLS,
+            );
+            #[cfg(not(feature = "androidbox-apk-install0"))]
+            let (copy_path, rows_per_write, writes_per_frame) = ("mapped-double-buffer", 0, 0);
+            #[cfg(feature = "androidbox-apk-install0")]
+            let (
+                client_buffers_per_producer,
+                frame_transaction_depth,
+                transition_scheduling,
+                stale_prepared_policy,
+            ) = (1, 1, "synchronous", "focus-systemui-cancel");
+            #[cfg(not(feature = "androidbox-apk-install0"))]
+            let (
+                client_buffers_per_producer,
+                frame_transaction_depth,
+                transition_scheduling,
+                stale_prepared_policy,
+            ) = (2, 2, "async-one-ahead", "server-discard");
             crate::kprintln!(
-                "MOBILE_UI_PREVIEW_OK profile=local-qemu abi={} width={} height={} design_width=360 design_height=800 scale=2 aspect=20:9 buffers={} write_calls={} write_bytes={} presents={} live_processes={} settings_scope=surface-session-shared settings_persistence=none ui_client_control_version={} ui_server_event_version={} buffer_present_version={} software_dimming=1 software_dimming_scope=final-surface-session-shared software_dimming_steps=5 software_dimming_persistence=none local_notification=1 notification_source=boot-local-system-ui notification_scope=surface-session-shared notification_persistence=none notification_action=details-or-dismiss notification_drag_quantum_px=8 notification_dismiss_threshold_px=160 notification_post_claim=0 push_notification_claim=0 background_delivery_claim=0 delivery_time_claim=0 notification_service_claim=0 overview=single-recent-identity overview_history_capacity=1 overview_source=accepted-focused-present-or-compatible-commit overview_app_pixels_read=0 overview_activity_pixels=0 overview_thumbnail=0 overview_screenshot=0 overview_live_preview=0 overview_calculator_recent=0 overview_task_kill=0 overview_persistence=none system_navigation_owner=surface-server system_navigation_activation_px=24 system_navigation_quantum_px=8 overview_commit_px=240 system_home_commit_px=480 android_gesture_claim=0 background_execution_claim=0 hardware_compositor_claim=0 physical_backlight_claim=0 hardware_brightness_claim=0 network=disabled validation_scope=ui-preview copy_path=row-batched rows_per_write={} writes_per_frame={} software_page_transition=1 transition_version=1 transition_intermediate_frames=4 transition_timing=frame-stepped clock_source=qemu-pl031 clock_transport=surface-server-snapshot clock_refresh=boot-snapshot secure_time_claim=0 physical_rtc_claim=0 battery_backed_claim=0 timer_pacing=0 fps_claim=0 hardware_vsync_claim=0 real_phone_claim=0",
+                "MOBILE_UI_PREVIEW_OK profile=local-qemu abi={} width={} height={} design_width=360 design_height=800 scale=2 aspect=20:9 buffers={} write_calls={} write_bytes={} presents={} live_processes={} settings_scope=surface-session-shared settings_persistence=none ui_client_control_version={} ui_server_event_version={} buffer_present_version={} software_dimming=1 software_dimming_scope=final-surface-session-shared software_dimming_steps=5 software_dimming_persistence=none local_notification=1 notification_source=boot-local-system-ui notification_scope=surface-session-shared notification_persistence=none notification_action=details-or-dismiss notification_drag_quantum_px=8 notification_dismiss_threshold_px=160 notification_lock_swipe=1 notification_lock_tap_navigation=0 notification_lock_unlock_authority=0 notification_post_claim=0 push_notification_claim=0 background_delivery_claim=0 delivery_time_claim=0 notification_service_claim=0 overview=single-recent-identity overview_history_capacity=1 overview_source=accepted-focused-present-or-compatible-commit overview_app_pixels_read=0 overview_activity_pixels=0 overview_thumbnail=0 overview_screenshot=0 overview_live_preview=0 overview_calculator_recent=0 overview_compatible_icon=verified-package-catalog overview_compatible_icon_binding=session+generation+apk-digest overview_compatible_icon_activity_pixels=0 overview_compatible_icon_thumbnail=0 overview_dismiss=identity-only overview_dismiss_gesture=upward overview_dismiss_activation_px=32 overview_dismiss_threshold_px=224 overview_dismiss_max_offset_px=320 overview_dismiss_quantum_px=8 overview_task_kill=0 overview_persistence=none system_navigation_owner=surface-server system_navigation_activation_px=24 system_navigation_quantum_px=8 overview_commit_px=240 system_home_commit_px=480 android_gesture_claim=0 background_execution_claim=0 hardware_compositor_claim=0 physical_backlight_claim=0 hardware_brightness_claim=0 network=disabled validation_scope=ui-preview copy_path={} rows_per_write={} writes_per_frame={} client_buffers_per_producer={} frame_transaction_depth={} transition_scheduling={} stale_prepared_policy={} maps={} map_successes={} queues={} queue_successes={} acquires={} acquire_successes={} release_calls={} release_successes={} releases={} mapped_presents={} software_page_transition=1 transition_version=1 transition_intermediate_frames=4 transition_timing=frame-stepped clock_source=qemu-pl031 clock_transport=surface-server-snapshot clock_refresh=minute-boundary clock_scheduler=bounded-wait-timeout clock_revision=visible-minute-only client_rtc_authority=0 secure_time_claim=0 physical_rtc_claim=0 battery_backed_claim=0 frame_pacing=software logical_timer_hz={} software_frame_rate_hz={} frame_divider={} frame_acquires={} frame_acquire_successes={} frame_epoch={} frame_pending={} timer_pacing=1 fps_claim=0 hardware_vsync_claim=0 real_phone_claim=0",
                 bndr_abi::ABI_VERSION,
                 bndr_abi::GRAPHICS_BUFFER_WIDTH,
                 bndr_abi::GRAPHICS_BUFFER_HEIGHT,
@@ -19556,8 +19678,30 @@ fn monitor_mobile_ui_preview() -> ! {
                 bndr_ui::UI_CLIENT_CONTROL_VERSION,
                 bndr_ui::UI_SERVER_EVENT_VERSION,
                 bndr_ui::BUFFER_PRESENT_VERSION,
-                bndr_abi::GRAPHICS_BUFFER_WRITE_MAX_ROWS,
-                bndr_abi::GRAPHICS_BUFFER_FRAME_WRITE_CALLS,
+                copy_path,
+                rows_per_write,
+                writes_per_frame,
+                client_buffers_per_producer,
+                frame_transaction_depth,
+                transition_scheduling,
+                stale_prepared_policy,
+                syscalls.graphics_buffer_map_calls,
+                syscalls.graphics_buffer_map_successes,
+                syscalls.graphics_buffer_queue_calls,
+                syscalls.graphics_buffer_queue_successes,
+                syscalls.graphics_buffer_acquire_calls,
+                syscalls.graphics_buffer_acquire_successes,
+                syscalls.graphics_buffer_release_calls,
+                syscalls.graphics_buffer_release_successes,
+                syscalls.graphics_buffer_releases,
+                syscalls.graphics_buffer_mapped_presents,
+                bndroid_kernel::frame_clock::LOGICAL_TIMER_HZ,
+                bndroid_kernel::frame_clock::SOFTWARE_FRAME_RATE_HZ,
+                bndroid_kernel::frame_clock::FRAME_CLOCK_DIVIDER,
+                syscalls.surface_frame_acquire_calls,
+                syscalls.surface_frame_acquire_successes,
+                pacing.clock.last_presented_epoch,
+                pacing.clock.pending_ready,
             );
             #[cfg(all(feature = "androidbox-dex0", not(feature = "androidbox-apk-install0")))]
             crate::kprintln!(
@@ -19881,6 +20025,11 @@ fn monitor_mobile_ui_preview() -> ! {
     let mut android_app_restart_observed_phase = 0_u8;
     #[cfg(feature = "androidbox-restart0")]
     let mut android_app_restart_phase_started_tick = 0_u64;
+    #[cfg(all(
+        feature = "mobile-ui-runtime",
+        not(feature = "androidbox-apk-install0")
+    ))]
+    let mut mobile_double_buffer_reported = false;
     loop {
         #[cfg(feature = "androidbox-apk-install0")]
         package_manager::service_pending();
@@ -19892,6 +20041,31 @@ fn monitor_mobile_ui_preview() -> ! {
         let syscalls = syscall::snapshot();
         let processes = process::snapshot();
         let fault = scheduler::user_init_fault_snapshot();
+        #[cfg(all(
+            feature = "mobile-ui-runtime",
+            not(feature = "androidbox-apk-install0")
+        ))]
+        if !mobile_double_buffer_reported {
+            let transitions = bndroid_kernel::graphics_buffer::pool_telemetry_snapshot();
+            if transitions.peak_queued >= 2
+                && transitions.peak_in_flight >= 2
+                && transitions.dual_in_flight_publications >= 1
+                && transitions.acquisition_slot_switches >= 4
+                && !transitions.counter_overflowed
+            {
+                crate::kprintln!(
+                    "MOBILE_DOUBLE_BUFFER_RUNTIME_OK format=1 client_buffers_per_producer=2 producer_count=2 transaction_depth=2 scheduling=async-one-ahead stale_prepared_policy=server-discard peak_queued={} peak_acquired={} peak_in_flight={} dual_in_flight_publications={} acquisition_slot_switches={} acquisition_order_count={} order_bits={:#018x} counter_overflowed=0",
+                    transitions.peak_queued,
+                    transitions.peak_acquired,
+                    transitions.peak_in_flight,
+                    transitions.dual_in_flight_publications,
+                    transitions.acquisition_slot_switches,
+                    transitions.acquisition_order_count,
+                    transitions.acquisition_order_bits,
+                );
+                mobile_double_buffer_reported = true;
+            }
+        }
         #[cfg(feature = "androidbox-restart0")]
         let restart = syscall::android_app_restart_snapshot();
         #[cfg(feature = "androidbox-restart0")]

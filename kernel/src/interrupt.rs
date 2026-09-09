@@ -283,7 +283,7 @@ extern "C" fn irq_dispatch(frame: *mut TrapFrame) -> *mut TrapFrame {
 
     if is_timer_tick {
         #[cfg(all(
-            feature = "graphics-frame-clock-runtime",
+            feature = "surface-frame-pacing",
             not(feature = "graphics-owner-death-runtime"),
             not(feature = "app-crash-recovery-runtime")
         ))]

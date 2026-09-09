@@ -935,7 +935,7 @@ for name, expected in {
     "height": "1600",
     "buffers": "3",
     "live_processes": "9",
-    "buffer_present_version": "3",
+    "buffer_present_version": "5",
     "network": "disabled",
     "real_phone_claim": "0",
 }.items():

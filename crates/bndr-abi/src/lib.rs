@@ -368,14 +368,27 @@ pub const GRAPHICS_BUFFER_CREATE_FLAGS_NONE: u64 = 0;
 /// Opts a graphics buffer into ABI-19 shared mapping and queue semantics.
 pub const GRAPHICS_BUFFER_CREATE_FLAG_MAPPABLE: u64 = 1 << 0;
 /// Fixed EL0 virtual address used by the bounded ABI-19 graphics mapping.
+#[cfg(any(
+    not(feature = "mobile-ui-runtime"),
+    feature = "androidbox-apk-install0"
+))]
 pub const GRAPHICS_BUFFER_MAP_ADDRESS: u64 = 0x0000_0002_0010_0000;
+/// The full 720×1600 producer mapping lives beyond the original 2 MiB image
+/// window. Persistent and layered AndroidBox profiles retain the bounded-copy
+/// path until their split content/chrome compositor accepts mapped layers.
+#[cfg(all(
+    feature = "mobile-ui-runtime",
+    not(feature = "androidbox-apk-install0")
+))]
+pub const GRAPHICS_BUFFER_MAP_ADDRESS: u64 = 0x0000_0002_0040_0000;
 /// Per-backing-slot virtual stride; the final five pages remain unmapped.
 #[cfg(not(feature = "mobile-ui-runtime"))]
 pub const GRAPHICS_BUFFER_MAP_STRIDE: u64 = 0x0005_0000;
 /// Page-aligned stride reserved by the large-screen preview ABI.
 ///
-/// The mobile preview deliberately uses the legacy bounded-copy producer path
-/// until the EL0 address-space hierarchy grows beyond one 2 MiB L3 table.
+/// The pure mobile and bounded DEX preview profiles map both full-size slots
+/// beyond the original image window. Persistent and layered AndroidBox
+/// profiles retain the same reserved stride while using bounded copy writes.
 #[cfg(feature = "mobile-ui-runtime")]
 pub const GRAPHICS_BUFFER_MAP_STRIDE: u64 = 0x0048_0000;
 /// Requests the authenticated producer's read-write mapping.
@@ -13319,7 +13332,16 @@ mod tests {
         assert_eq!(GRAPHICS_BUFFER_FORMAT_XRGB8888, 1);
         assert_eq!(GRAPHICS_BUFFER_CREATE_FLAGS_NONE, 0);
         assert_eq!(GRAPHICS_BUFFER_CREATE_FLAG_MAPPABLE, 1);
+        #[cfg(any(
+            not(feature = "mobile-ui-runtime"),
+            feature = "androidbox-apk-install0"
+        ))]
         assert_eq!(GRAPHICS_BUFFER_MAP_ADDRESS, 0x0000_0002_0010_0000);
+        #[cfg(all(
+            feature = "mobile-ui-runtime",
+            not(feature = "androidbox-apk-install0")
+        ))]
+        assert_eq!(GRAPHICS_BUFFER_MAP_ADDRESS, 0x0000_0002_0040_0000);
         #[cfg(not(feature = "mobile-ui-runtime"))]
         assert_eq!(GRAPHICS_BUFFER_MAP_STRIDE, 0x0005_0000);
         #[cfg(feature = "mobile-ui-runtime")]

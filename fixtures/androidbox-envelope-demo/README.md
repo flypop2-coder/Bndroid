@@ -137,6 +137,14 @@ SHA-256
 `3764e8b594b686b12695d031589011eedf9735941783afb2693a8d7a2ab7b117`.
 Modes `0` through `4` remain available for parent-profile regressions.
 
+ABI69's Layout Mixed-19 gate sets `BNDROID_ANDROID_LAYOUT_ROWS=6`. It selects
+`res-mixed/layout/activity_envelope.xml`, retaining the same height and edge
+spacing while compiling the first Button as fixed `132dp` with no weight and
+the second as `0dp + weight=1`. The exact version-1 ABI69 APK is 12,806 bytes
+with SHA-256
+`e050556ac8ca32ec5748d30702b378ad82084bd4aa7ff0c218658d01363f948b`.
+Modes `0` through `5` remain available for parent-profile regressions.
+
 The package is `org.bndroid.envelope`; its exported launcher component is
 `org.bndroid.envelope.MainActivity`. The compiled vertical layout contains
 two `TextView` elements and two `Button` elements. Its title is

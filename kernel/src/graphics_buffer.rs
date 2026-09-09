@@ -33,11 +33,29 @@ pub const GRAPHICS_BUFFER_BACKING_BYTES: usize = 75 * 4096;
 pub const GRAPHICS_BUFFER_BACKING_BYTES: usize = 1_125 * 4096;
 /// Number of simultaneously live graphics-buffer identities.
 ///
-/// Interactive-0 adds one SurfaceServer-owned system-chrome backing while the
-/// two predecessor slots remain the Launcher/App content buffers.
-#[cfg(feature = "androidbox-interactive0")]
+/// The mapped mobile profile gives Launcher and App two bounded content
+/// buffers each. Persistent AndroidBox profiles retain one content buffer per
+/// client; Interactive-0 adds one SurfaceServer-owned system-chrome backing.
+#[cfg(all(
+    feature = "mobile-ui-runtime",
+    not(feature = "androidbox-apk-install0")
+))]
+pub const GRAPHICS_BUFFER_SLOT_COUNT: usize = 4;
+#[cfg(all(
+    feature = "androidbox-interactive0",
+    not(all(
+        feature = "mobile-ui-runtime",
+        not(feature = "androidbox-apk-install0")
+    ))
+))]
 pub const GRAPHICS_BUFFER_SLOT_COUNT: usize = 3;
-#[cfg(not(feature = "androidbox-interactive0"))]
+#[cfg(all(
+    not(feature = "androidbox-interactive0"),
+    not(all(
+        feature = "mobile-ui-runtime",
+        not(feature = "androidbox-apk-install0")
+    ))
+))]
 pub const GRAPHICS_BUFFER_SLOT_COUNT: usize = 2;
 
 const BACKING_ALIGNMENT: usize = 4096;
@@ -171,7 +189,7 @@ pub struct GraphicsBufferSlotSnapshot {
     pub backing_all_zero: bool,
 }
 
-/// Fixed-size, read-only view of both static graphics-buffer slots.
+/// Fixed-size, read-only view of every profile-bounded backing slot.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GraphicsBufferPoolSnapshot {
     pub slots: [GraphicsBufferSlotSnapshot; GRAPHICS_BUFFER_SLOT_COUNT],
@@ -182,10 +200,10 @@ pub struct GraphicsBufferPoolSnapshot {
 /// An epoch begins when a successful allocation claims the first slot of a
 /// completely vacant pool. Retiring the last slot deliberately preserves the
 /// completed epoch for inspection; the next first allocation resets every
-/// transition counter while advancing [`Self::epoch`]. Acquisition order uses
-/// one bit per success (`0` for slot zero, `1` for slot one), least-significant
-/// bit first. The exact first 64 acquisitions remain available for strict
-/// deterministic runtime validation.
+/// transition counter while advancing [`Self::epoch`]. Two-slot profiles use
+/// one bit per acquisition; three- and four-slot profiles use two bits per
+/// acquisition. The bounded prefix remains available for deterministic
+/// runtime validation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GraphicsBufferPoolTelemetrySnapshot {
     pub epoch: u64,
@@ -366,10 +384,15 @@ impl PoolTelemetry {
             );
         }
         self.last_acquisition_slot = Some(slot);
-        if self.acquisition_order_count < u64::BITS.into() {
-            if slot == 1 {
-                self.acquisition_order_bits |= 1_u64 << self.acquisition_order_count;
-            }
+        let bits_per_acquisition = if GRAPHICS_BUFFER_SLOT_COUNT <= 2 {
+            1_u64
+        } else {
+            2_u64
+        };
+        let encoded_capacity = u64::from(u64::BITS) / bits_per_acquisition;
+        if self.acquisition_order_count < encoded_capacity {
+            let shift = self.acquisition_order_count * bits_per_acquisition;
+            self.acquisition_order_bits |= u64::from(slot) << shift;
         } else {
             self.acquisition_order_overflowed = true;
         }
@@ -427,7 +450,7 @@ static BACKINGS: [AlignedBacking; GRAPHICS_BUFFER_SLOT_COUNT] =
 static POOL_BORROWED: AtomicBool = AtomicBool::new(false);
 
 /// Captures allocation, queue, reference, and full-backing scrub state for
-/// both static slots under one pool critical section.
+/// all static slots under one pool critical section.
 pub fn pool_snapshot() -> GraphicsBufferPoolSnapshot {
     with_pool(|slots, _| GraphicsBufferPoolSnapshot {
         slots: core::array::from_fn(|slot| {
@@ -1250,8 +1273,8 @@ pub(crate) fn test_serial_guard() -> std::sync::MutexGuard<'static, ()> {
 mod tests {
     use super::{
         GRAPHICS_BUFFER_BACKING_BYTES, GRAPHICS_BUFFER_LOGICAL_BYTES, GRAPHICS_BUFFER_PIXEL_COUNT,
-        GraphicsBuffer, GraphicsBufferAccessSnapshot, GraphicsBufferError, backing, pool_snapshot,
-        pool_telemetry_snapshot, test_serial_guard,
+        GRAPHICS_BUFFER_SLOT_COUNT, GraphicsBuffer, GraphicsBufferAccessSnapshot,
+        GraphicsBufferError, backing, pool_snapshot, pool_telemetry_snapshot, test_serial_guard,
     };
     use bndr_abi::ObjectSignals;
 
@@ -1283,20 +1306,23 @@ mod tests {
         let first = GraphicsBuffer::try_new(11).unwrap();
         let second = GraphicsBuffer::try_new(22).unwrap();
         assert_ne!(first.identity(), second.identity());
-        #[cfg(feature = "androidbox-interactive0")]
-        let third = GraphicsBuffer::try_new(33).unwrap();
+        let remaining = (2..GRAPHICS_BUFFER_SLOT_COUNT)
+            .map(|slot| GraphicsBuffer::try_new(31 + slot as u64).unwrap())
+            .collect::<std::vec::Vec<_>>();
         assert!(matches!(
             GraphicsBuffer::try_new(44),
             Err(GraphicsBufferError::Exhausted)
         ));
         assert_eq!(first.producer_pid(), 11);
         assert_eq!(second.producer_pid(), 22);
-        #[cfg(feature = "androidbox-interactive0")]
-        assert_eq!(third.producer_pid(), 33);
         assert_eq!(first.write_generation(), 0);
         assert_eq!(second.write_generation(), 0);
-        #[cfg(feature = "androidbox-interactive0")]
-        assert_eq!(third.write_generation(), 0);
+        assert_eq!(remaining.len(), GRAPHICS_BUFFER_SLOT_COUNT - 2);
+        assert!(
+            remaining
+                .iter()
+                .all(|buffer| buffer.write_generation() == 0)
+        );
     }
 
     #[test]
@@ -1394,8 +1420,9 @@ mod tests {
 
         let other = GraphicsBuffer::try_new(42).unwrap();
         assert_ne!(other.slot(), clone.slot());
-        #[cfg(feature = "androidbox-interactive0")]
-        let third = GraphicsBuffer::try_new(43).unwrap();
+        let remaining = (2..GRAPHICS_BUFFER_SLOT_COUNT)
+            .map(|slot| GraphicsBuffer::try_new(43 + slot as u64).unwrap())
+            .collect::<std::vec::Vec<_>>();
         assert!(matches!(
             GraphicsBuffer::try_new(45),
             Err(GraphicsBufferError::Exhausted)
@@ -1411,8 +1438,7 @@ mod tests {
             "only the final clone may scrub and recycle the backing"
         );
         assert!(!reused.same_buffer(&other));
-        #[cfg(feature = "androidbox-interactive0")]
-        assert!(!reused.same_buffer(&third));
+        assert!(remaining.iter().all(|buffer| !reused.same_buffer(buffer)));
     }
 
     #[test]
@@ -1668,7 +1694,18 @@ mod tests {
         assert_two_slot_prefix(&telemetry.queue_successes, [3, 3]);
         assert_two_slot_prefix(&telemetry.acquire_successes, [3, 3]);
         assert_two_slot_prefix(&telemetry.release_successes, [3, 3]);
-        assert_eq!(telemetry.acquisition_order_bits, 0b10_1010);
+        let bits_per_acquisition = if GRAPHICS_BUFFER_SLOT_COUNT <= 2 {
+            1
+        } else {
+            2
+        };
+        let expected_order_bits = [0_u64, 1, 0, 1, 0, 1]
+            .into_iter()
+            .enumerate()
+            .fold(0_u64, |bits, (index, slot)| {
+                bits | (slot << (index * bits_per_acquisition))
+            });
+        assert_eq!(telemetry.acquisition_order_bits, expected_order_bits);
         assert_eq!(telemetry.acquisition_order_count, 6);
         assert_eq!(telemetry.acquisition_slot_switches, 5);
         assert_eq!(telemetry.first_acquisition_slot, Some(0));

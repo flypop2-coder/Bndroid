@@ -31,13 +31,12 @@ use bndr_abi::ShutdownServiceNode;
 use bndr_abi::pack_surface_layer_handles;
 use bndr_abi::{
     ABI_VERSION, CHANNEL_MESSAGE_MAX_BYTES, CHANNEL_READ_ENVELOPE_SIZE, ChannelMessageKind,
-    ChannelReadEnvelope, GRAPHICS_BUFFER_CREATE_FLAGS_NONE, GRAPHICS_BUFFER_FORMAT_XRGB8888,
-    GRAPHICS_BUFFER_HEIGHT, GRAPHICS_BUFFER_LOGICAL_BYTES, GRAPHICS_BUFFER_WIDTH,
-    GRAPHICS_BUFFER_WRITE_MAX_BYTES, HandleValue, OBJECT_WAIT_MANY_ARRAY_MAX_ITEMS,
-    OBJECT_WAIT_TIMEOUT_INFINITE, OBJECT_WAIT_TIMEOUT_POLL, ObjectSignals,
-    PROCESS_KILLED_EXIT_CODE, PROCESS_SPAWN_FLAGS_NONE, PROCESS_TERMINATE_FLAGS_NONE,
-    ProcessTerminationReason, Rights, Status, SyscallNumber, UserImageId, VMO_READ_MAX_BYTES,
-    pack_graphics_buffer_geometry, pack_graphics_buffer_write, pack_transfer, pack_vmo_read,
+    ChannelReadEnvelope, GRAPHICS_BUFFER_FORMAT_XRGB8888, GRAPHICS_BUFFER_HEIGHT,
+    GRAPHICS_BUFFER_LOGICAL_BYTES, GRAPHICS_BUFFER_WIDTH, HandleValue,
+    OBJECT_WAIT_MANY_ARRAY_MAX_ITEMS, OBJECT_WAIT_TIMEOUT_INFINITE, OBJECT_WAIT_TIMEOUT_POLL,
+    ObjectSignals, PROCESS_KILLED_EXIT_CODE, PROCESS_SPAWN_FLAGS_NONE,
+    PROCESS_TERMINATE_FLAGS_NONE, ProcessTerminationReason, Rights, Status, SyscallNumber,
+    UserImageId, VMO_READ_MAX_BYTES, pack_graphics_buffer_geometry, pack_transfer, pack_vmo_read,
     pack_wait_item,
 };
 #[cfg(feature = "androidbox-process0")]
@@ -73,10 +72,31 @@ use bndr_abi::{
     ANDROID_PACKAGE_UNINSTALL_WIRE_SIZE, AndroidPackageUninstallRequest,
     AndroidPackageUninstallResult,
 };
+#[cfg(all(
+    feature = "mobile-ui-runtime",
+    not(feature = "androidbox-apk-install0")
+))]
+use bndr_abi::{
+    GRAPHICS_BUFFER_ACQUIRE_FLAGS_NONE, GRAPHICS_BUFFER_BACKING_BYTES,
+    GRAPHICS_BUFFER_CREATE_FLAG_MAPPABLE, GRAPHICS_BUFFER_MAP_ADDRESS,
+    GRAPHICS_BUFFER_MAP_CONSUMER_RO, GRAPHICS_BUFFER_MAP_PRODUCER_RW, GRAPHICS_BUFFER_MAP_STRIDE,
+    GRAPHICS_BUFFER_PIXEL_COUNT, GRAPHICS_BUFFER_QUEUE_FLAGS_NONE,
+    GRAPHICS_BUFFER_RELEASE_FLAGS_NONE,
+};
+#[cfg(any(
+    not(feature = "mobile-ui-runtime"),
+    feature = "androidbox-apk-install0"
+))]
+use bndr_abi::{
+    GRAPHICS_BUFFER_CREATE_FLAGS_NONE, GRAPHICS_BUFFER_WRITE_MAX_BYTES, pack_graphics_buffer_write,
+};
 use bndr_sm::{
     FRAME_SIZE, Frame, FrameError, InstanceId, Opcode, RegisterError, Registry, RemoveError, Role,
     SUPERVISOR_ATTACH_FRAME_SIZE, ServiceName, ServiceStatus, SupervisorAttachFrame,
 };
+use bndr_ui::BufferPresentMode;
+#[cfg(feature = "mobile-ui-runtime")]
+use bndr_ui::DamageRegions;
 #[cfg(all(feature = "androidbox-dex0", not(feature = "androidbox-apk-install0")))]
 use bndr_ui::mobile::AndroidBoxResourceStatus;
 #[cfg(feature = "androidbox-icon-resources5")]
@@ -85,9 +105,10 @@ use bndr_ui::mobile::AndroidInstalledIcon;
 use bndr_ui::mobile::AndroidInstalledUninstallFailure;
 #[cfg(all(
     feature = "mobile-ui-runtime",
+    feature = "androidbox-apk-install0",
     not(feature = "androidbox-interactive0")
 ))]
-use bndr_ui::mobile::render_rows as render_mobile_rows;
+use bndr_ui::mobile::render_region as render_mobile_region;
 #[cfg(feature = "androidbox-runtime-install2")]
 use bndr_ui::mobile::{
     AndroidInstallCandidateAction, AndroidInstallCandidateStatus, AndroidInstallFailure,
@@ -95,23 +116,33 @@ use bndr_ui::mobile::{
 #[cfg(feature = "androidbox-apk-install0")]
 use bndr_ui::mobile::{
     AndroidInstalledAppStatus, AndroidInstalledLaunchFailure, AndroidInstalledLaunchStatus,
+    MobileRasterCache, clip_damage_plan,
 };
 #[cfg(feature = "mobile-ui-runtime")]
 use bndr_ui::mobile::{
-    HEIGHT as MOBILE_HEIGHT, MobileAction, MobileModel, MobilePage, MobileTimeSnapshot,
-    OVERVIEW_GESTURE_COMMIT_PX, OVERVIEW_HOME_COMMIT_PX, PAGE_TRANSITION_ENTER_OFFSETS,
-    PAGE_TRANSITION_EXIT_OFFSETS, TouchController, WIDTH as MOBILE_WIDTH,
-    point_inside_visible_display,
+    HEIGHT as MOBILE_HEIGHT, MobileAction, MobileDamagePlan, MobileModel, MobilePage,
+    MobileTimeSnapshot, OVERVIEW_GESTURE_COMMIT_PX, OVERVIEW_HOME_COMMIT_PX,
+    PAGE_TRANSITION_ENTER_OFFSETS, PAGE_TRANSITION_EXIT_OFFSETS, TouchController,
+    WIDTH as MOBILE_WIDTH, point_inside_visible_display,
 };
 #[cfg(feature = "androidbox-interactive0")]
 use bndr_ui::mobile::{
-    MobileSystemChromeState, render_content_rows as render_mobile_rows, render_system_chrome_rows,
+    MobileSystemChromeState, render_content_region as render_mobile_region,
+    render_system_chrome_region, system_chrome_damage_plan,
+};
+#[cfg(all(
+    feature = "mobile-ui-runtime",
+    not(feature = "androidbox-apk-install0")
+))]
+use bndr_ui::mobile::{
+    damage_plan as mobile_model_damage, render as render_mobile,
+    render_damage_regions as render_mobile_damage_regions,
 };
 use bndr_ui::{
-    BUFFER_PRESENT_WIRE_SIZE, BufferPresent, InputSample, PRESENT_WIRE_SIZE, PresentFrame,
-    PresentMode, ShellAppId, UI_CLIENT_CONTROL_WIRE_SIZE, UI_SERVER_EVENT_WIRE_SIZE,
-    UiClientControl, UiClientControlPayload, UiClientControlTracker, UiClientId, UiServerEvent,
-    UiServerEventPayload, UiServerEventTracker,
+    BUFFER_PRESENT_WIRE_SIZE, BufferPresent, BufferPresentDisposition, InputSample,
+    PRESENT_WIRE_SIZE, PresentFrame, PresentMode, ShellAppId, UI_CLIENT_CONTROL_WIRE_SIZE,
+    UI_SERVER_EVENT_WIRE_SIZE, UiClientControl, UiClientControlPayload, UiClientControlTracker,
+    UiClientId, UiServerEvent, UiServerEventPayload, UiServerEventTracker,
 };
 #[cfg(not(feature = "mobile-ui-runtime"))]
 use bndr_ui::{HOME_TARGET, ShellController, ShellTransition, ShellView, SolidRect};
@@ -439,13 +470,14 @@ const USER_GUARD_LOW: u64 = 0x0000_0002_001e_a000;
 #[cfg(all(
     not(feature = "storage-server-runtime"),
     not(feature = "androidbox-interactive0"),
-    feature = "androidbox-apk-install0"
+    any(feature = "androidbox-apk-install0", feature = "androidbox-dex0")
 ))]
 const USER_GUARD_LOW: u64 = 0x0000_0002_001f_6000;
 #[cfg(all(
     not(feature = "storage-server-runtime"),
     not(feature = "androidbox-interactive0"),
-    not(feature = "androidbox-apk-install0")
+    not(feature = "androidbox-apk-install0"),
+    not(feature = "androidbox-dex0")
 ))]
 const USER_GUARD_LOW: u64 = 0x0000_0002_001f_a000;
 #[cfg(feature = "storage-server-runtime")]
@@ -458,13 +490,14 @@ const USER_STACK_START: usize = 0x0000_0002_001e_b000;
 #[cfg(all(
     not(feature = "storage-server-runtime"),
     not(feature = "androidbox-interactive0"),
-    feature = "androidbox-apk-install0"
+    any(feature = "androidbox-apk-install0", feature = "androidbox-dex0")
 ))]
 const USER_STACK_START: usize = 0x0000_0002_001f_7000;
 #[cfg(all(
     not(feature = "storage-server-runtime"),
     not(feature = "androidbox-interactive0"),
-    not(feature = "androidbox-apk-install0")
+    not(feature = "androidbox-apk-install0"),
+    not(feature = "androidbox-dex0")
 ))]
 const USER_STACK_START: usize = 0x0000_0002_001f_b000;
 #[cfg(feature = "storage-server-runtime")]
@@ -477,13 +510,14 @@ const USER_STACK_PAGES: usize = 20;
 #[cfg(all(
     not(feature = "storage-server-runtime"),
     not(feature = "androidbox-interactive0"),
-    feature = "androidbox-apk-install0"
+    any(feature = "androidbox-apk-install0", feature = "androidbox-dex0")
 ))]
 const USER_STACK_PAGES: usize = 8;
 #[cfg(all(
     not(feature = "storage-server-runtime"),
     not(feature = "androidbox-interactive0"),
-    not(feature = "androidbox-apk-install0")
+    not(feature = "androidbox-apk-install0"),
+    not(feature = "androidbox-dex0")
 ))]
 const USER_STACK_PAGES: usize = 4;
 const USER_PAGE_SIZE: usize = 4096;
@@ -715,6 +749,10 @@ const MOBILE_CLOCK_SECONDS_PER_MINUTE: u64 = 60;
 const MOBILE_CLOCK_NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
 #[cfg(feature = "app-data-runtime")]
 const FAIL_APP_DATA_AUTHORITY: u64 = 256;
+#[cfg(any(
+    not(feature = "mobile-ui-runtime"),
+    feature = "androidbox-apk-install0"
+))]
 const COLOR_PHONE_SCREEN: u32 = 0x001e_293b;
 #[cfg(not(feature = "mobile-ui-runtime"))]
 const COLOR_PHONE_HEADER: u32 = 0x001d_4ed8;
@@ -934,7 +972,25 @@ struct SurfaceServerRuntime {
     app_channel: OwnedUserHandle,
     launcher_pid: Option<u64>,
     app_pid: Option<u64>,
+    #[cfg(all(
+        feature = "mobile-ui-runtime",
+        not(feature = "androidbox-apk-install0")
+    ))]
+    launcher_buffers: [Option<OwnedUserHandle>; MOBILE_CLIENT_BUFFER_COUNT],
+    #[cfg(all(
+        feature = "mobile-ui-runtime",
+        not(feature = "androidbox-apk-install0")
+    ))]
+    app_buffers: [Option<OwnedUserHandle>; MOBILE_CLIENT_BUFFER_COUNT],
+    #[cfg(not(all(
+        feature = "mobile-ui-runtime",
+        not(feature = "androidbox-apk-install0")
+    )))]
     launcher_buffer: Option<OwnedUserHandle>,
+    #[cfg(not(all(
+        feature = "mobile-ui-runtime",
+        not(feature = "androidbox-apk-install0")
+    )))]
     app_buffer: Option<OwnedUserHandle>,
     capability: OwnedUserHandle,
     session_id: u64,
@@ -942,6 +998,15 @@ struct SurfaceServerRuntime {
     active_app: Option<ShellAppId>,
     focus_generation: u64,
     global_frame_id: u32,
+    #[cfg(feature = "mobile-ui-runtime")]
+    // A Damage frame is valid only while the retained global scene belongs
+    // to this exact focus epoch. Focus changes therefore force the next
+    // active client submission to establish a complete base first.
+    damage_base_focus_generation: Option<u32>,
+    #[cfg(feature = "mobile-ui-runtime")]
+    last_frame_epoch: u64,
+    #[cfg(feature = "mobile-ui-runtime")]
+    last_frame_boundary: u64,
     launcher_frame_id: Option<u32>,
     app_frame_id: Option<u32>,
     launcher_input_sequence: u64,
@@ -962,6 +1027,8 @@ struct SurfaceServerRuntime {
     system_chrome_buffer_for_present: OwnedUserHandle,
     #[cfg(feature = "androidbox-interactive0")]
     system_chrome_generation: u64,
+    #[cfg(feature = "androidbox-interactive0")]
+    system_chrome_state: Option<MobileSystemChromeState>,
     #[cfg(feature = "mobile-ui-runtime")]
     clock: MobileClockSession,
     #[cfg(feature = "mobile-ui-runtime")]
@@ -995,8 +1062,30 @@ struct AppRuntime {
     channel: OwnedUserHandle,
     server_pid: u64,
     events: UiServerEventTracker,
+    #[cfg(all(
+        feature = "mobile-ui-runtime",
+        not(feature = "androidbox-apk-install0")
+    ))]
+    buffers: [MobileMappedGraphicsBuffer; MOBILE_CLIENT_BUFFER_COUNT],
+    #[cfg(all(
+        feature = "mobile-ui-runtime",
+        not(feature = "androidbox-apk-install0")
+    ))]
+    next_buffer_slot: u8,
+    #[cfg(not(all(
+        feature = "mobile-ui-runtime",
+        not(feature = "androidbox-apk-install0")
+    )))]
     buffer: OwnedUserHandle,
+    #[cfg(not(all(
+        feature = "mobile-ui-runtime",
+        not(feature = "androidbox-apk-install0")
+    )))]
     buffer_for_server: Option<OwnedUserHandle>,
+    #[cfg(not(all(
+        feature = "mobile-ui-runtime",
+        not(feature = "androidbox-apk-install0")
+    )))]
     buffer_generation: u64,
     #[cfg(feature = "mobile-ui-runtime")]
     // These payloads already passed `UiServerEventTracker::accept` while a
@@ -1539,29 +1628,172 @@ enum MobileInputPolicy {
     Quarantine,
 }
 
-#[cfg(feature = "mobile-ui-runtime")]
+#[cfg(all(
+    feature = "mobile-ui-runtime",
+    not(feature = "androidbox-apk-install0")
+))]
+const MOBILE_CLIENT_BUFFER_COUNT: usize = bndr_ui::BUFFER_PRESENT_CLIENT_SLOT_COUNT;
+
+#[cfg(all(
+    feature = "mobile-ui-runtime",
+    not(feature = "androidbox-apk-install0")
+))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MobileMappedBufferState {
+    Writable,
+    Queued,
+    Submitted,
+}
+
+#[cfg(all(
+    feature = "mobile-ui-runtime",
+    not(feature = "androidbox-apk-install0")
+))]
+struct MobileMappedGraphicsBuffer {
+    handle: OwnedUserHandle,
+    for_server: Option<OwnedUserHandle>,
+    generation: u64,
+    mapping: u64,
+    state: MobileMappedBufferState,
+}
+
+#[cfg(all(
+    feature = "mobile-ui-runtime",
+    not(feature = "androidbox-apk-install0")
+))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct MobileFrameEpoch {
+    focus_generation: u32,
+    appearance_revision: u64,
+    boot_notification_revision: u64,
+    system_ui_revision: u64,
+    clock_revision: u64,
+}
+
+#[cfg(all(
+    feature = "mobile-ui-runtime",
+    not(feature = "androidbox-apk-install0")
+))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PreparedMobileFrame {
+    client: UiClientId,
+    slot: u8,
+    buffer_generation: u64,
+    epoch: MobileFrameEpoch,
+    /// `None` denotes the canonical full-surface transaction.
+    damage: Option<DamageRegions>,
+}
+
+#[cfg(all(
+    feature = "mobile-ui-runtime",
+    not(feature = "androidbox-apk-install0")
+))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SubmittedMobileFrame {
+    prepared: PreparedMobileFrame,
+    frame_id: u32,
+    disposition: BufferPresentDisposition,
+}
+
+#[cfg(all(
+    feature = "mobile-ui-runtime",
+    not(feature = "androidbox-apk-install0")
+))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MobileSubmissionAck {
+    Presented,
+    Cancelled,
+}
+
+#[cfg(all(feature = "mobile-ui-runtime", feature = "androidbox-apk-install0"))]
 const MOBILE_ROW_BYTES: usize = MOBILE_WIDTH * core::mem::size_of::<u32>();
-#[cfg(feature = "mobile-ui-runtime")]
+#[cfg(all(feature = "mobile-ui-runtime", feature = "androidbox-apk-install0"))]
 const MOBILE_TRANSFER_ROWS: usize = GRAPHICS_BUFFER_WRITE_MAX_BYTES / MOBILE_ROW_BYTES;
-#[cfg(feature = "mobile-ui-runtime")]
+#[cfg(all(feature = "mobile-ui-runtime", feature = "androidbox-apk-install0"))]
 const MOBILE_TRANSFER_PIXELS: usize = MOBILE_WIDTH * MOBILE_TRANSFER_ROWS;
-#[cfg(feature = "mobile-ui-runtime")]
+#[cfg(all(feature = "mobile-ui-runtime", feature = "androidbox-apk-install0"))]
 const _: () = assert!(MOBILE_TRANSFER_ROWS == bndr_abi::GRAPHICS_BUFFER_WRITE_MAX_ROWS);
-#[cfg(feature = "mobile-ui-runtime")]
+#[cfg(all(feature = "mobile-ui-runtime", feature = "androidbox-apk-install0"))]
 const _: () = assert!(MOBILE_TRANSFER_ROWS > 1);
-#[cfg(feature = "mobile-ui-runtime")]
+#[cfg(all(feature = "mobile-ui-runtime", feature = "androidbox-apk-install0"))]
 const _: () = assert!(GRAPHICS_BUFFER_WRITE_MAX_BYTES == MOBILE_TRANSFER_PIXELS * 4);
 
-#[cfg(feature = "mobile-ui-runtime")]
+#[cfg(all(feature = "mobile-ui-runtime", feature = "androidbox-apk-install0"))]
 #[repr(align(4096))]
 struct MobileTransferPixels(UnsafeCell<[u32; MOBILE_TRANSFER_PIXELS]>);
 
-#[cfg(feature = "mobile-ui-runtime")]
+#[cfg(all(feature = "mobile-ui-runtime", feature = "androidbox-apk-install0"))]
 unsafe impl Sync for MobileTransferPixels {}
 
-#[cfg(feature = "mobile-ui-runtime")]
+#[cfg(all(feature = "mobile-ui-runtime", feature = "androidbox-apk-install0"))]
 static MOBILE_TRANSFER_PIXELS_BUFFER: MobileTransferPixels =
     MobileTransferPixels(UnsafeCell::new([0; MOBILE_TRANSFER_PIXELS]));
+
+/// Per-process model proven to have reached the retained global scene.
+/// Keeping this large snapshot out of `AppRuntime` preserves the bounded EL0
+/// stack for both mapped swapchain and copied AndroidBox buffer profiles.
+#[cfg(all(
+    feature = "mobile-ui-runtime",
+    not(feature = "androidbox-apk-install0")
+))]
+#[derive(Clone, Copy)]
+struct MobilePresentedModel {
+    model: MobileModel,
+    focus_generation: u32,
+}
+
+#[cfg(all(feature = "mobile-ui-runtime", feature = "androidbox-apk-install0"))]
+struct MobileTransferredRasterCache(UnsafeCell<MobileRasterCache>);
+
+#[cfg(all(feature = "mobile-ui-runtime", feature = "androidbox-apk-install0"))]
+unsafe impl Sync for MobileTransferredRasterCache {}
+
+#[cfg(all(feature = "mobile-ui-runtime", feature = "androidbox-apk-install0"))]
+static MOBILE_TRANSFERRED_RASTER_CACHE: MobileTransferredRasterCache =
+    MobileTransferredRasterCache(UnsafeCell::new(MobileRasterCache::new()));
+
+#[cfg(all(
+    feature = "mobile-ui-runtime",
+    not(feature = "androidbox-apk-install0")
+))]
+#[derive(Clone, Copy)]
+struct MobilePendingModel {
+    slot: u8,
+    focus_generation: u32,
+}
+
+#[cfg(all(
+    feature = "mobile-ui-runtime",
+    not(feature = "androidbox-apk-install0")
+))]
+struct MobileMappedModelState {
+    slots: [Option<MobileModel>; MOBILE_CLIENT_BUFFER_COUNT],
+    presented: Option<MobilePresentedModel>,
+    pending: Option<MobilePendingModel>,
+}
+
+#[cfg(all(
+    feature = "mobile-ui-runtime",
+    not(feature = "androidbox-apk-install0")
+))]
+struct MobileSlotModels(UnsafeCell<MobileMappedModelState>);
+
+#[cfg(all(
+    feature = "mobile-ui-runtime",
+    not(feature = "androidbox-apk-install0")
+))]
+unsafe impl Sync for MobileSlotModels {}
+
+#[cfg(all(
+    feature = "mobile-ui-runtime",
+    not(feature = "androidbox-apk-install0")
+))]
+static MOBILE_SLOT_MODELS: MobileSlotModels =
+    MobileSlotModels(UnsafeCell::new(MobileMappedModelState {
+        slots: [None; MOBILE_CLIENT_BUFFER_COUNT],
+        presented: None,
+        pending: None,
+    }));
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum UiServerWaitSource {
@@ -6050,7 +6282,25 @@ fn surface_server_loop(startup: u64) -> ! {
         app_channel,
         launcher_pid: None,
         app_pid: None,
+        #[cfg(all(
+            feature = "mobile-ui-runtime",
+            not(feature = "androidbox-apk-install0")
+        ))]
+        launcher_buffers: [None, None],
+        #[cfg(all(
+            feature = "mobile-ui-runtime",
+            not(feature = "androidbox-apk-install0")
+        ))]
+        app_buffers: [None, None],
+        #[cfg(not(all(
+            feature = "mobile-ui-runtime",
+            not(feature = "androidbox-apk-install0")
+        )))]
         launcher_buffer: None,
+        #[cfg(not(all(
+            feature = "mobile-ui-runtime",
+            not(feature = "androidbox-apk-install0")
+        )))]
         app_buffer: None,
         capability,
         session_id: acquired.out2,
@@ -6058,6 +6308,12 @@ fn surface_server_loop(startup: u64) -> ! {
         active_app: None,
         focus_generation: 0,
         global_frame_id: 0,
+        #[cfg(feature = "mobile-ui-runtime")]
+        damage_base_focus_generation: None,
+        #[cfg(feature = "mobile-ui-runtime")]
+        last_frame_epoch: 0,
+        #[cfg(feature = "mobile-ui-runtime")]
+        last_frame_boundary: 0,
         launcher_frame_id: None,
         app_frame_id: None,
         launcher_input_sequence: 0,
@@ -6078,6 +6334,8 @@ fn surface_server_loop(startup: u64) -> ! {
         system_chrome_buffer_for_present,
         #[cfg(feature = "androidbox-interactive0")]
         system_chrome_generation: 0,
+        #[cfg(feature = "androidbox-interactive0")]
+        system_chrome_state: None,
         #[cfg(feature = "mobile-ui-runtime")]
         clock: mobile_clock,
         #[cfg(feature = "mobile-ui-runtime")]
@@ -7178,14 +7436,53 @@ fn dispatch_client_buffer_present(
     frame: BufferPresent,
     transferred_buffer: Option<OwnedUserHandle>,
 ) {
+    #[cfg(all(
+        feature = "mobile-ui-runtime",
+        not(feature = "androidbox-apk-install0")
+    ))]
     let buffer_slot = match client {
-        UiClientId::Launcher => &mut server.launcher_buffer,
-        UiClientId::App => &mut server.app_buffer,
+        UiClientId::Launcher => server
+            .launcher_buffers
+            .get_mut(usize::from(frame.client_buffer_slot())),
+        UiClientId::App => server
+            .app_buffers
+            .get_mut(usize::from(frame.client_buffer_slot())),
+    }
+    .unwrap_or_else(|| fail(FAIL_SURFACE_PROTOCOL));
+    #[cfg(not(all(
+        feature = "mobile-ui-runtime",
+        not(feature = "androidbox-apk-install0")
+    )))]
+    let buffer_slot = {
+        if frame.client_buffer_slot() != 0
+            || frame.disposition() != BufferPresentDisposition::Present
+            || {
+                #[cfg(feature = "mobile-ui-runtime")]
+                {
+                    false
+                }
+                #[cfg(not(feature = "mobile-ui-runtime"))]
+                {
+                    frame.mode() != BufferPresentMode::Full
+                }
+            }
+        {
+            fail(FAIL_SURFACE_PROTOCOL);
+        }
+        match client {
+            UiClientId::Launcher => &mut server.launcher_buffer,
+            UiClientId::App => &mut server.app_buffer,
+        }
     };
     if let Some(buffer) = transferred_buffer {
         if buffer_slot.is_some() {
             fail(FAIL_SURFACE_PROTOCOL);
         }
+        #[cfg(all(
+            feature = "mobile-ui-runtime",
+            not(feature = "androidbox-apk-install0")
+        ))]
+        map_mobile_graphics_buffer(buffer.raw(), GRAPHICS_BUFFER_MAP_CONSUMER_RO);
         *buffer_slot = Some(buffer);
     }
     let buffer_raw = buffer_slot
@@ -7214,6 +7511,33 @@ fn dispatch_client_buffer_present(
     {
         fail(FAIL_SURFACE_PROTOCOL);
     }
+    if frame.disposition() == BufferPresentDisposition::Discard {
+        #[cfg(all(
+            feature = "mobile-ui-runtime",
+            not(feature = "androidbox-apk-install0")
+        ))]
+        {
+            acquire_mobile_graphics_buffer(buffer_raw, frame.buffer_generation());
+            release_mobile_graphics_buffer(buffer_raw, frame.buffer_generation());
+            let event = UiServerEvent::present_cancelled(
+                server.session_id,
+                frame.client_frame_id(),
+                server.focus_generation,
+            )
+            .unwrap_or_else(|_| fail(FAIL_SURFACE_PROTOCOL));
+            let channel = match client {
+                UiClientId::Launcher => server.launcher_channel.raw(),
+                UiClientId::App => server.app_channel.raw(),
+            };
+            write_ui_event(channel, event);
+            return;
+        }
+        #[cfg(not(all(
+            feature = "mobile-ui-runtime",
+            not(feature = "androidbox-apk-install0")
+        )))]
+        fail(FAIL_SURFACE_PROTOCOL);
+    }
     let current_focus_generation =
         u32::try_from(server.focus_generation).unwrap_or_else(|_| fail(FAIL_SURFACE_PROTOCOL));
     #[cfg(feature = "mobile-ui-runtime")]
@@ -7229,6 +7553,14 @@ fn dispatch_client_buffer_present(
         || frame.focus_generation() != current_focus_generation
         || !system_ui_revision_matches
     {
+        #[cfg(all(
+            feature = "mobile-ui-runtime",
+            not(feature = "androidbox-apk-install0")
+        ))]
+        {
+            acquire_mobile_graphics_buffer(buffer_raw, frame.buffer_generation());
+            release_mobile_graphics_buffer(buffer_raw, frame.buffer_generation());
+        }
         let event = UiServerEvent::present_cancelled(
             server.session_id,
             frame.client_frame_id(),
@@ -7242,6 +7574,12 @@ fn dispatch_client_buffer_present(
         write_ui_event(channel, event);
         return;
     }
+    #[cfg(feature = "mobile-ui-runtime")]
+    if frame.mode() == BufferPresentMode::Damage
+        && server.damage_base_focus_generation != Some(current_focus_generation)
+    {
+        fail(FAIL_SURFACE_PROTOCOL);
+    }
     #[cfg(feature = "androidbox-el0-runtime0")]
     if client == UiClientId::App
         && server.active_app.is_none()
@@ -7249,6 +7587,13 @@ fn dispatch_client_buffer_present(
     {
         fail(FAIL_SURFACE_PROTOCOL);
     }
+    #[cfg(all(
+        feature = "mobile-ui-runtime",
+        not(feature = "androidbox-apk-install0")
+    ))]
+    acquire_mobile_graphics_buffer(buffer_raw, frame.buffer_generation());
+    #[cfg(feature = "mobile-ui-runtime")]
+    acquire_mobile_surface_frame(server);
     let global_frame_id = server
         .global_frame_id
         .checked_add(1)
@@ -7291,6 +7636,10 @@ fn dispatch_client_buffer_present(
         fail(FAIL_SURFACE_PRESENT);
     }
     #[cfg(feature = "mobile-ui-runtime")]
+    {
+        server.damage_base_focus_generation = Some(current_focus_generation);
+    }
+    #[cfg(feature = "mobile-ui-runtime")]
     if client == UiClientId::App {
         match server.active_app {
             Some(app) => match (server.system_ui.mode(), server.system_ui.recent_app()) {
@@ -7325,6 +7674,102 @@ fn dispatch_client_buffer_present(
     write_ui_event(channel, event);
 }
 
+/// Blocks the sole SurfaceServer until the kernel publishes the next 50 Hz
+/// software frame opportunity, then consumes exactly one authenticated grant.
+/// Cancelled client submissions return before this point and therefore never
+/// consume display cadence that produced no frame.
+#[cfg(feature = "mobile-ui-runtime")]
+fn acquire_mobile_surface_frame(server: &mut SurfaceServerRuntime) {
+    let ready = object_wait(server.capability.raw(), ObjectSignals::FRAME_READY);
+    if ready.status != Status::Ok.raw()
+        || ready.out1 & u64::from(ObjectSignals::FRAME_READY.bits()) == 0
+        || ready.out2 != 0
+    {
+        fail(FAIL_SURFACE_PRESENT);
+    }
+    let acquired = syscall(
+        SyscallNumber::SurfaceFrameAcquire,
+        server.capability.raw(),
+        0,
+        0,
+    );
+    let expected_epoch = server
+        .last_frame_epoch
+        .checked_add(1)
+        .unwrap_or_else(|| fail(FAIL_SURFACE_PROTOCOL));
+    if acquired.status != Status::Ok.raw()
+        || acquired.out1 != expected_epoch
+        || acquired.out2 == 0
+        || acquired.out2 <= server.last_frame_boundary
+    {
+        fail(FAIL_SURFACE_PRESENT);
+    }
+    server.last_frame_epoch = acquired.out1;
+    server.last_frame_boundary = acquired.out2;
+}
+
+#[cfg(all(
+    feature = "mobile-ui-runtime",
+    not(feature = "androidbox-apk-install0")
+))]
+fn map_mobile_graphics_buffer(handle: u64, role: u64) -> u64 {
+    let mapped = syscall(SyscallNumber::GraphicsBufferMap, handle, role, 0);
+    let map_limit = GRAPHICS_BUFFER_MAP_ADDRESS
+        .checked_add(
+            GRAPHICS_BUFFER_MAP_STRIDE
+                .checked_mul(MOBILE_CLIENT_BUFFER_COUNT as u64 * 2)
+                .unwrap_or_else(|| fail(FAIL_SURFACE_PROTOCOL)),
+        )
+        .unwrap_or_else(|| fail(FAIL_SURFACE_PROTOCOL));
+    if mapped.status != Status::Ok.raw()
+        || mapped.out1 < GRAPHICS_BUFFER_MAP_ADDRESS
+        || mapped.out1 >= map_limit
+        || !mapped.out1.is_multiple_of(4096)
+        || mapped.out2 != GRAPHICS_BUFFER_BACKING_BYTES as u64
+    {
+        fail(FAIL_SURFACE_PROTOCOL);
+    }
+    mapped.out1
+}
+
+#[cfg(all(
+    feature = "mobile-ui-runtime",
+    not(feature = "androidbox-apk-install0")
+))]
+fn acquire_mobile_graphics_buffer(handle: u64, expected_generation: u64) {
+    let acquired = syscall(
+        SyscallNumber::GraphicsBufferAcquire,
+        handle,
+        expected_generation,
+        GRAPHICS_BUFFER_ACQUIRE_FLAGS_NONE,
+    );
+    if acquired.status != Status::Ok.raw()
+        || acquired.out1 != expected_generation
+        || acquired.out2 != 0
+    {
+        fail(FAIL_SURFACE_PROTOCOL);
+    }
+}
+
+#[cfg(all(
+    feature = "mobile-ui-runtime",
+    not(feature = "androidbox-apk-install0")
+))]
+fn release_mobile_graphics_buffer(handle: u64, expected_generation: u64) {
+    let released = syscall(
+        SyscallNumber::GraphicsBufferRelease,
+        handle,
+        expected_generation,
+        GRAPHICS_BUFFER_RELEASE_FLAGS_NONE,
+    );
+    if released.status != Status::Ok.raw()
+        || released.out1 != expected_generation
+        || released.out2 != 0
+    {
+        fail(FAIL_SURFACE_PROTOCOL);
+    }
+}
+
 #[cfg(feature = "mobile-ui-runtime")]
 fn mobile_buffer_present_revision_is_current(
     frame: BufferPresent,
@@ -7354,17 +7799,16 @@ const MOBILE_SHELL_X: u16 = 0;
 #[cfg(feature = "mobile-ui-runtime")]
 const MOBILE_SHELL_Y: u16 = 0;
 
-#[cfg(feature = "mobile-ui-runtime")]
-fn create_mobile_graphics_runtime(
-    channel: OwnedUserHandle,
-    server_pid: u64,
-    events: UiServerEventTracker,
-) -> AppRuntime {
+#[cfg(all(
+    feature = "mobile-ui-runtime",
+    not(feature = "androidbox-apk-install0")
+))]
+fn create_mobile_mapped_graphics_buffer() -> MobileMappedGraphicsBuffer {
     let created = syscall(
         SyscallNumber::GraphicsBufferCreate,
         GRAPHICS_BUFFER_FORMAT_XRGB8888,
         pack_graphics_buffer_geometry(GRAPHICS_BUFFER_WIDTH, GRAPHICS_BUFFER_HEIGHT),
-        GRAPHICS_BUFFER_CREATE_FLAGS_NONE,
+        GRAPHICS_BUFFER_CREATE_FLAG_MAPPABLE,
     );
     if created.status != Status::Ok.raw()
         || created.out1 == 0
@@ -7372,18 +7816,71 @@ fn create_mobile_graphics_runtime(
     {
         fail(FAIL_SURFACE_PROTOCOL);
     }
-    let buffer = OwnedUserHandle::new(created.out1).unwrap_or_else(|| fail(FAIL_SURFACE_PROTOCOL));
+    let handle = OwnedUserHandle::new(created.out1).unwrap_or_else(|| fail(FAIL_SURFACE_PROTOCOL));
     let duplicated = syscall(
         SyscallNumber::HandleDuplicate,
-        buffer.raw(),
-        u64::from(Rights::GRAPHICS_BUFFER_SERVER.bits()),
+        handle.raw(),
+        u64::from(Rights::GRAPHICS_BUFFER_MAPPED_SERVER.bits()),
         0,
     );
     if duplicated.status != Status::Ok.raw() || duplicated.out1 == 0 || duplicated.out2 != 0 {
         fail(FAIL_SURFACE_PROTOCOL);
     }
-    let buffer_for_server =
+    let for_server =
         OwnedUserHandle::new(duplicated.out1).unwrap_or_else(|| fail(FAIL_SURFACE_PROTOCOL));
+    let mapping = map_mobile_graphics_buffer(handle.raw(), GRAPHICS_BUFFER_MAP_PRODUCER_RW);
+    MobileMappedGraphicsBuffer {
+        handle,
+        for_server: Some(for_server),
+        generation: 0,
+        mapping,
+        state: MobileMappedBufferState::Writable,
+    }
+}
+
+#[cfg(feature = "mobile-ui-runtime")]
+fn create_mobile_graphics_runtime(
+    channel: OwnedUserHandle,
+    server_pid: u64,
+    events: UiServerEventTracker,
+) -> AppRuntime {
+    #[cfg(all(
+        feature = "mobile-ui-runtime",
+        not(feature = "androidbox-apk-install0")
+    ))]
+    let buffers = [
+        create_mobile_mapped_graphics_buffer(),
+        create_mobile_mapped_graphics_buffer(),
+    ];
+    #[cfg(feature = "androidbox-apk-install0")]
+    let (buffer, buffer_for_server) = {
+        let created = syscall(
+            SyscallNumber::GraphicsBufferCreate,
+            GRAPHICS_BUFFER_FORMAT_XRGB8888,
+            pack_graphics_buffer_geometry(GRAPHICS_BUFFER_WIDTH, GRAPHICS_BUFFER_HEIGHT),
+            GRAPHICS_BUFFER_CREATE_FLAGS_NONE,
+        );
+        if created.status != Status::Ok.raw()
+            || created.out1 == 0
+            || created.out2 != GRAPHICS_BUFFER_LOGICAL_BYTES as u64
+        {
+            fail(FAIL_SURFACE_PROTOCOL);
+        }
+        let buffer =
+            OwnedUserHandle::new(created.out1).unwrap_or_else(|| fail(FAIL_SURFACE_PROTOCOL));
+        let duplicated = syscall(
+            SyscallNumber::HandleDuplicate,
+            buffer.raw(),
+            u64::from(Rights::GRAPHICS_BUFFER_SERVER.bits()),
+            0,
+        );
+        if duplicated.status != Status::Ok.raw() || duplicated.out1 == 0 || duplicated.out2 != 0 {
+            fail(FAIL_SURFACE_PROTOCOL);
+        }
+        let buffer_for_server =
+            OwnedUserHandle::new(duplicated.out1).unwrap_or_else(|| fail(FAIL_SURFACE_PROTOCOL));
+        (buffer, buffer_for_server)
+    };
     let delivered_active_client = events
         .active_client()
         .unwrap_or_else(|| fail(FAIL_SURFACE_PROTOCOL));
@@ -7430,8 +7927,21 @@ fn create_mobile_graphics_runtime(
         channel,
         server_pid,
         events,
+        #[cfg(all(
+            feature = "mobile-ui-runtime",
+            not(feature = "androidbox-apk-install0")
+        ))]
+        buffers,
+        #[cfg(all(
+            feature = "mobile-ui-runtime",
+            not(feature = "androidbox-apk-install0")
+        ))]
+        next_buffer_slot: 0,
+        #[cfg(feature = "androidbox-apk-install0")]
         buffer,
+        #[cfg(feature = "androidbox-apk-install0")]
         buffer_for_server: Some(buffer_for_server),
+        #[cfg(feature = "androidbox-apk-install0")]
         buffer_generation: 0,
         deferred_payloads: MobileDeferredPayloadQueue::new(),
         delivered_active_client,
@@ -7456,38 +7966,267 @@ fn create_mobile_graphics_runtime(
     }
 }
 
-#[cfg(feature = "mobile-ui-runtime")]
-fn write_mobile_buffer(runtime: &mut AppRuntime, model: MobileModel) {
-    let pixels = unsafe { &mut *MOBILE_TRANSFER_PIXELS_BUFFER.0.get() };
-    #[cfg(feature = "androidbox-interactive0")]
-    let (mut first_row, last_row) = (
-        usize::from(MOBILE_CONTENT_TOP),
-        usize::from(MOBILE_CONTENT_BOTTOM),
+#[cfg(all(
+    feature = "mobile-ui-runtime",
+    not(feature = "androidbox-apk-install0")
+))]
+fn write_mobile_buffer(
+    runtime: &mut AppRuntime,
+    slot: u8,
+    model: MobileModel,
+    focus_generation: u32,
+) -> (u64, Option<DamageRegions>) {
+    let buffer = runtime
+        .buffers
+        .get_mut(usize::from(slot))
+        .filter(|buffer| buffer.state == MobileMappedBufferState::Writable)
+        .unwrap_or_else(|| fail(FAIL_SURFACE_PROTOCOL));
+    // SAFETY: GraphicsBufferMap validated this complete page-rounded producer
+    // alias as writable. A slot returns to `Writable` only after
+    // SurfaceServer has presented or explicitly discarded and released its
+    // queued generation. The other slot may remain submitted concurrently.
+    let pixels = unsafe {
+        core::slice::from_raw_parts_mut(buffer.mapping as *mut u32, GRAPHICS_BUFFER_PIXEL_COUNT)
+    };
+    let render_plan = mobile_model_damage(mobile_slot_model(slot), model);
+    match render_plan {
+        MobileDamagePlan::Full => render_mobile(pixels, model),
+        MobileDamagePlan::Regions(damage) => render_mobile_damage_regions(pixels, model, damage),
+        MobileDamagePlan::Unchanged => Ok(()),
+    }
+    .unwrap_or_else(|_| fail(FAIL_SURFACE_PROTOCOL));
+    let present_damage = match mobile_model_damage(mobile_scene_model(focus_generation), model) {
+        MobileDamagePlan::Full => None,
+        MobileDamagePlan::Regions(damage) => Some(damage),
+        MobileDamagePlan::Unchanged => Some(
+            DamageRegions::single(bndr_ui::DamageRect {
+                x: 0,
+                y: 0,
+                width: 1,
+                height: 1,
+            })
+            .unwrap_or_else(|_| fail(FAIL_SURFACE_PROTOCOL)),
+        ),
+    };
+    let queued = syscall(
+        SyscallNumber::GraphicsBufferQueue,
+        buffer.handle.raw(),
+        buffer.generation,
+        GRAPHICS_BUFFER_QUEUE_FLAGS_NONE,
     );
+    let expected_generation = buffer
+        .generation
+        .checked_add(1)
+        .unwrap_or_else(|| fail(FAIL_SURFACE_PROTOCOL));
+    if queued.status != Status::Ok.raw() || queued.out1 != expected_generation || queued.out2 != 0 {
+        fail(FAIL_SURFACE_PROTOCOL);
+    }
+    buffer.generation = queued.out1;
+    buffer.state = MobileMappedBufferState::Queued;
+    set_mobile_slot_model(slot, model);
+    (queued.out1, present_damage)
+}
+
+#[cfg(all(
+    feature = "mobile-ui-runtime",
+    not(feature = "androidbox-apk-install0")
+))]
+fn mobile_slot_model(slot: u8) -> Option<MobileModel> {
+    let slot = usize::from(slot);
+    if slot >= MOBILE_CLIENT_BUFFER_COUNT {
+        fail(FAIL_SURFACE_PROTOCOL);
+    }
+    // SAFETY: every mobile client process is single-threaded and owns its
+    // private image/BSS. Slots are read or updated only while their mapped
+    // backing is in the producer-owned Writable/Queued transition.
+    unsafe { (*MOBILE_SLOT_MODELS.0.get()).slots[slot] }
+}
+
+#[cfg(all(
+    feature = "mobile-ui-runtime",
+    not(feature = "androidbox-apk-install0")
+))]
+fn set_mobile_slot_model(slot: u8, model: MobileModel) {
+    let slot = usize::from(slot);
+    if slot >= MOBILE_CLIENT_BUFFER_COUNT {
+        fail(FAIL_SURFACE_PROTOCOL);
+    }
+    // SAFETY: see `mobile_slot_model`; no other execution context in this
+    // process can access the fixed slot-model record concurrently.
+    unsafe {
+        (*MOBILE_SLOT_MODELS.0.get()).slots[slot] = Some(model);
+    }
+}
+
+#[cfg(all(
+    feature = "mobile-ui-runtime",
+    not(feature = "androidbox-apk-install0")
+))]
+fn mobile_scene_model(focus_generation: u32) -> Option<MobileModel> {
+    // SAFETY: the process is single-threaded. A pending slot remains Submitted
+    // and cannot be rewritten before its matching acknowledgment.
+    let state = unsafe { &*MOBILE_SLOT_MODELS.0.get() };
+    if let Some(pending) = state.pending {
+        return (pending.focus_generation == focus_generation)
+            .then(|| state.slots[usize::from(pending.slot)])
+            .flatten();
+    }
+    state
+        .presented
+        .filter(|presented| presented.focus_generation == focus_generation)
+        .map(|presented| presented.model)
+}
+
+#[cfg(all(
+    feature = "mobile-ui-runtime",
+    not(feature = "androidbox-apk-install0")
+))]
+fn begin_mobile_pending_model(slot: u8, focus_generation: u32) {
+    if mobile_slot_model(slot).is_none() || focus_generation == 0 {
+        fail(FAIL_SURFACE_PROTOCOL);
+    }
+    // SAFETY: single-threaded per-process state; the protocol admits one
+    // visible submission outstanding per client.
+    let state = unsafe { &mut *MOBILE_SLOT_MODELS.0.get() };
+    if state.pending.is_some() {
+        fail(FAIL_SURFACE_PROTOCOL);
+    }
+    state.pending = Some(MobilePendingModel {
+        slot,
+        focus_generation,
+    });
+}
+
+#[cfg(all(
+    feature = "mobile-ui-runtime",
+    not(feature = "androidbox-apk-install0")
+))]
+fn finish_mobile_pending_model(slot: u8, focus_generation: u32, presented: bool) {
+    // SAFETY: single-threaded per-process state and exact matching ack.
+    let state = unsafe { &mut *MOBILE_SLOT_MODELS.0.get() };
+    let pending = state
+        .pending
+        .filter(|pending| pending.slot == slot && pending.focus_generation == focus_generation)
+        .unwrap_or_else(|| fail(FAIL_SURFACE_PROTOCOL));
+    if presented {
+        let model =
+            state.slots[usize::from(pending.slot)].unwrap_or_else(|| fail(FAIL_SURFACE_PROTOCOL));
+        state.presented = Some(MobilePresentedModel {
+            model,
+            focus_generation,
+        });
+    }
+    state.pending = None;
+}
+
+#[cfg(all(feature = "mobile-ui-runtime", feature = "androidbox-apk-install0"))]
+fn record_mobile_transferred_scene_model(model: MobileModel, focus_generation: u32) {
+    if focus_generation == 0 {
+        fail(FAIL_SURFACE_PROTOCOL);
+    }
+    // SAFETY: each client is single-threaded and owns this private BSS. Only
+    // the matching Presented acknowledgment advances the displayed baseline.
+    unsafe {
+        (*MOBILE_TRANSFERRED_RASTER_CACHE.0.get()).record_presented(model, focus_generation);
+    }
+}
+
+#[cfg(all(feature = "mobile-ui-runtime", feature = "androidbox-apk-install0"))]
+fn write_mobile_buffer(
+    runtime: &mut AppRuntime,
+    model: MobileModel,
+    focus_generation: u32,
+) -> (u64, Option<DamageRegions>) {
+    // SAFETY: synchronous single-producer writes cannot overlap a pending
+    // present. The cache describes pixels, not permission or focus authority.
+    let cache = unsafe { &mut *MOBILE_TRANSFERRED_RASTER_CACHE.0.get() };
+    let present_damage = match cache.present_plan(model, focus_generation) {
+        MobileDamagePlan::Full => None,
+        MobileDamagePlan::Regions(damage) => Some(damage),
+        MobileDamagePlan::Unchanged => Some(
+            DamageRegions::single(bndr_ui::DamageRect {
+                x: 0,
+                y: 0,
+                width: 1,
+                height: 1,
+            })
+            .unwrap_or_else(|_| fail(FAIL_SURFACE_PROTOCOL)),
+        ),
+    };
+    #[cfg(feature = "androidbox-interactive0")]
+    let viewport = bndr_ui::DamageRect {
+        x: 0,
+        y: MOBILE_CONTENT_TOP,
+        width: MOBILE_WIDTH as u16,
+        height: MOBILE_CONTENT_BOTTOM - MOBILE_CONTENT_TOP,
+    };
     #[cfg(not(feature = "androidbox-interactive0"))]
-    let mut first_row = 0_usize;
-    #[cfg(not(feature = "androidbox-interactive0"))]
-    let last_row = MOBILE_HEIGHT;
-    while first_row < last_row {
-        let row_count = (last_row - first_row).min(MOBILE_TRANSFER_ROWS);
-        let pixel_count = row_count * MOBILE_WIDTH;
-        render_mobile_rows(&mut pixels[..pixel_count], first_row, model)
-            .unwrap_or_else(|_| fail(FAIL_SURFACE_PROTOCOL));
-        let byte_count = pixel_count * core::mem::size_of::<u32>();
-        let bytes =
-            unsafe { core::slice::from_raw_parts(pixels.as_ptr().cast::<u8>(), byte_count) };
-        let offset = first_row * MOBILE_ROW_BYTES;
-        if bytes.is_empty() || !bytes.len().is_multiple_of(4) || !offset.is_multiple_of(4) {
-            fail(FAIL_SURFACE_PROTOCOL);
+    let viewport = bndr_ui::DamageRect {
+        x: 0,
+        y: 0,
+        width: MOBILE_WIDTH as u16,
+        height: MOBILE_HEIGHT as u16,
+    };
+    let plan = clip_damage_plan(cache.raster_plan(model), viewport)
+        .unwrap_or_else(|_| fail(FAIL_SURFACE_PROTOCOL));
+    if let MobileDamagePlan::Regions(regions) = plan {
+        let pixels = unsafe { &mut *MOBILE_TRANSFER_PIXELS_BUFFER.0.get() };
+        for region in regions.rects() {
+            let width = usize::from(region.width);
+            let mut first_row = region.y;
+            let last_row = region.y + region.height;
+            while first_row < last_row {
+                let rows = usize::from(last_row - first_row).min(MOBILE_TRANSFER_PIXELS / width);
+                let batch = bndr_ui::DamageRect {
+                    y: first_row,
+                    height: rows as u16,
+                    ..*region
+                };
+                let packed = &mut pixels[..rows * width];
+                render_mobile_region(packed, batch, model)
+                    .unwrap_or_else(|_| fail(FAIL_SURFACE_PROTOCOL));
+                transfer_mobile_region(
+                    runtime.buffer.raw(),
+                    &mut runtime.buffer_generation,
+                    packed,
+                    batch,
+                );
+                first_row += rows as u16;
+            }
         }
+    }
+    // Record the backing even when the following present is cancelled. The
+    // next raster must repair those written pixels, not the last shown frame.
+    cache.record_written(model);
+    (runtime.buffer_generation, present_damage)
+}
+
+#[cfg(all(feature = "mobile-ui-runtime", feature = "androidbox-apk-install0"))]
+fn transfer_mobile_region(
+    buffer: u64,
+    generation: &mut u64,
+    packed: &[u32],
+    region: bndr_ui::DamageRect,
+) {
+    let width = usize::from(region.width);
+    let offset = usize::from(region.y) * MOBILE_ROW_BYTES + usize::from(region.x) * 4;
+    // Full-width rows remain one bounded copy; narrow regions use one copy
+    // per scanline because the existing write ABI has no destination stride.
+    // Neither path writes the horizontal padding or the gap between regions.
+    let step = if width == MOBILE_WIDTH {
+        packed.len()
+    } else {
+        width
+    };
+    for (row, pixels) in packed.chunks_exact(step).enumerate() {
+        let byte_count = core::mem::size_of_val(pixels);
         let written = syscall(
             SyscallNumber::GraphicsBufferWrite,
-            runtime.buffer.raw(),
-            bytes.as_ptr() as u64,
-            pack_graphics_buffer_write(offset as u32, byte_count as u32),
+            buffer,
+            pixels.as_ptr() as u64,
+            pack_graphics_buffer_write((offset + row * MOBILE_ROW_BYTES) as u32, byte_count as u32),
         );
-        let expected_generation = runtime
-            .buffer_generation
+        let expected_generation = generation
             .checked_add(1)
             .unwrap_or_else(|| fail(FAIL_SURFACE_PROTOCOL));
         if written.status != Status::Ok.raw()
@@ -7496,8 +8235,7 @@ fn write_mobile_buffer(runtime: &mut AppRuntime, model: MobileModel) {
         {
             fail(FAIL_SURFACE_PROTOCOL);
         }
-        runtime.buffer_generation = written.out2;
-        first_row += row_count;
+        *generation = written.out2;
     }
 }
 
@@ -7509,43 +8247,52 @@ fn write_mobile_system_chrome(server: &mut SurfaceServerRuntime) -> u64 {
         appearance.dark_theme(),
         appearance.alternate_accent(),
         appearance.software_dimming(),
+        appearance.large_text(),
+        appearance.high_contrast(),
         server.system_ui.nav_pressed(),
     );
+    let plan = system_chrome_damage_plan(server.system_chrome_state, state);
     let pixels = unsafe { &mut *MOBILE_TRANSFER_PIXELS_BUFFER.0.get() };
     for (region_start, region_end) in [
         (0_usize, usize::from(MOBILE_CONTENT_TOP)),
         (usize::from(MOBILE_CONTENT_BOTTOM), MOBILE_HEIGHT),
     ] {
-        let mut first_row = region_start;
-        while first_row < region_end {
-            let row_count = (region_end - first_row).min(MOBILE_TRANSFER_ROWS);
-            let pixel_count = row_count * MOBILE_WIDTH;
-            render_system_chrome_rows(&mut pixels[..pixel_count], first_row, state)
-                .unwrap_or_else(|_| fail(FAIL_SURFACE_PROTOCOL));
-            let byte_count = pixel_count * core::mem::size_of::<u32>();
-            let bytes =
-                unsafe { core::slice::from_raw_parts(pixels.as_ptr().cast::<u8>(), byte_count) };
-            let offset = first_row * MOBILE_ROW_BYTES;
-            let written = syscall(
-                SyscallNumber::GraphicsBufferWrite,
-                server.system_chrome_buffer.raw(),
-                bytes.as_ptr() as u64,
-                pack_graphics_buffer_write(offset as u32, byte_count as u32),
-            );
-            let expected_generation = server
-                .system_chrome_generation
-                .checked_add(1)
-                .unwrap_or_else(|| fail(FAIL_SURFACE_PROTOCOL));
-            if written.status != Status::Ok.raw()
-                || written.out1 != byte_count as u64
-                || written.out2 != expected_generation
-            {
-                fail(FAIL_SURFACE_PROTOCOL);
+        let viewport = bndr_ui::DamageRect {
+            x: 0,
+            y: region_start as u16,
+            width: MOBILE_WIDTH as u16,
+            height: (region_end - region_start) as u16,
+        };
+        let clipped =
+            clip_damage_plan(plan, viewport).unwrap_or_else(|_| fail(FAIL_SURFACE_PROTOCOL));
+        if let MobileDamagePlan::Regions(regions) = clipped {
+            for region in regions.rects() {
+                let width = usize::from(region.width);
+                let mut first_row = region.y;
+                let last_row = region.y + region.height;
+                while first_row < last_row {
+                    let rows =
+                        usize::from(last_row - first_row).min(MOBILE_TRANSFER_PIXELS / width);
+                    let batch = bndr_ui::DamageRect {
+                        y: first_row,
+                        height: rows as u16,
+                        ..*region
+                    };
+                    let packed = &mut pixels[..rows * width];
+                    render_system_chrome_region(packed, batch, state)
+                        .unwrap_or_else(|_| fail(FAIL_SURFACE_PROTOCOL));
+                    transfer_mobile_region(
+                        server.system_chrome_buffer.raw(),
+                        &mut server.system_chrome_generation,
+                        packed,
+                        batch,
+                    );
+                    first_row += rows as u16;
+                }
             }
-            server.system_chrome_generation = written.out2;
-            first_row += row_count;
         }
     }
+    server.system_chrome_state = Some(state);
     server.system_chrome_generation
 }
 
@@ -7652,17 +8399,11 @@ fn mobile_system_ui_delivery_is_current(runtime: &AppRuntime) -> bool {
 }
 
 #[cfg(feature = "mobile-ui-runtime")]
-fn present_mobile_page_with_input_policy(
-    runtime: &mut AppRuntime,
-    client: UiClientId,
-    model: MobileModel,
-    input_policy: MobileInputPolicy,
-) -> MobilePresentOutcome {
+fn mobile_render_state_is_current(runtime: &AppRuntime, client: UiClientId) -> Option<u32> {
     let tracked_focus_generation = runtime
         .events
         .last_focus_generation()
-        .filter(|generation| *generation != 0)
-        .unwrap_or_else(|| fail(FAIL_SURFACE_PROTOCOL));
+        .filter(|generation| *generation != 0)?;
     if runtime.delivered_active_client != client
         || runtime.events.active_client() != Some(client)
         || runtime.delivered_focus_generation != tracked_focus_generation
@@ -7676,64 +8417,326 @@ fn present_mobile_page_with_input_policy(
         || runtime.events.last_clock_revision() != Some(runtime.delivered_clock_revision)
         || !mobile_system_ui_delivery_is_current(runtime)
     {
-        return MobilePresentOutcome::Superseded;
+        return None;
     }
-    // Every transition frame is bound to the exact delivered SystemUI epoch.
-    // Accepted-but-deferred navigation advances the tracker immediately and
-    // therefore supersedes this frame sequence before another transition step.
-    let focus_generation =
-        u32::try_from(tracked_focus_generation).unwrap_or_else(|_| fail(FAIL_SURFACE_PROTOCOL));
+    u32::try_from(tracked_focus_generation).ok()
+}
+
+#[cfg(feature = "mobile-ui-runtime")]
+fn handle_mobile_present_wait_payload(
+    runtime: &mut AppRuntime,
+    payload: UiServerEventPayload,
+    input_policy: MobileInputPolicy,
+) {
+    match payload {
+        UiServerEventPayload::Input(_) if input_policy == MobileInputPolicy::Defer => {
+            if runtime.deferred_payloads.push(payload).is_err() {
+                fail(FAIL_SURFACE_PROTOCOL);
+            }
+        }
+        UiServerEventPayload::Input(sample) => {
+            let (quarantined_inputs, suppress_until_release) =
+                advance_mobile_transition_input_quarantine(
+                    runtime.quarantined_mobile_inputs,
+                    sample.pressed(),
+                )
+                .unwrap_or_else(|| fail(FAIL_SURFACE_PROTOCOL));
+            runtime.quarantined_mobile_inputs = quarantined_inputs;
+            // Fence only a contact that is still physically down at this
+            // point. If its release is also quarantined, the fence clears
+            // here and the destination page's first new tap remains usable.
+            runtime.suppress_mobile_input_until_release = suppress_until_release;
+        }
+        UiServerEventPayload::FocusChanged { .. }
+        | UiServerEventPayload::AppearanceChanged { .. }
+        | UiServerEventPayload::ClockChanged { .. }
+        | UiServerEventPayload::BootNotificationChanged { .. }
+        | UiServerEventPayload::SystemUiChanged { .. }
+        | UiServerEventPayload::SystemUiRequestCompleted { .. } => {
+            if runtime.deferred_payloads.push(payload).is_err() {
+                fail(FAIL_SURFACE_PROTOCOL);
+            }
+        }
+        UiServerEventPayload::Ready
+        | UiServerEventPayload::Degraded { .. }
+        | UiServerEventPayload::Presented { .. }
+        | UiServerEventPayload::PresentCancelled { .. } => fail(FAIL_SURFACE_PROTOCOL),
+    }
+}
+
+#[cfg(all(
+    feature = "mobile-ui-runtime",
+    not(feature = "androidbox-apk-install0")
+))]
+fn current_mobile_frame_epoch(
+    runtime: &AppRuntime,
+    client: UiClientId,
+) -> Option<MobileFrameEpoch> {
+    Some(MobileFrameEpoch {
+        focus_generation: mobile_render_state_is_current(runtime, client)?,
+        appearance_revision: runtime.delivered_appearance_revision,
+        boot_notification_revision: runtime.delivered_boot_notification_revision,
+        system_ui_revision: runtime.delivered_system_ui_revision,
+        clock_revision: runtime.delivered_clock_revision,
+    })
+}
+
+#[cfg(all(
+    feature = "mobile-ui-runtime",
+    not(feature = "androidbox-apk-install0")
+))]
+fn mobile_frame_epoch_is_current(
+    runtime: &AppRuntime,
+    client: UiClientId,
+    epoch: MobileFrameEpoch,
+) -> bool {
+    current_mobile_frame_epoch(runtime, client) == Some(epoch)
+}
+
+#[cfg(all(
+    feature = "mobile-ui-runtime",
+    not(feature = "androidbox-apk-install0")
+))]
+fn prepare_mobile_frame(
+    runtime: &mut AppRuntime,
+    client: UiClientId,
+    model: MobileModel,
+) -> Option<PreparedMobileFrame> {
+    let epoch = current_mobile_frame_epoch(runtime, client)?;
+    let slot = runtime.next_buffer_slot;
+    if usize::from(slot) >= MOBILE_CLIENT_BUFFER_COUNT {
+        fail(FAIL_SURFACE_PROTOCOL);
+    }
+    let (buffer_generation, damage) =
+        write_mobile_buffer(runtime, slot, model, epoch.focus_generation);
+    runtime.next_buffer_slot = (usize::from(slot) + 1)
+        .checked_rem(MOBILE_CLIENT_BUFFER_COUNT)
+        .and_then(|slot| u8::try_from(slot).ok())
+        .unwrap_or_else(|| fail(FAIL_SURFACE_PROTOCOL));
+    Some(PreparedMobileFrame {
+        client,
+        slot,
+        buffer_generation,
+        epoch,
+        damage,
+    })
+}
+
+#[cfg(all(
+    feature = "mobile-ui-runtime",
+    not(feature = "androidbox-apk-install0")
+))]
+fn submit_mobile_frame(
+    runtime: &mut AppRuntime,
+    prepared: PreparedMobileFrame,
+    disposition: BufferPresentDisposition,
+) -> SubmittedMobileFrame {
     let frame_id = next_app_frame_id(runtime);
     if runtime.events.begin_present(frame_id).is_err() {
         fail(FAIL_SURFACE_PROTOCOL);
     }
-    write_mobile_buffer(runtime, model);
-    let frame = BufferPresent::client_with_system_ui_revision(
+    let mut frame = BufferPresent::client_with_system_ui_revision(
+        frame_id,
+        prepared.epoch.focus_generation,
+        prepared.buffer_generation,
+        prepared.epoch.system_ui_revision,
+    )
+    .and_then(|frame| frame.with_client_buffer_slot(prepared.slot))
+    .unwrap_or_else(|_| fail(FAIL_SURFACE_PROTOCOL));
+    if disposition == BufferPresentDisposition::Present {
+        if let Some(damage) = prepared.damage {
+            frame = frame
+                .with_damage_regions(damage)
+                .unwrap_or_else(|_| fail(FAIL_SURFACE_PROTOCOL));
+        }
+    }
+    if disposition == BufferPresentDisposition::Discard {
+        frame = frame.as_discard();
+    }
+    let buffer = runtime
+        .buffers
+        .get_mut(usize::from(prepared.slot))
+        .filter(|buffer| {
+            buffer.state == MobileMappedBufferState::Queued
+                && buffer.generation == prepared.buffer_generation
+        })
+        .unwrap_or_else(|| fail(FAIL_SURFACE_PROTOCOL));
+    let transfer = buffer.for_server.take();
+    buffer.state = MobileMappedBufferState::Submitted;
+    if disposition == BufferPresentDisposition::Present {
+        begin_mobile_pending_model(prepared.slot, prepared.epoch.focus_generation);
+    }
+    write_buffer_present(runtime.channel.raw(), frame, transfer);
+    SubmittedMobileFrame {
+        prepared,
+        frame_id,
+        disposition,
+    }
+}
+
+#[cfg(all(
+    feature = "mobile-ui-runtime",
+    not(feature = "androidbox-apk-install0")
+))]
+fn await_mobile_submission(
+    runtime: &mut AppRuntime,
+    submitted: SubmittedMobileFrame,
+    input_policy: MobileInputPolicy,
+) -> MobileSubmissionAck {
+    loop {
+        let (sender_pid, event) = read_ui_event(runtime.channel.raw());
+        let payload = accept_mobile_server_event(runtime, sender_pid, event);
+        match payload {
+            UiServerEventPayload::Presented {
+                frame_id: presented_frame,
+                commit: _,
+            } if presented_frame == submitted.frame_id => {
+                if submitted.disposition != BufferPresentDisposition::Present {
+                    fail(FAIL_SURFACE_PROTOCOL);
+                }
+                let buffer = runtime
+                    .buffers
+                    .get_mut(usize::from(submitted.prepared.slot))
+                    .filter(|buffer| buffer.state == MobileMappedBufferState::Submitted)
+                    .unwrap_or_else(|| fail(FAIL_SURFACE_PROTOCOL));
+                buffer.state = MobileMappedBufferState::Writable;
+                finish_mobile_pending_model(
+                    submitted.prepared.slot,
+                    submitted.prepared.epoch.focus_generation,
+                    true,
+                );
+                return MobileSubmissionAck::Presented;
+            }
+            UiServerEventPayload::PresentCancelled {
+                frame_id: cancelled_frame,
+                focus_generation: _,
+            } if cancelled_frame == submitted.frame_id => {
+                let buffer = runtime
+                    .buffers
+                    .get_mut(usize::from(submitted.prepared.slot))
+                    .filter(|buffer| buffer.state == MobileMappedBufferState::Submitted)
+                    .unwrap_or_else(|| fail(FAIL_SURFACE_PROTOCOL));
+                buffer.state = MobileMappedBufferState::Writable;
+                if submitted.disposition == BufferPresentDisposition::Present {
+                    finish_mobile_pending_model(
+                        submitted.prepared.slot,
+                        submitted.prepared.epoch.focus_generation,
+                        false,
+                    );
+                }
+                return MobileSubmissionAck::Cancelled;
+            }
+            UiServerEventPayload::Presented { .. }
+            | UiServerEventPayload::PresentCancelled { .. }
+            | UiServerEventPayload::Ready
+            | UiServerEventPayload::Degraded { .. } => fail(FAIL_SURFACE_PROTOCOL),
+            _ => handle_mobile_present_wait_payload(runtime, payload, input_policy),
+        }
+    }
+}
+
+#[cfg(all(
+    feature = "mobile-ui-runtime",
+    not(feature = "androidbox-apk-install0")
+))]
+fn discard_prepared_mobile_frame(
+    runtime: &mut AppRuntime,
+    prepared: PreparedMobileFrame,
+    input_policy: MobileInputPolicy,
+) {
+    let submitted = submit_mobile_frame(runtime, prepared, BufferPresentDisposition::Discard);
+    if await_mobile_submission(runtime, submitted, input_policy) != MobileSubmissionAck::Cancelled {
+        fail(FAIL_SURFACE_PROTOCOL);
+    }
+}
+
+#[cfg(all(
+    feature = "mobile-ui-runtime",
+    not(feature = "androidbox-apk-install0")
+))]
+fn complete_presented_mobile_frame(
+    runtime: &mut AppRuntime,
+    submitted: SubmittedMobileFrame,
+    input_policy: MobileInputPolicy,
+) -> MobilePresentOutcome {
+    match await_mobile_submission(runtime, submitted, input_policy) {
+        MobileSubmissionAck::Presented
+            if mobile_frame_epoch_is_current(
+                runtime,
+                submitted.prepared.client,
+                submitted.prepared.epoch,
+            ) =>
+        {
+            MobilePresentOutcome::Presented
+        }
+        MobileSubmissionAck::Presented | MobileSubmissionAck::Cancelled => {
+            MobilePresentOutcome::Superseded
+        }
+    }
+}
+
+#[cfg(all(
+    feature = "mobile-ui-runtime",
+    not(feature = "androidbox-apk-install0")
+))]
+fn present_mobile_page_with_input_policy(
+    runtime: &mut AppRuntime,
+    client: UiClientId,
+    model: MobileModel,
+    input_policy: MobileInputPolicy,
+) -> MobilePresentOutcome {
+    let Some(prepared) = prepare_mobile_frame(runtime, client, model) else {
+        return MobilePresentOutcome::Superseded;
+    };
+    if !mobile_frame_epoch_is_current(runtime, client, prepared.epoch) {
+        discard_prepared_mobile_frame(runtime, prepared, input_policy);
+        return MobilePresentOutcome::Superseded;
+    }
+    let submitted = submit_mobile_frame(runtime, prepared, BufferPresentDisposition::Present);
+    complete_presented_mobile_frame(runtime, submitted, input_policy)
+}
+
+#[cfg(all(feature = "mobile-ui-runtime", feature = "androidbox-apk-install0"))]
+fn present_mobile_page_with_input_policy(
+    runtime: &mut AppRuntime,
+    client: UiClientId,
+    model: MobileModel,
+    input_policy: MobileInputPolicy,
+) -> MobilePresentOutcome {
+    let Some(focus_generation) = mobile_render_state_is_current(runtime, client) else {
+        return MobilePresentOutcome::Superseded;
+    };
+    // Every transition frame is bound to the exact delivered SystemUI epoch.
+    // Accepted-but-deferred navigation advances the tracker immediately and
+    // therefore supersedes this frame sequence before another transition step.
+    let frame_id = next_app_frame_id(runtime);
+    if runtime.events.begin_present(frame_id).is_err() {
+        fail(FAIL_SURFACE_PROTOCOL);
+    }
+    let (buffer_generation, damage) = write_mobile_buffer(runtime, model, focus_generation);
+    let mut frame = BufferPresent::client_with_system_ui_revision(
         frame_id,
         focus_generation,
-        runtime.buffer_generation,
+        buffer_generation,
         runtime.delivered_system_ui_revision,
     )
     .unwrap_or_else(|_| fail(FAIL_SURFACE_PROTOCOL));
+    if let Some(damage) = damage {
+        frame = frame
+            .with_damage_regions(damage)
+            .unwrap_or_else(|_| fail(FAIL_SURFACE_PROTOCOL));
+    }
     let transfer = runtime.buffer_for_server.take();
     write_buffer_present(runtime.channel.raw(), frame, transfer);
     loop {
         let (sender_pid, event) = read_ui_event(runtime.channel.raw());
         let payload = accept_mobile_server_event(runtime, sender_pid, event);
         match payload {
-            UiServerEventPayload::Input(_) if input_policy == MobileInputPolicy::Defer => {
-                if runtime.deferred_payloads.push(payload).is_err() {
-                    fail(FAIL_SURFACE_PROTOCOL);
-                }
-            }
-            UiServerEventPayload::Input(sample) => {
-                let (quarantined_inputs, suppress_until_release) =
-                    advance_mobile_transition_input_quarantine(
-                        runtime.quarantined_mobile_inputs,
-                        sample.pressed(),
-                    )
-                    .unwrap_or_else(|| fail(FAIL_SURFACE_PROTOCOL));
-                runtime.quarantined_mobile_inputs = quarantined_inputs;
-                // Fence only a contact that is still physically down at this
-                // point. If its release is also quarantined, the fence clears
-                // here and the destination page's first new tap remains
-                // usable.
-                runtime.suppress_mobile_input_until_release = suppress_until_release;
-            }
-            UiServerEventPayload::FocusChanged { .. }
-            | UiServerEventPayload::AppearanceChanged { .. }
-            | UiServerEventPayload::ClockChanged { .. }
-            | UiServerEventPayload::BootNotificationChanged { .. }
-            | UiServerEventPayload::SystemUiChanged { .. }
-            | UiServerEventPayload::SystemUiRequestCompleted { .. } => {
-                if runtime.deferred_payloads.push(payload).is_err() {
-                    fail(FAIL_SURFACE_PROTOCOL);
-                }
-            }
             UiServerEventPayload::Presented {
                 frame_id: presented_frame,
                 commit: _,
             } if presented_frame == frame_id => {
+                record_mobile_transferred_scene_model(model, focus_generation);
                 if runtime.events.active_client() != Some(client)
                     || runtime.events.last_focus_generation() != Some(u64::from(focus_generation))
                 {
@@ -7747,14 +8750,12 @@ fn present_mobile_page_with_input_policy(
             UiServerEventPayload::PresentCancelled {
                 frame_id: cancelled_frame,
                 focus_generation: _,
-            } if cancelled_frame == frame_id => {
-                return MobilePresentOutcome::Superseded;
-            }
-            UiServerEventPayload::Ready | UiServerEventPayload::Degraded { .. } => {
-                fail(FAIL_SURFACE_PROTOCOL)
-            }
+            } if cancelled_frame == frame_id => return MobilePresentOutcome::Superseded,
             UiServerEventPayload::Presented { .. }
-            | UiServerEventPayload::PresentCancelled { .. } => fail(FAIL_SURFACE_PROTOCOL),
+            | UiServerEventPayload::PresentCancelled { .. }
+            | UiServerEventPayload::Ready
+            | UiServerEventPayload::Degraded { .. } => fail(FAIL_SURFACE_PROTOCOL),
+            _ => handle_mobile_present_wait_payload(runtime, payload, input_policy),
         }
     }
 }
@@ -7785,10 +8786,14 @@ fn observe_mobile_sample(
 fn apply_mobile_appearance(model: &mut MobileModel, appearance: UiAppearance) -> bool {
     let changed = model.dark_theme != appearance.dark_theme()
         || model.alternate_accent != appearance.alternate_accent()
-        || model.software_dimming != appearance.software_dimming();
+        || model.software_dimming != appearance.software_dimming()
+        || model.large_text != appearance.large_text()
+        || model.high_contrast != appearance.high_contrast();
     model.dark_theme = appearance.dark_theme();
     model.alternate_accent = appearance.alternate_accent();
     model.software_dimming = appearance.software_dimming();
+    model.large_text = appearance.large_text();
+    model.high_contrast = appearance.high_contrast();
     changed
 }
 
@@ -7910,7 +8915,105 @@ fn clear_mobile_press_and_present(
     }
 }
 
-#[cfg(feature = "mobile-ui-runtime")]
+#[cfg(all(
+    feature = "mobile-ui-runtime",
+    not(feature = "androidbox-apk-install0")
+))]
+fn present_mobile_transition_sequence(
+    runtime: &mut AppRuntime,
+    client: UiClientId,
+    model: &mut MobileModel,
+    offsets: &[u16],
+    include_stable_frame: bool,
+) -> MobilePresentOutcome {
+    let frame_count = offsets
+        .len()
+        .checked_add(usize::from(include_stable_frame))
+        .unwrap_or_else(|| fail(FAIL_SURFACE_PROTOCOL));
+    if frame_count == 0 {
+        return MobilePresentOutcome::Presented;
+    }
+    let offset_at = |index: usize| {
+        offsets
+            .get(index)
+            .copied()
+            .or_else(|| (include_stable_frame && index == offsets.len()).then_some(0))
+            .unwrap_or_else(|| fail(FAIL_SURFACE_PROTOCOL))
+    };
+
+    if !model.apply(MobileAction::SetPageTransitionOffset(offset_at(0))) {
+        fail(FAIL_SURFACE_PROTOCOL);
+    }
+    let Some(first) = prepare_mobile_frame(runtime, client, *model) else {
+        return MobilePresentOutcome::Superseded;
+    };
+    if !mobile_frame_epoch_is_current(runtime, client, first.epoch) {
+        discard_prepared_mobile_frame(runtime, first, MobileInputPolicy::Quarantine);
+        return MobilePresentOutcome::Superseded;
+    }
+    let mut submitted = submit_mobile_frame(runtime, first, BufferPresentDisposition::Present);
+    let mut index = 0_usize;
+
+    loop {
+        let next_index = index
+            .checked_add(1)
+            .unwrap_or_else(|| fail(FAIL_SURFACE_PROTOCOL));
+        let has_next = next_index < frame_count;
+        let prepared_next = if has_next {
+            if !model.apply(MobileAction::SetPageTransitionOffset(offset_at(next_index))) {
+                fail(FAIL_SURFACE_PROTOCOL);
+            }
+            prepare_mobile_frame(runtime, client, *model)
+        } else {
+            None
+        };
+
+        let outcome =
+            complete_presented_mobile_frame(runtime, submitted, MobileInputPolicy::Quarantine);
+        if outcome != MobilePresentOutcome::Presented {
+            if let Some(prepared) = prepared_next {
+                discard_prepared_mobile_frame(runtime, prepared, MobileInputPolicy::Quarantine);
+            }
+            return MobilePresentOutcome::Superseded;
+        }
+        if !has_next {
+            return MobilePresentOutcome::Presented;
+        }
+        let Some(prepared) = prepared_next else {
+            return MobilePresentOutcome::Superseded;
+        };
+        if !mobile_frame_epoch_is_current(runtime, client, prepared.epoch) {
+            discard_prepared_mobile_frame(runtime, prepared, MobileInputPolicy::Quarantine);
+            return MobilePresentOutcome::Superseded;
+        }
+        submitted = submit_mobile_frame(runtime, prepared, BufferPresentDisposition::Present);
+        index = next_index;
+    }
+}
+
+#[cfg(all(
+    feature = "mobile-ui-runtime",
+    not(feature = "androidbox-apk-install0")
+))]
+fn present_mobile_enter_transition(
+    runtime: &mut AppRuntime,
+    client: UiClientId,
+    model: &mut MobileModel,
+) -> MobilePresentOutcome {
+    let outcome = present_mobile_transition_sequence(
+        runtime,
+        client,
+        model,
+        &PAGE_TRANSITION_ENTER_OFFSETS,
+        true,
+    );
+    if outcome != MobilePresentOutcome::Presented {
+        let _ = model.apply(MobileAction::SetPageTransitionOffset(0));
+    }
+    outcome
+}
+
+#[cfg(all(feature = "mobile-ui-runtime", feature = "androidbox-apk-install0"))]
 fn present_mobile_enter_transition(
     runtime: &mut AppRuntime,
     client: UiClientId,
@@ -7937,7 +9040,29 @@ fn present_mobile_enter_transition(
     present_mobile_page_with_input_policy(runtime, client, *model, MobileInputPolicy::Quarantine)
 }
 
-#[cfg(feature = "mobile-ui-runtime")]
+#[cfg(all(
+    feature = "mobile-ui-runtime",
+    not(feature = "androidbox-apk-install0")
+))]
+fn present_mobile_exit_transition(
+    runtime: &mut AppRuntime,
+    client: UiClientId,
+    model: &mut MobileModel,
+) -> MobilePresentOutcome {
+    let outcome = present_mobile_transition_sequence(
+        runtime,
+        client,
+        model,
+        &PAGE_TRANSITION_EXIT_OFFSETS,
+        false,
+    );
+    if outcome != MobilePresentOutcome::Presented {
+        let _ = model.apply(MobileAction::SetPageTransitionOffset(0));
+    }
+    outcome
+}
+
+#[cfg(all(feature = "mobile-ui-runtime", feature = "androidbox-apk-install0"))]
 fn present_mobile_exit_transition(
     runtime: &mut AppRuntime,
     client: UiClientId,
@@ -7974,7 +9099,11 @@ fn shell_app_for_page(page: MobilePage) -> Option<ShellAppId> {
     match page {
         MobilePage::Phone => Some(ShellAppId::Phone),
         MobilePage::Messages => Some(ShellAppId::Messages),
-        MobilePage::Settings | MobilePage::Apps | MobilePage::About => Some(ShellAppId::Settings),
+        MobilePage::Settings
+        | MobilePage::Apps
+        | MobilePage::About
+        | MobilePage::Display
+        | MobilePage::Accessibility => Some(ShellAppId::Settings),
         MobilePage::Lock | MobilePage::Home | MobilePage::Calculator | MobilePage::AndroidDemo => {
             None
         }
@@ -8890,6 +10019,11 @@ fn mobile_launcher_loop(startup: u64) -> ! {
         fail(FAIL_SURFACE_PROTOCOL);
     }
     let mut runtime = create_mobile_graphics_runtime(channel, server_pid, events);
+    #[cfg(all(
+        feature = "mobile-ui-runtime",
+        not(feature = "androidbox-apk-install0")
+    ))]
+    provision_mobile_mapped_buffers(&mut runtime, UiClientId::Launcher);
     let mut model = MobileModel::locked();
     #[cfg(feature = "androidbox-apk-install0")]
     let _ = refresh_android_installed_catalog(&mut model, None);
@@ -9269,6 +10403,34 @@ fn mobile_launcher_loop(startup: u64) -> ! {
                         }
                         touch = TouchController::new();
                     }
+                    MobileAction::DismissRecentApp => {
+                        clear_mobile_press_and_present(
+                            &mut runtime,
+                            UiClientId::Launcher,
+                            &mut model,
+                        );
+                        #[cfg(feature = "androidbox-apk-install0")]
+                        if compatible_activity_operation.is_some() {
+                            touch = TouchController::new();
+                            continue;
+                        }
+                        let Some(recent) = model.system_ui_recent else {
+                            touch = TouchController::new();
+                            continue;
+                        };
+                        if model.system_ui_mode != UiSystemUiMode::Overview
+                            || model.system_nav_pressed
+                        {
+                            touch = TouchController::new();
+                            continue;
+                        }
+                        request_mobile_system_ui_recent(
+                            &mut runtime,
+                            UiSystemUiAction::DismissRecent,
+                            Some(recent),
+                        );
+                        touch = TouchController::new();
+                    }
                     MobileAction::CloseOverview | MobileAction::Back
                         if model.overview_open()
                             && !model.shade_open
@@ -9307,6 +10469,7 @@ fn mobile_launcher_loop(startup: u64) -> ! {
                     | MobileAction::SetDrawerReveal(_)
                     | MobileAction::SetUnlockReveal(_)
                     | MobileAction::SetBootNotificationOffset(_)
+                    | MobileAction::SetOverviewRecentOffset(_)
                     | MobileAction::SetPageTransitionOffset(_)
                     | MobileAction::SetPageScroll { .. }
                     | MobileAction::SetBackReveal { .. }
@@ -9340,6 +10503,30 @@ fn mobile_launcher_loop(startup: u64) -> ! {
                             &mut model,
                         );
                         request_mobile_appearance(&mut runtime, software_dimming_action(level));
+                    }
+                    MobileAction::ToggleLargeText => {
+                        clear_mobile_press_and_present(
+                            &mut runtime,
+                            UiClientId::Launcher,
+                            &mut model,
+                        );
+                        request_mobile_appearance(
+                            &mut runtime,
+                            UiAppearanceAction::ToggleLargeText,
+                        );
+                        touch = TouchController::new();
+                    }
+                    MobileAction::ToggleHighContrast => {
+                        clear_mobile_press_and_present(
+                            &mut runtime,
+                            UiClientId::Launcher,
+                            &mut model,
+                        );
+                        request_mobile_appearance(
+                            &mut runtime,
+                            UiAppearanceAction::ToggleHighContrast,
+                        );
+                        touch = TouchController::new();
                     }
                     MobileAction::ActivateBootNotification => {
                         // A visual Lock is not navigation authority. This
@@ -10050,7 +11237,11 @@ fn mobile_app_loop(startup: u64) -> ! {
                     | MobileAction::Open(MobilePage::Home)
                     | MobileAction::Open(MobilePage::Lock) => {}
                     MobileAction::Open(
-                        MobilePage::Settings | MobilePage::Apps | MobilePage::About,
+                        MobilePage::Settings
+                        | MobilePage::Apps
+                        | MobilePage::About
+                        | MobilePage::Display
+                        | MobilePage::Accessibility,
                     )
                     | MobileAction::Back
                     | MobileAction::OpenShade
@@ -10066,6 +11257,7 @@ fn mobile_app_loop(startup: u64) -> ! {
                     | MobileAction::SetDrawerReveal(_)
                     | MobileAction::SetUnlockReveal(_)
                     | MobileAction::SetBootNotificationOffset(_)
+                    | MobileAction::SetOverviewRecentOffset(_)
                     | MobileAction::SetPageTransitionOffset(_)
                     | MobileAction::SetPageScroll { .. }
                     | MobileAction::SetBackReveal { .. }
@@ -10087,6 +11279,22 @@ fn mobile_app_loop(startup: u64) -> ! {
                     MobileAction::SetSoftwareDimming(level) => {
                         clear_mobile_press_and_present(&mut runtime, UiClientId::App, &mut model);
                         request_mobile_appearance(&mut runtime, software_dimming_action(level));
+                    }
+                    MobileAction::ToggleLargeText => {
+                        clear_mobile_press_and_present(&mut runtime, UiClientId::App, &mut model);
+                        request_mobile_appearance(
+                            &mut runtime,
+                            UiAppearanceAction::ToggleLargeText,
+                        );
+                        touch = TouchController::new();
+                    }
+                    MobileAction::ToggleHighContrast => {
+                        clear_mobile_press_and_present(&mut runtime, UiClientId::App, &mut model);
+                        request_mobile_appearance(
+                            &mut runtime,
+                            UiAppearanceAction::ToggleHighContrast,
+                        );
+                        touch = TouchController::new();
                     }
                     MobileAction::ActivateBootNotification => {
                         if model.page != MobilePage::Lock && model.apply(action) {
@@ -10404,6 +11612,7 @@ fn mobile_app_loop(startup: u64) -> ! {
                     }
                     MobileAction::Unlock
                     | MobileAction::ActivateRecentApp
+                    | MobileAction::DismissRecentApp
                     | MobileAction::CloseOverview
                     | MobileAction::LaunchInstalledAndroid(_)
                     | MobileAction::ExecuteAndroidBoxDex => {}
@@ -10871,6 +12080,94 @@ fn app_loop(startup: u64) -> ! {
 /// cancellation path: neither the client-local nor global frame sequence is
 /// consumed, and the same client frame id remains available for the first
 /// focused render.
+#[cfg(all(
+    feature = "mobile-ui-runtime",
+    not(feature = "androidbox-apk-install0")
+))]
+fn provision_mobile_mapped_buffers(runtime: &mut AppRuntime, client: UiClientId) {
+    if runtime.events.active_client() != Some(UiClientId::Launcher)
+        || runtime.events.active_app().is_some()
+        || runtime.events.last_focus_generation() != Some(1)
+        || runtime.events.last_frame_id().is_some()
+        || runtime.events.outstanding_frame_id().is_some()
+        || runtime.next_buffer_slot != 0
+        || runtime.buffers.iter().any(|buffer| {
+            buffer.generation != 0
+                || buffer.state != MobileMappedBufferState::Writable
+                || buffer.for_server.is_none()
+        })
+    {
+        fail(FAIL_SURFACE_PROTOCOL);
+    }
+    let epoch = MobileFrameEpoch {
+        focus_generation: 1,
+        appearance_revision: runtime.delivered_appearance_revision,
+        boot_notification_revision: runtime.delivered_boot_notification_revision,
+        system_ui_revision: runtime.delivered_system_ui_revision,
+        clock_revision: runtime.delivered_clock_revision,
+    };
+    let mut prepared = [None; MOBILE_CLIENT_BUFFER_COUNT];
+    for (slot, prepared_slot) in prepared.iter_mut().enumerate() {
+        let buffer = &mut runtime.buffers[slot];
+        // Every fresh mappable backing is fully scrubbed and therefore a valid
+        // black XRGB8888 frame. Queue both slots before either discard is
+        // submitted so the two-deep pool is established deterministically,
+        // independent of whether SurfaceServer happens to run between the two
+        // producer syscalls. The following explicit discards then register the
+        // attenuated server handles without consuming a compositor id or
+        // frame-clock grant.
+        let queued = syscall(
+            SyscallNumber::GraphicsBufferQueue,
+            buffer.handle.raw(),
+            0,
+            GRAPHICS_BUFFER_QUEUE_FLAGS_NONE,
+        );
+        if queued.status != Status::Ok.raw() || queued.out1 != 1 || queued.out2 != 0 {
+            fail(FAIL_SURFACE_PROTOCOL);
+        }
+        buffer.generation = queued.out1;
+        buffer.state = MobileMappedBufferState::Queued;
+        *prepared_slot = Some(PreparedMobileFrame {
+            client,
+            slot: u8::try_from(slot).unwrap_or_else(|_| fail(FAIL_SURFACE_PROTOCOL)),
+            buffer_generation: queued.out1,
+            epoch,
+            damage: None,
+        });
+    }
+    for prepared in prepared {
+        discard_prepared_mobile_frame(
+            runtime,
+            prepared.unwrap_or_else(|| fail(FAIL_SURFACE_PROTOCOL)),
+            MobileInputPolicy::Defer,
+        );
+    }
+    runtime.next_buffer_slot = 0;
+    if runtime.events.last_frame_id().is_some()
+        || runtime.events.last_commit().is_some()
+        || runtime.events.outstanding_frame_id().is_some()
+        || runtime.buffers.iter().any(|buffer| {
+            buffer.generation != 1
+                || buffer.state != MobileMappedBufferState::Writable
+                || buffer.for_server.is_some()
+        })
+    {
+        fail(FAIL_SURFACE_PROTOCOL);
+    }
+}
+
+#[cfg(all(
+    feature = "mobile-ui-runtime",
+    not(feature = "androidbox-apk-install0")
+))]
+fn provision_app_buffer_while_unfocused(runtime: &mut AppRuntime) {
+    provision_mobile_mapped_buffers(runtime, UiClientId::App);
+}
+
+#[cfg(not(all(
+    feature = "mobile-ui-runtime",
+    not(feature = "androidbox-apk-install0")
+)))]
 fn provision_app_buffer_while_unfocused(runtime: &mut AppRuntime) {
     if runtime.events.active_client() != Some(UiClientId::Launcher)
         || runtime.events.active_app().is_some()
@@ -10882,18 +12179,23 @@ fn provision_app_buffer_while_unfocused(runtime: &mut AppRuntime) {
         fail(FAIL_SURFACE_PROTOCOL);
     }
 
-    let seed = COLOR_PHONE_SCREEN.to_le_bytes();
-    let written = syscall(
-        SyscallNumber::GraphicsBufferWrite,
-        runtime.buffer.raw(),
-        seed.as_ptr() as u64,
-        pack_graphics_buffer_write(0, seed.len() as u32),
-    );
-    if written.status != Status::Ok.raw() || written.out1 != seed.len() as u64 || written.out2 != 1
-    {
-        fail(FAIL_SURFACE_PROTOCOL);
-    }
-    runtime.buffer_generation = written.out2;
+    let first_generation = {
+        let seed = COLOR_PHONE_SCREEN.to_le_bytes();
+        let written = syscall(
+            SyscallNumber::GraphicsBufferWrite,
+            runtime.buffer.raw(),
+            seed.as_ptr() as u64,
+            pack_graphics_buffer_write(0, seed.len() as u32),
+        );
+        if written.status != Status::Ok.raw()
+            || written.out1 != seed.len() as u64
+            || written.out2 != 1
+        {
+            fail(FAIL_SURFACE_PROTOCOL);
+        }
+        written.out2
+    };
+    runtime.buffer_generation = first_generation;
 
     let frame_id = 1;
     if runtime.events.begin_present(frame_id).is_err() {

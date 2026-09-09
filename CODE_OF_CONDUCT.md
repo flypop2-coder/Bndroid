@@ -1,31 +1,27 @@
-# 社区行为准则
+# Code of Conduct
 
-Bndroid OS 希望成为一个认真、克制、可持续的研究社区。参与 issue、PR、讨论、群聊
-或其他项目相关空间时，请遵守本准则。
+Bndroid OS aims to support a respectful, sustainable research community. These standards apply to issues, pull requests, discussions, chat, and other project spaces.
 
-## 我们鼓励
+## Expected behavior
 
-- 围绕代码、证据、测试和架构边界讨论问题。
-- 尊重不同经验水平的贡献者。
-- 清楚说明分歧，给出可复现材料。
-- 发现风险时及时提醒，并帮助收敛方案。
-- 对新贡献者保持耐心。
+- Discuss code, evidence, tests, and architecture constructively.
+- Respect contributors with different experience levels.
+- Explain disagreements and provide reproducible examples.
+- Report risks promptly and help resolve them.
+- Be patient with new contributors.
 
-## 我们不接受
+## Unacceptable behavior
 
-- 人身攻击、骚扰、歧视、威胁或持续挑衅。
-- 鼓励破坏、攻击、滥用、绕过授权或违法用途。
-- 泄露他人隐私、凭据、未公开漏洞细节或敏感材料。
-- 在 issue/PR 中反复刷屏、引战或发布与项目无关内容。
-- 冒充维护者、伪造结论或误导社区。
+- Personal attacks, harassment, discrimination, threats, or repeated provocation.
+- Encouraging attacks, abuse, unauthorized access, or illegal activity.
+- Disclosing another person's private data, credentials, confidential vulnerabilities, or sensitive materials.
+- Spam, repeated disruption, or unrelated content in issues and pull requests.
+- Impersonating maintainers, fabricating results, or misleading the community.
 
-## 执行方式
+## Enforcement
 
-维护者可以编辑、隐藏或删除违反准则的内容；也可以临时或永久限制相关账号参与项目
-空间。严重安全问题会优先按 [SECURITY.md](SECURITY.md) 处理。
+Maintainers may edit, hide, or remove content that violates these standards and may temporarily or permanently restrict participation. Serious security concerns take priority under [SECURITY.md](SECURITY.md).
 
-## 报告
+## Reporting
 
-如果你遇到违反准则的行为，请通过 GitHub issue、私下联系维护者，或使用
-[SECURITY.md](SECURITY.md) 中的安全报告渠道。报告时尽量提供链接、截图、时间和
-上下文。
+Report violations through a GitHub issue, a private message to a maintainer, or the security reporting process in [SECURITY.md](SECURITY.md). Include relevant links, timestamps, context, and screenshots when appropriate. Keep sensitive details out of public reports.

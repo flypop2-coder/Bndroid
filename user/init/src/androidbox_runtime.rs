@@ -130,6 +130,10 @@ impl AndroidBoxRuntime {
         self.activity_view
     }
 
+    /// Keeps archive admission off the long-lived Launcher event-loop frame.
+    /// `AndroidBox::load` owns a bounded multi-page parser workspace, so this
+    /// call boundary is also part of the EL0 stack-guard contract.
+    #[inline(never)]
     pub(super) fn boot(&mut self) -> Result<AndroidBoxRun, AndroidBoxViewState> {
         if self.program.is_some() {
             return Err(self.view);
@@ -147,6 +151,7 @@ impl AndroidBoxRuntime {
         Ok(run)
     }
 
+    #[inline(never)]
     pub(super) fn on_tap(&mut self) -> Result<AndroidBoxRun, AndroidBoxViewState> {
         let Some(program) = self.program else {
             self.view.verified = false;
@@ -172,6 +177,7 @@ impl AndroidBoxRuntime {
     // failure so the Launcher can render the exact authoritative error
     // without allocation or a second fallible lookup.
     #[allow(clippy::result_large_err)]
+    #[inline(never)]
     pub(super) fn launch_activity(
         &mut self,
     ) -> Result<AndroidBoxActivityRun, AndroidBoxActivityViewState> {
@@ -387,25 +393,29 @@ fn map_error(error: AndroidBoxCoreError) -> AndroidBoxError {
         DexFrameworkUnknownMethod, DexHeader, DexInstructionLimit, DexMagic, DexMap,
         DexMethodDuplicate, DexMethodFlags, DexMethodMissing, DexNativeOrAbstract, DexNoReturn,
         DexPrototype, DexRegisterLimit, DexSignature, DexString, DexTooLarge, DexUnknownOpcode,
-        DexViewTextTooLong, LayoutAttribute, LayoutEntryName, LayoutHeader, LayoutResourceMap,
-        LayoutStringPool, LayoutStructure, LayoutTextViewDuplicate, LayoutTextViewMissing,
-        LayoutTooLarge, LayoutUnknownChunk, ManifestActivityDuplicate, ManifestActivityInvalid,
+        DexViewTextTooLong, LauncherIconEntryName, LauncherIconPng, LauncherIconTooLarge,
+        LayoutAttribute, LayoutEntryName, LayoutHeader, LayoutResourceMap, LayoutStringPool,
+        LayoutStructure, LayoutTextViewDuplicate, LayoutTextViewMissing, LayoutTooLarge,
+        LayoutUnknownChunk, ManifestActivityDuplicate, ManifestActivityInvalid,
         ManifestActivityMissing, ManifestActivityNotExported, ManifestApplicationDuplicate,
-        ManifestApplicationMissing, ManifestAttribute, ManifestHeader, ManifestLauncherInvalid,
-        ManifestPackageDuplicate, ManifestPackageInvalid, ManifestPackageMissing,
-        ManifestResourceMap, ManifestString, ManifestStringPool, ManifestStructure,
-        ManifestTooLarge, ManifestUnknownChunk, ManifestUnknownElement,
+        ManifestApplicationMissing, ManifestAttribute, ManifestCatalogComponentInvalid,
+        ManifestCatalogIntentFilterInvalid, ManifestCatalogPermissionInvalid,
+        ManifestCatalogTooManyComponents, ManifestCatalogTooManyPermissions, ManifestHeader,
+        ManifestLauncherInvalid, ManifestPackageDuplicate, ManifestPackageInvalid,
+        ManifestPackageMissing, ManifestResourceMap, ManifestString, ManifestStringPool,
+        ManifestStructure, ManifestTooLarge, ManifestUnknownChunk, ManifestUnknownElement,
         ManifestVersionCodeDuplicate, ManifestVersionCodeInvalid, ManifestVersionCodeMissing,
         ResourceConfigurationAmbiguous, ResourceEntry, ResourceIdInvalid, ResourceNotFound,
         ResourcePackage, ResourceReference, ResourceString, ResourceStringPool,
         ResourceStringTooLong, ResourceTableHeader, ResourceTableTooLarge, ResourceType,
         ResourceValueType, Zip64Unsupported, ZipCentralDirectoryBounds, ZipCentralHeaderInvalid,
         ZipCompressedDex, ZipCompressedManifest, ZipCompressionUnsupported, ZipCrcMismatch,
-        ZipDataDescriptorUnsupported, ZipDuplicateDex, ZipDuplicateLayout, ZipDuplicateManifest,
-        ZipDuplicateResources, ZipEncrypted, ZipEndRecordInvalid, ZipEndRecordMissing,
-        ZipEntryBounds, ZipEntryMismatch, ZipExtraInvalid, ZipLocalHeaderInvalid, ZipMissingDex,
-        ZipMissingLayout, ZipMissingManifest, ZipMissingResources, ZipNameTooLong,
-        ZipTooManyEntries,
+        ZipDataDescriptorInvalid, ZipDataDescriptorUnsupported, ZipDeflateInvalid, ZipDuplicateDex,
+        ZipDuplicateLauncherIcon, ZipDuplicateLayout, ZipDuplicateManifest, ZipDuplicateResources,
+        ZipEncrypted, ZipEndRecordInvalid, ZipEndRecordMissing, ZipEntryBounds, ZipEntryMismatch,
+        ZipEntryOverlap, ZipExtraInvalid, ZipInflatedEntryTooLarge, ZipLocalHeaderInvalid,
+        ZipMissingDex, ZipMissingLauncherIcon, ZipMissingLayout, ZipMissingManifest,
+        ZipMissingResources, ZipNameTooLong, ZipTooManyEntries,
     };
 
     match error {
@@ -422,8 +432,12 @@ fn map_error(error: AndroidBoxCoreError) -> AndroidBoxError {
         | ZipExtraInvalid
         | ZipEncrypted
         | ZipDataDescriptorUnsupported
+        | ZipDataDescriptorInvalid
         | ZipCompressionUnsupported
         | ZipCompressedDex
+        | ZipDeflateInvalid
+        | ZipInflatedEntryTooLarge
+        | ZipEntryOverlap
         | ZipEntryMismatch
         | ZipCrcMismatch
         | ZipMissingDex
@@ -464,6 +478,11 @@ fn map_error(error: AndroidBoxCoreError) -> AndroidBoxError {
         | ManifestActivityInvalid
         | ManifestActivityNotExported
         | ManifestLauncherInvalid
+        | ManifestCatalogTooManyComponents
+        | ManifestCatalogTooManyPermissions
+        | ManifestCatalogComponentInvalid
+        | ManifestCatalogPermissionInvalid
+        | ManifestCatalogIntentFilterInvalid
         | DexActivityClassMissing
         | DexActivityClassDuplicate
         | DexActivityClassInvalid
@@ -476,6 +495,8 @@ fn map_error(error: AndroidBoxCoreError) -> AndroidBoxError {
         | ZipDuplicateResources
         | ZipMissingLayout
         | ZipDuplicateLayout
+        | ZipMissingLauncherIcon
+        | ZipDuplicateLauncherIcon
         | ResourceTableTooLarge
         | ResourceTableHeader
         | ResourceStringPool
@@ -489,6 +510,9 @@ fn map_error(error: AndroidBoxCoreError) -> AndroidBoxError {
         | ResourceValueType
         | ResourceReference
         | ResourceConfigurationAmbiguous
+        | LauncherIconTooLarge
+        | LauncherIconEntryName
+        | LauncherIconPng
         | LayoutTooLarge
         | LayoutEntryName
         | LayoutHeader

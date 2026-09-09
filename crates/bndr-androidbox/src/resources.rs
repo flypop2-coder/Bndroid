@@ -37,7 +37,9 @@ const STRING_POOL_SORTED_FLAG: u32 = 1;
 const STRING_POOL_UTF8_FLAG: u32 = 1 << 8;
 const TYPE_REFERENCE: u8 = 0x01;
 const TYPE_STRING: u8 = 0x03;
+#[cfg(feature = "androidbox-layout-weight15")]
 const TYPE_FLOAT: u8 = 0x04;
+#[cfg(feature = "androidbox-layout-weight15")]
 const TYPE_DIMENSION: u8 = 0x05;
 const TYPE_INT_DEC: u8 = 0x10;
 const TYPE_INT_BOOLEAN: u8 = 0x12;
@@ -908,10 +910,10 @@ fn parse_activity_scene(bytes: &[u8]) -> Result<ActivityScene, Error> {
                 #[cfg(feature = "androidbox-layout-mixed19")]
                 if let Some(parent_index) = parent {
                     let parent_node = scene.node(parent_index).ok_or(Error::LayoutStructure)?;
-                    if parent_node.orientation == LayoutOrientation::Horizontal {
-                        if !mixed_horizontal_child_is_canonical(parsed.node) {
-                            return Err(Error::LayoutAttribute);
-                        }
+                    if parent_node.orientation == LayoutOrientation::Horizontal
+                        && !mixed_horizontal_child_is_canonical(parsed.node)
+                    {
+                        return Err(Error::LayoutAttribute);
                     }
                 }
                 if parsed.node.id != 0 && scene.nodes().iter().any(|node| node.id == parsed.node.id)

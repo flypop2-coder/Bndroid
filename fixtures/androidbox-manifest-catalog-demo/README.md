@@ -140,6 +140,14 @@ SHA-256
 `6425592a64ab1d4d82796dc888ef0a973d63ddffd9a5f6d474793d537cd60493`.
 Modes `0` through `4` remain available for parent-profile regressions.
 
+ABI69's Layout Mixed-19 gate sets `BNDROID_ANDROID_LAYOUT_ROWS=6`. It selects
+`res-mixed/layout/activity_catalog.xml`, retaining ABI68's exact sizes and
+ABI67's directional spacing while compiling the first Button as fixed
+`132dp` with no weight and the second as `0dp + weight=1`. The exact
+version-1 ABI69 APK is 12,728 bytes with SHA-256
+`d9cad51cd361137ebc6c4e3ffdb10d8b86b964141592971065641656a95e6046`.
+Modes `0` through `5` remain available for parent-profile regressions.
+
 The build uses the repository's existing test-only v2 signing identity and
 writes only the canonical APK/SHA file under this fixture plus disposable
 artifacts under `target/androidbox-manifest-catalog-demo-build`.

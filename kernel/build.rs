@@ -127,6 +127,14 @@ fn main() {
         // backing. Keep that opt-in profile inside an explicit 24 MiB
         // non-executable BSS window without relaxing predecessor profiles.
         "0x41e00000"
+    } else if env::var_os("CARGO_FEATURE_MOBILE_UI_RUNTIME").is_some()
+        && env::var_os("CARGO_FEATURE_ANDROIDBOX_APK_INSTALL0").is_none()
+    {
+        // The mapped mobile frame transaction owns four fixed 4,608,000-byte
+        // backings (two each for Launcher and App). Keep this exact opt-in
+        // profile inside a 34 MiB RW/NX window; all copy-backed and historical
+        // profiles retain their narrower limits.
+        "0x42200000"
     } else {
         "0x41800000"
     };

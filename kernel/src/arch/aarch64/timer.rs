@@ -157,7 +157,7 @@ pub fn tick_count() -> u64 {
 /// Returns the completed 100 Hz logical timer tick used by software pacing.
 #[cfg_attr(
     not(all(
-        feature = "graphics-frame-clock-runtime",
+        feature = "surface-frame-pacing",
         not(feature = "graphics-owner-death-runtime"),
         not(feature = "app-crash-recovery-runtime")
     )),

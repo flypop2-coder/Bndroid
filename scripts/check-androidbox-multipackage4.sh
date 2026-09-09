@@ -201,6 +201,7 @@ INITIAL_IMAGE="$ARTIFACT_DIR/packages.initial.raw"
 DISK_IMAGE="$ARTIFACT_DIR/packages.raw"
 KERNEL_IMAGE="$TARGET_ROOT/aarch64-unknown-none/release/bndroid-kernel.img"
 SUMMARY="$ARTIFACT_DIR/summary.txt"
+COPY_EVIDENCE="$ARTIFACT_DIR/copy-evidence.json"
 RASTER_EVIDENCE="$ARTIFACT_DIR/raster-evidence.txt"
 DEX_METHOD_RASTER_EVIDENCE="$ARTIFACT_DIR/dex-method-raster-evidence.txt"
 
@@ -295,7 +296,7 @@ qmp() {
 }
 
 canonical_ppm() {
-  python3 - "$1" <<'PY'
+  python3 - "$1" "${2:-any}" <<'PY'
 from pathlib import Path
 import sys
 
@@ -308,18 +309,28 @@ if len(pixels) != 720 * 1600 * 3:
     raise SystemExit(1)
 if len({pixels[index:index + 3] for index in range(0, len(pixels), 3)}) < 80:
     raise SystemExit(1)
+if sys.argv[2] == "drawer":
+    # The default appearance's settled handle is at y=160. A held reveal or
+    # the last outstanding Home frame must never satisfy this visual fence.
+    for x in (300, 360, 420):
+        offset = (160 * 720 + x) * 3
+        if pixels[offset:offset + 3] != bytes.fromhex("a6b2c8"):
+            raise SystemExit(1)
+elif sys.argv[2] != "any":
+    raise SystemExit("unknown screenshot predicate")
 PY
 }
 
 take_screenshot() {
   local screenshot="$1"
   local different_from="${2:-}"
+  local expected_view="${3:-any}"
   local deadline=$((SECONDS + BOOT_TIMEOUT_SECONDS))
   qmp move 700 1500
   while ((SECONDS < deadline)); do
     reject_bad_output
     qmp screenshot "$screenshot"
-    if canonical_ppm "$screenshot" \
+    if canonical_ppm "$screenshot" "$expected_view" \
       && { [[ -z "$different_from" ]] || ! cmp -s "$different_from" "$screenshot"; }; then
       return
     fi
@@ -480,30 +491,42 @@ verify_two_package_settings_selection() {
 }
 
 return_home_and_open_drawer() {
+  local expected_recent="$1"
   local before
+  local home_states_before
+  home_states_before="$(log_count "^UI_SYSTEM_UI_CHANGED_OK .* receiver_image=launcher .* mode=home recent_app=${expected_recent} nav_pressed=0 nav_reveal_px=0 ")"
+  before="$(log_count "^USER_SURFACE_LAYERED_COMMIT_OK .* content_producer_pid=${LAUNCHER_PID} ")"
   qmp tap 360 1570
+  wait_for_count \
+    "^UI_SYSTEM_UI_CHANGED_OK .* receiver_image=launcher .* mode=home recent_app=${expected_recent} nav_pressed=0 nav_reveal_px=0 " \
+    "$((home_states_before + 1))" \
+    "the fresh Launcher Home state"
   wait_for_pattern \
     '^UI_ROUTE_FOCUS_OK .* receiver_image=launcher .* active_client=launcher app=none ' \
     "Launcher focus"
   wait_for_pattern \
     '^ANDROID_PACKAGE_DIRECTORY_READ_OK image=6 bytes=1344 revision=[1-9][0-9]* installed_count=2 authority_granted=0 apk_bytes_exposed=0$' \
     "the two-entry Launcher directory"
-  before="$(log_count "^USER_SURFACE_LAYERED_COMMIT_OK .* content_producer_pid=${LAUNCHER_PID} ")"
-  qmp drag 360 1280 360 520
   wait_for_count \
     "^USER_SURFACE_LAYERED_COMMIT_OK .* content_producer_pid=${LAUNCHER_PID} " \
-    "$((before + 4))" \
-    "the two-app drawer"
+    "$((before + 1))" \
+    "the fresh Launcher Home frame"
+  open_drawer_from_home
 }
 
 open_drawer_from_home() {
   local before
   before="$(log_count "^USER_SURFACE_LAYERED_COMMIT_OK .* content_producer_pid=${LAUNCHER_PID} ")"
   qmp drag 360 1280 360 520
+  # One held reveal plus one settled release. The blank down location has no
+  # pressed frame; waiting for four commits would count unrelated minute ticks.
   wait_for_count \
     "^USER_SURFACE_LAYERED_COMMIT_OK .* content_producer_pid=${LAUNCHER_PID} " \
-    "$((before + 4))" \
+    "$((before + 2))" \
     "the two-app drawer"
+  # Count alone can include an outstanding unlock/Home frame. Require the
+  # actual settled geometry before capturing icons or tapping an installed app.
+  take_screenshot "$ARTIFACT_DIR/drawer-ready.ppm" "" drawer
 }
 
 launch_drawer_app() {
@@ -561,6 +584,40 @@ launch_drawer_app() {
       "the rejected callback frames"
     take_screenshot "$rejected" "$approved"
   fi
+}
+
+capture_compatible_overview() {
+  local screenshot="$1"
+  local home_states_before
+  local overview_states_before
+  local before
+
+  home_states_before="$(log_count '^UI_SYSTEM_UI_CHANGED_OK .* receiver_image=launcher .* mode=home recent_app=android-compatible nav_pressed=0 nav_reveal_px=0 ')"
+  before="$(log_count "^USER_SURFACE_LAYERED_COMMIT_OK .* content_producer_pid=${LAUNCHER_PID} ")"
+  qmp tap 360 1570
+  wait_for_count \
+    '^UI_SYSTEM_UI_CHANGED_OK .* receiver_image=launcher .* mode=home recent_app=android-compatible nav_pressed=0 nav_reveal_px=0 ' \
+    "$((home_states_before + 1))" \
+    "Home retaining the compatible Catalog identity"
+  wait_for_count \
+    "^USER_SURFACE_LAYERED_COMMIT_OK .* content_producer_pid=${LAUNCHER_PID} " \
+    "$((before + 1))" \
+    "the Home frame before compatible Overview"
+
+  overview_states_before="$(log_count '^UI_SYSTEM_UI_CHANGED_OK .* receiver_image=launcher .* mode=overview recent_app=android-compatible nav_pressed=0 nav_reveal_px=0 ')"
+  before="$(log_count "^USER_SURFACE_LAYERED_COMMIT_OK .* content_producer_pid=${LAUNCHER_PID} ")"
+  qmp touch-down 360 1570
+  qmp touch-move 360 1330
+  qmp touch-up
+  wait_for_count \
+    '^UI_SYSTEM_UI_CHANGED_OK .* receiver_image=launcher .* mode=overview recent_app=android-compatible nav_pressed=0 nav_reveal_px=0 ' \
+    "$((overview_states_before + 1))" \
+    "the compatible Catalog Overview state"
+  wait_for_count \
+    "^USER_SURFACE_LAYERED_COMMIT_OK .* content_producer_pid=${LAUNCHER_PID} " \
+    "$((before + 1))" \
+    "the compatible Catalog Overview frame"
+  take_screenshot "$screenshot"
 }
 
 # Build two distinct real SDK APKs offline with the repository test signer.
@@ -635,11 +692,12 @@ TWO_PACKAGE_DISK_SHA256="$(shasum -a 256 "$DISK_IMAGE" | awk '{print $1}')"
 [[ "$TWO_PACKAGE_DISK_SHA256" != "$ONE_PACKAGE_DISK_SHA256" ]] \
   || fail_gate "The second package did not change the package disk."
 verify_two_package_settings_selection
-return_home_and_open_drawer
+return_home_and_open_drawer settings
 take_screenshot "$ARTIFACT_DIR/two-app-drawer.ppm"
 launch_drawer_app 1 276 "$CATALOG_PACKAGE" "$CATALOG_ACTIVITY" \
   "$ARTIFACT_DIR/catalog-activity.ppm" 1
-return_home_and_open_drawer
+capture_compatible_overview "$ARTIFACT_DIR/catalog-overview.ppm"
+return_home_and_open_drawer android-compatible
 if [[ "$ABI" == 58 ]]; then
   wait_for_pattern \
     "^ANDROID_APP_DEX_METHODS8_RPC_OK .*abi=58 protocol=BNDAPC04 protocol_version=4 .*clicked_button_ids=2130837504/2130837505 update_view_ids=2130837506/2130837506 app_defined_calls=1/1 final_revision=2 errors=0 queues_empty=1$" \
@@ -708,7 +766,8 @@ open_drawer_from_home
 take_screenshot "$ARTIFACT_DIR/recovery-two-app-drawer.ppm"
 launch_drawer_app 1 276 "$CATALOG_PACKAGE" "$CATALOG_ACTIVITY" \
   "$ARTIFACT_DIR/recovery-catalog-activity.ppm" 1
-return_home_and_open_drawer
+capture_compatible_overview "$ARTIFACT_DIR/recovery-catalog-overview.ppm"
+return_home_and_open_drawer android-compatible
 if [[ "$ABI" == 58 ]]; then
   wait_for_pattern \
     "^ANDROID_APP_DEX_METHODS8_RPC_OK .*abi=58 protocol=BNDAPC04 protocol_version=4 .*clicked_button_ids=2130837504/2130837505 update_view_ids=2130837506/2130837506 app_defined_calls=1/1 final_revision=2 errors=0 queues_empty=1$" \
@@ -777,6 +836,8 @@ python3 - \
   "$ARTIFACT_DIR/recovery-two-app-drawer.ppm" \
   "$ARTIFACT_DIR/recovery-catalog-activity.ppm" \
   "$ARTIFACT_DIR/recovery-envelope-activity.ppm" \
+  "$ARTIFACT_DIR/catalog-overview.ppm" \
+  "$ARTIFACT_DIR/recovery-catalog-overview.ppm" \
   "$ABI" \
   "$RASTER_EVIDENCE" <<'PY'
 from hashlib import sha256
@@ -837,6 +898,9 @@ if abi in ("56", "57", "58", "59", "60", "61", "62", "63", "64", "65", "66", "67
     for frame, color in activity_icons:
         if rgb(frame, 640, 84) != color:
             raise SystemExit("the Activity header icon did not match its launched package")
+    for frame in (frames[8], frames[9]):
+        if rgb(frame, 360, 580) != bytes.fromhex("8e24aa"):
+            raise SystemExit("the compatible Overview card did not retain the Catalog APK icon")
 lines = [
     "width=720",
     "height=1600",
@@ -847,10 +911,17 @@ lines = [
 lines.append(f"abi={abi}")
 lines.append(f"apk_launcher_icon_pixels={1 if abi in ('56', '57', '58', '59', '60', '61', '62', '63', '64', '65', '66', '67', '68', '69') else 0}")
 lines.append(f"apk_activity_header_icon_pixels={1 if abi in ('56', '57', '58', '59', '60', '61', '62', '63', '64', '65', '66', '67', '68', '69') else 0}")
+lines.append(f"apk_overview_recent_icon_pixels={1 if abi in ('56', '57', '58', '59', '60', '61', '62', '63', '64', '65', '66', '67', '68', '69') else 0}")
 for path, frame in zip(paths, frames):
     lines.append(f"{path.stem}_sha256={sha256(frame).hexdigest()}")
 Path(output).write_text("\n".join(lines) + "\n", encoding="utf-8")
 PY
+
+OVERVIEW_ICON_PIXELS="$(
+  sed -n 's/^apk_overview_recent_icon_pixels=//p' "$RASTER_EVIDENCE"
+)"
+[[ "$OVERVIEW_ICON_PIXELS" == "$ICON_PIXELS" ]] \
+  || fail_gate "The compatible Overview APK-icon evidence did not match ABI expectations."
 
 DYNAMIC_STRING_TEXTS=false/false
 if [[ "$ABI" == 58 || "$ABI" == 59 || "$ABI" == 60 || "$ABI" == 61 || "$ABI" == 62 || "$ABI" == 63 || "$ABI" == 64 || "$ABI" == 65 || "$ABI" == 66 || "$ABI" == 67 || "$ABI" == 68 || "$ABI" == 69 ]]; then
@@ -1261,6 +1332,12 @@ case "$ABI" in
     ;;
 esac
 
+if [[ "$ABI" == 69 ]]; then
+  python3 "$SCRIPT_DIR/verify-mobile-layer-copy.py" \
+    --callback-pixels 80512 --callback-pixels 77632 \
+    "$BOOT_NORMALIZED_LOG" >"$COPY_EVIDENCE"
+fi
+
 printf '%s\n' \
   "$TERMINAL" \
   "abi=$ABI" \
@@ -1277,6 +1354,11 @@ printf '%s\n' \
   'two_launcher_entries=1' \
   "apk_launcher_icon_pixels=$ICON_PIXELS" \
   "apk_activity_header_icon_pixels=$ICON_PIXELS" \
+  "apk_overview_recent_icon_pixels=$OVERVIEW_ICON_PIXELS" \
+  'overview_icon_source=verified-package-catalog' \
+  'overview_icon_binding=session+generation+apk-digest' \
+  'overview_icon_activity_pixels=0' \
+  'overview_icon_thumbnail_pixels=0' \
   "density_icon_reads=$DENSITY_ICON_READS" \
   "selected_source_density_dpi=$([[ "$ABI" == 57 || "$ABI" == 58 || "$ABI" == 59 || "$ABI" == 60 || "$ABI" == 61 || "$ABI" == 62 || "$ABI" == 63 || "$ABI" == 64 || "$ABI" == 65 || "$ABI" == 66 || "$ABI" == 67 || "$ABI" == 68 || "$ABI" == 69 ]] && printf 160 || printf 0)" \
   "selected_source_dimensions=$([[ "$ABI" == 57 || "$ABI" == 58 || "$ABI" == 59 || "$ABI" == 60 || "$ABI" == 61 || "$ABI" == 62 || "$ABI" == 63 || "$ABI" == 64 || "$ABI" == 65 || "$ABI" == 66 || "$ABI" == 67 || "$ABI" == 68 || "$ABI" == 69 ]] && printf 48x48 || printf 16x16)" \

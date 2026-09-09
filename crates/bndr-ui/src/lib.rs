@@ -31,12 +31,34 @@ pub const UI_CLIENT_CONTROL_MAGIC: u32 = u32::from_le_bytes(*b"BUC1");
 pub const UI_CLIENT_CONTROL_VERSION: u16 = 8;
 pub const BUFFER_PRESENT_WIRE_SIZE: usize = 64;
 pub const BUFFER_PRESENT_MAGIC: u32 = u32::from_le_bytes(*b"BUP1");
-#[cfg(not(feature = "mobile-system-chrome0"))]
+#[cfg(feature = "mobile-ui-runtime")]
+pub const MAX_BUFFER_DAMAGE_RECTS: usize = 2;
+#[cfg(feature = "mobile-ui-runtime")]
+const MAX_BUFFER_DAMAGE_RECTS_INTERNAL: usize = MAX_BUFFER_DAMAGE_RECTS;
+#[cfg(not(feature = "mobile-ui-runtime"))]
+const MAX_BUFFER_DAMAGE_RECTS_INTERNAL: usize = 1;
+#[cfg(not(feature = "mobile-ui-runtime"))]
 pub const BUFFER_PRESENT_VERSION: u16 = 2;
-#[cfg(feature = "mobile-system-chrome0")]
-pub const BUFFER_PRESENT_VERSION: u16 = 3;
+/// Protocol v6 keeps the 64-byte v5 envelope, explicit client-local slot and
+/// present/discard disposition. Because mobile surface geometry is fixed by
+/// the negotiated product profile, v6 replaces the redundant eight-byte
+/// geometry copy with a first damage rectangle and retains the v5 tail as a
+/// second rectangle. A one-byte count makes the two-region representation
+/// canonical; Full frames carry count zero and zeroed rectangle slots.
+#[cfg(feature = "mobile-ui-runtime")]
+pub const BUFFER_PRESENT_VERSION: u16 = 6;
+#[cfg(feature = "mobile-ui-runtime")]
+const BUFFER_PRESENT_LEGACY_DAMAGE_VERSION: u16 = 5;
 pub const BUFFER_PRESENT_KIND: u8 = 1;
 pub const BUFFER_PRESENT_MODE_FULL: u8 = 1;
+#[cfg(feature = "mobile-ui-runtime")]
+pub const BUFFER_PRESENT_MODE_DAMAGE: u8 = 2;
+#[cfg(feature = "mobile-ui-runtime")]
+pub const BUFFER_PRESENT_CLIENT_SLOT_COUNT: usize = 2;
+#[cfg(feature = "mobile-ui-runtime")]
+pub const BUFFER_PRESENT_DISPOSITION_PRESENT: u8 = 1;
+#[cfg(feature = "mobile-ui-runtime")]
+pub const BUFFER_PRESENT_DISPOSITION_DISCARD: u8 = 2;
 /// Canonical physical application-content viewport for the opt-in trusted
 /// mobile System UI chrome split.
 #[cfg(feature = "mobile-system-chrome0")]
@@ -572,6 +594,8 @@ pub struct UiAppearance {
     dark_theme: bool,
     alternate_accent: bool,
     software_dimming: UiSoftwareDimming,
+    large_text: bool,
+    high_contrast: bool,
 }
 
 impl Default for UiAppearance {
@@ -585,14 +609,21 @@ impl UiAppearance {
     const ALTERNATE_ACCENT_FLAG: u64 = 1 << 1;
     const SOFTWARE_DIMMING_SHIFT: u32 = 2;
     const SOFTWARE_DIMMING_MASK: u64 = 0b111 << Self::SOFTWARE_DIMMING_SHIFT;
-    const KNOWN_FLAGS: u64 =
-        Self::DARK_THEME_FLAG | Self::ALTERNATE_ACCENT_FLAG | Self::SOFTWARE_DIMMING_MASK;
+    const LARGE_TEXT_FLAG: u64 = 1 << 5;
+    const HIGH_CONTRAST_FLAG: u64 = 1 << 6;
+    const KNOWN_FLAGS: u64 = Self::DARK_THEME_FLAG
+        | Self::ALTERNATE_ACCENT_FLAG
+        | Self::SOFTWARE_DIMMING_MASK
+        | Self::LARGE_TEXT_FLAG
+        | Self::HIGH_CONTRAST_FLAG;
 
     pub const fn new(dark_theme: bool, alternate_accent: bool) -> Self {
         Self {
             dark_theme,
             alternate_accent,
             software_dimming: UiSoftwareDimming::Off,
+            large_text: false,
+            high_contrast: false,
         }
     }
 
@@ -608,11 +639,31 @@ impl UiAppearance {
         self.software_dimming
     }
 
+    pub const fn large_text(self) -> bool {
+        self.large_text
+    }
+
+    pub const fn high_contrast(self) -> bool {
+        self.high_contrast
+    }
+
     pub const fn with_software_dimming(self, software_dimming: UiSoftwareDimming) -> Self {
         Self {
             dark_theme: self.dark_theme,
             alternate_accent: self.alternate_accent,
             software_dimming,
+            large_text: self.large_text,
+            high_contrast: self.high_contrast,
+        }
+    }
+
+    pub const fn with_accessibility(self, large_text: bool, high_contrast: bool) -> Self {
+        Self {
+            dark_theme: self.dark_theme,
+            alternate_accent: self.alternate_accent,
+            software_dimming: self.software_dimming,
+            large_text,
+            high_contrast,
         }
     }
 
@@ -620,6 +671,8 @@ impl UiAppearance {
         ((self.dark_theme as u64) * Self::DARK_THEME_FLAG)
             | ((self.alternate_accent as u64) * Self::ALTERNATE_ACCENT_FLAG)
             | ((self.software_dimming.raw() as u64) << Self::SOFTWARE_DIMMING_SHIFT)
+            | ((self.large_text as u64) * Self::LARGE_TEXT_FLAG)
+            | ((self.high_contrast as u64) * Self::HIGH_CONTRAST_FLAG)
     }
 
     pub fn from_flags(flags: u64) -> Result<Self, UiAppearanceError> {
@@ -634,7 +687,11 @@ impl UiAppearance {
             flags & Self::DARK_THEME_FLAG != 0,
             flags & Self::ALTERNATE_ACCENT_FLAG != 0,
         )
-        .with_software_dimming(software_dimming))
+        .with_software_dimming(software_dimming)
+        .with_accessibility(
+            flags & Self::LARGE_TEXT_FLAG != 0,
+            flags & Self::HIGH_CONTRAST_FLAG != 0,
+        ))
     }
 
     const fn applying(self, action: UiAppearanceAction) -> Self {
@@ -643,11 +700,15 @@ impl UiAppearance {
                 dark_theme: !self.dark_theme,
                 alternate_accent: self.alternate_accent,
                 software_dimming: self.software_dimming,
+                large_text: self.large_text,
+                high_contrast: self.high_contrast,
             },
             UiAppearanceAction::ToggleAccent => Self {
                 dark_theme: self.dark_theme,
                 alternate_accent: !self.alternate_accent,
                 software_dimming: self.software_dimming,
+                large_text: self.large_text,
+                high_contrast: self.high_contrast,
             },
             UiAppearanceAction::SetSoftwareDimmingOff => {
                 self.with_software_dimming(UiSoftwareDimming::Off)
@@ -663,6 +724,12 @@ impl UiAppearance {
             }
             UiAppearanceAction::SetSoftwareDimmingMaximum => {
                 self.with_software_dimming(UiSoftwareDimming::Maximum)
+            }
+            UiAppearanceAction::ToggleLargeText => {
+                self.with_accessibility(!self.large_text, self.high_contrast)
+            }
+            UiAppearanceAction::ToggleHighContrast => {
+                self.with_accessibility(self.large_text, !self.high_contrast)
             }
         }
     }
@@ -686,6 +753,8 @@ pub enum UiAppearanceAction {
     SetSoftwareDimmingMedium = 5,
     SetSoftwareDimmingStrong = 6,
     SetSoftwareDimmingMaximum = 7,
+    ToggleLargeText = 8,
+    ToggleHighContrast = 9,
 }
 
 impl UiAppearanceAction {
@@ -702,6 +771,8 @@ impl UiAppearanceAction {
             5 => Some(Self::SetSoftwareDimmingMedium),
             6 => Some(Self::SetSoftwareDimmingStrong),
             7 => Some(Self::SetSoftwareDimmingMaximum),
+            8 => Some(Self::ToggleLargeText),
+            9 => Some(Self::ToggleHighContrast),
             _ => None,
         }
     }
@@ -718,7 +789,10 @@ impl UiAppearanceAction {
 
     pub const fn software_dimming(self) -> Option<UiSoftwareDimming> {
         match self {
-            Self::ToggleTheme | Self::ToggleAccent => None,
+            Self::ToggleTheme
+            | Self::ToggleAccent
+            | Self::ToggleLargeText
+            | Self::ToggleHighContrast => None,
             Self::SetSoftwareDimmingOff => Some(UiSoftwareDimming::Off),
             Self::SetSoftwareDimmingLight => Some(UiSoftwareDimming::Light),
             Self::SetSoftwareDimmingMedium => Some(UiSoftwareDimming::Medium),
@@ -777,6 +851,11 @@ pub enum UiSystemUiAction {
     FinishCompatibleActivity = 6,
     ReserveCompatibleActivity = 7,
     AbortCompatibleActivityVerification = 8,
+    /// Remove the exact identity card from stable Overview.
+    ///
+    /// This clears only SurfaceServer's boot-local recent record. It is not a
+    /// process-kill, force-stop, package, storage, or background-task API.
+    DismissRecent = 9,
 }
 
 impl UiSystemUiAction {
@@ -794,6 +873,7 @@ impl UiSystemUiAction {
             6 => Some(Self::FinishCompatibleActivity),
             7 => Some(Self::ReserveCompatibleActivity),
             8 => Some(Self::AbortCompatibleActivityVerification),
+            9 => Some(Self::DismissRecent),
             _ => None,
         }
     }
@@ -886,7 +966,7 @@ fn validate_system_ui_action_recent(
     recent: Option<UiRecentIdentity>,
 ) -> Result<(), UiClientControlError> {
     match (action, recent) {
-        (UiSystemUiAction::ActivateRecent, None) => {
+        (UiSystemUiAction::ActivateRecent | UiSystemUiAction::DismissRecent, None) => {
             Err(UiClientControlError::SystemUiActionRequiresApp)
         }
         (UiSystemUiAction::Unlock | UiSystemUiAction::CloseOverview, Some(_)) => {
@@ -2970,6 +3050,7 @@ pub enum UiSystemUiSessionError {
     UnlockRequiresLocked,
     CloseOverviewRequiresOverview,
     ActivateRecentRequiresOverview,
+    DismissRecentRequiresOverview,
     PresentCompatibleRequiresHome,
     HomeCompatibleRequiresForeground,
     FinishCompatibleRequiresStableMode,
@@ -3280,6 +3361,16 @@ impl UiSystemUiSession {
                     }
                     self.commit(UiSystemUiMode::Foreground, Some(requested), false, 0)?
                 }
+                UiSystemUiAction::DismissRecent => {
+                    if self.mode != UiSystemUiMode::Overview {
+                        return Err(UiSystemUiSessionError::DismissRecentRequiresOverview);
+                    }
+                    let requested = recent.ok_or(UiSystemUiSessionError::RecentAppMismatch)?;
+                    if self.recent != Some(requested) {
+                        return Err(UiSystemUiSessionError::RecentAppMismatch);
+                    }
+                    self.commit(UiSystemUiMode::Overview, None, false, 0)?
+                }
                 UiSystemUiAction::PresentCompatibleActivity => {
                     return Err(UiSystemUiSessionError::CompatibleActivityReservationRequired);
                 }
@@ -3390,7 +3481,8 @@ impl UiSystemUiSession {
             UiSystemUiAction::Unlock
             | UiSystemUiAction::CloseOverview
             | UiSystemUiAction::HomeCompatibleActivity
-            | UiSystemUiAction::ReserveCompatibleActivity => {
+            | UiSystemUiAction::ReserveCompatibleActivity
+            | UiSystemUiAction::DismissRecent => {
                 return Err(UiSystemUiSessionError::CompatibleActivityReservationInProgress);
             }
         };
@@ -3446,7 +3538,8 @@ impl UiSystemUiSession {
             UiSystemUiAction::Unlock
             | UiSystemUiAction::CloseOverview
             | UiSystemUiAction::HomeCompatibleActivity
-            | UiSystemUiAction::ReserveCompatibleActivity => unreachable!(),
+            | UiSystemUiAction::ReserveCompatibleActivity
+            | UiSystemUiAction::DismissRecent => unreachable!(),
         };
         self.compatible_activity_reservation = None;
         Ok(update)
@@ -4391,6 +4484,7 @@ fn validate_system_ui_request_completion(
             compatible_identity.is_some() && reservation_origin.is_none()
         }
         UiSystemUiAction::FinishCompatibleActivity => compatible_identity.is_some(),
+        UiSystemUiAction::DismissRecent => reservation_origin.is_none(),
     };
     if !fields_are_canonical {
         return Err(UiServerEventError::NonCanonicalSystemUiRequestCompletion);
@@ -4857,6 +4951,15 @@ const BUFFER_PRESENT_OFFSET_MODE: usize = 7;
 const BUFFER_PRESENT_OFFSET_CLIENT_FRAME_ID: usize = 8;
 const BUFFER_PRESENT_OFFSET_GLOBAL_FRAME_ID: usize = 12;
 const BUFFER_PRESENT_OFFSET_FOCUS_GENERATION: usize = 16;
+#[cfg(feature = "mobile-ui-runtime")]
+const BUFFER_PRESENT_OFFSET_CLIENT_SLOT: usize = 20;
+#[cfg(feature = "mobile-ui-runtime")]
+const BUFFER_PRESENT_OFFSET_DISPOSITION: usize = 21;
+#[cfg(feature = "mobile-ui-runtime")]
+const BUFFER_PRESENT_OFFSET_DAMAGE_COUNT: usize = 22;
+#[cfg(feature = "mobile-ui-runtime")]
+const BUFFER_PRESENT_OFFSET_HEADER_RESERVED: usize = 23;
+#[cfg(not(feature = "mobile-ui-runtime"))]
 const BUFFER_PRESENT_OFFSET_HEADER_RESERVED: usize = 20;
 const BUFFER_PRESENT_HEADER_RESERVED_END: usize = 24;
 const BUFFER_PRESENT_OFFSET_BUFFER_GENERATION: usize = 24;
@@ -4864,6 +4967,8 @@ const BUFFER_PRESENT_OFFSET_X: usize = 32;
 const BUFFER_PRESENT_OFFSET_Y: usize = 34;
 const BUFFER_PRESENT_OFFSET_WIDTH: usize = 36;
 const BUFFER_PRESENT_OFFSET_HEIGHT: usize = 38;
+#[cfg(feature = "mobile-ui-runtime")]
+const BUFFER_PRESENT_OFFSET_DAMAGE_0_X: usize = BUFFER_PRESENT_OFFSET_X;
 const BUFFER_PRESENT_OFFSET_SYSTEM_UI_REVISION: usize = 40;
 #[cfg(feature = "mobile-system-chrome0")]
 const BUFFER_PRESENT_OFFSET_SYSTEM_CHROME_GENERATION: usize = 48;
@@ -4871,6 +4976,8 @@ const BUFFER_PRESENT_OFFSET_SYSTEM_CHROME_GENERATION: usize = 48;
 const BUFFER_PRESENT_OFFSET_PADDING: usize = 48;
 #[cfg(feature = "mobile-system-chrome0")]
 const BUFFER_PRESENT_OFFSET_PADDING: usize = 56;
+#[cfg(feature = "mobile-ui-runtime")]
+const BUFFER_PRESENT_OFFSET_DAMAGE_X: usize = 56;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BufferPresentError {
@@ -4886,24 +4993,35 @@ pub enum BufferPresentError {
     ZeroBufferGeneration,
     ZeroSystemUiRevision,
     ZeroSystemChromeGeneration,
+    InvalidClientBufferSlot,
+    InvalidDisposition,
+    EmptyDamage,
+    TooManyDamageRects,
+    DamageOutOfBounds,
+    OverlappingDamageRects,
+    NonCanonicalDamageRects,
+    DamageOnDiscard,
     NonZeroHeaderReserved,
     InvalidGeometry,
     NonZeroPadding,
     ClientFrameIdMismatch,
 }
 
-/// One canonical M32a buffer-backed full-surface present transaction.
+/// One canonical M32a buffer-backed present transaction.
 ///
 /// A client initially sets both frame identifiers to its local identifier.
 /// SurfaceServer retains `client_frame_id` for acknowledgements and replaces
 /// `global_frame_id` with the monotonically increasing compositor identifier.
 /// M32a deliberately supports only one configured geometry: the full shell
 /// surface in protocol v2, or the canonical 720x1448 application-content
-/// viewport when the opt-in protocol v3 trusted-chrome split is enabled.
-/// Protocol v2 and v3 carry an optional System UI revision. Revision zero is
+/// viewport when the opt-in trusted-chrome split is enabled. Mobile protocol
+/// v6 identifies one of two bounded client slots, distinguishes a visible
+/// present from a queue-draining discard, and optionally carries one or two
+/// exact, non-overlapping surface-local damage rectangles. Protocol v2 and v6 carry an optional
+/// System UI revision. Revision zero is
 /// retained only for callers outside the mobile System UI contract; mobile
-/// callers use the explicit nonzero-revision constructors. Introducing damage
-/// or any additional geometry requires another protocol version.
+/// callers use the explicit nonzero-revision constructors. The compatibility
+/// and trusted-chrome product paths may further restrict accepted modes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BufferPresent {
     client_frame_id: u32,
@@ -4912,6 +5030,23 @@ pub struct BufferPresent {
     buffer_generation: u64,
     system_ui_revision: u64,
     system_chrome_generation: u64,
+    client_buffer_slot: u8,
+    disposition: BufferPresentDisposition,
+    mode: BufferPresentMode,
+    damage_rects: [DamageRect; MAX_BUFFER_DAMAGE_RECTS_INTERNAL],
+    damage_rect_count: u8,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BufferPresentDisposition {
+    Present,
+    Discard,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BufferPresentMode {
+    Full,
+    Damage,
 }
 
 impl BufferPresent {
@@ -5003,6 +5138,11 @@ impl BufferPresent {
             buffer_generation,
             system_ui_revision,
             system_chrome_generation,
+            client_buffer_slot: 0,
+            disposition: BufferPresentDisposition::Present,
+            mode: BufferPresentMode::Full,
+            damage_rects: full_buffer_damage_rects(),
+            damage_rect_count: 1,
         })
     }
 
@@ -5037,11 +5177,103 @@ impl BufferPresent {
 
     /// Returns the independently generated trusted-chrome buffer generation.
     ///
-    /// Protocol v2 always returns zero. Under protocol v3 constructors and the
+    /// Protocol v2 always returns zero. Under mobile protocol v6 constructors and the
     /// wire decoder may produce a provisional zero client form; the syscall 62
     /// submission boundary must reject it until a nonzero generation is bound.
     pub const fn system_chrome_generation(&self) -> u64 {
         self.system_chrome_generation
+    }
+
+    /// Returns the client-local slot selected for this transaction.
+    ///
+    /// Compatibility protocol v2 always decodes as slot zero. Mobile v6
+    /// admits exactly slots zero and one; SurfaceServer may further constrain
+    /// a product profile to slot zero.
+    pub const fn client_buffer_slot(&self) -> u8 {
+        self.client_buffer_slot
+    }
+
+    pub const fn disposition(&self) -> BufferPresentDisposition {
+        self.disposition
+    }
+
+    pub const fn mode(&self) -> BufferPresentMode {
+        self.mode
+    }
+
+    pub fn damage_rect(&self) -> DamageRect {
+        let first = self.damage_rects[0];
+        #[cfg(feature = "mobile-ui-runtime")]
+        if self.damage_rect_count == 2 {
+            return first.union(self.damage_rects[1]);
+        }
+        first
+    }
+
+    /// Returns the canonical surface-local regions copied by this frame.
+    /// Full frames expose one full-surface region even though their v6 wire
+    /// count is zero; Damage frames expose one or two sorted, disjoint regions.
+    pub fn damage_rects(&self) -> &[DamageRect] {
+        &self.damage_rects[..usize::from(self.damage_rect_count)]
+    }
+
+    #[cfg(feature = "mobile-ui-runtime")]
+    pub fn with_client_buffer_slot(
+        mut self,
+        client_buffer_slot: u8,
+    ) -> Result<Self, BufferPresentError> {
+        if usize::from(client_buffer_slot) >= BUFFER_PRESENT_CLIENT_SLOT_COUNT {
+            return Err(BufferPresentError::InvalidClientBufferSlot);
+        }
+        self.client_buffer_slot = client_buffer_slot;
+        Ok(self)
+    }
+
+    /// Restricts this visible mobile transaction to one exact nonempty,
+    /// surface-local damage rectangle. Pixels outside the rectangle remain
+    /// owned by the previously committed scene and are not copied.
+    #[cfg(feature = "mobile-ui-runtime")]
+    pub fn with_damage(self, damage: DamageRect) -> Result<Self, BufferPresentError> {
+        self.with_damage_rects(&[damage])
+    }
+
+    /// Restricts a visible mobile transaction to one or two exact,
+    /// non-overlapping regions. Inputs are sorted into the canonical wire
+    /// order `(y, x, height, width)`; overlapping inputs are rejected so every
+    /// copied pixel is counted once.
+    #[cfg(feature = "mobile-ui-runtime")]
+    pub fn with_damage_rects(
+        mut self,
+        damage_rects: &[DamageRect],
+    ) -> Result<Self, BufferPresentError> {
+        if self.disposition != BufferPresentDisposition::Present {
+            return Err(BufferPresentError::DamageOnDiscard);
+        }
+        let (damage_rects, damage_rect_count) = canonical_damage_rects(damage_rects)?;
+        self.mode = BufferPresentMode::Damage;
+        self.damage_rects = damage_rects;
+        self.damage_rect_count = damage_rect_count;
+        Ok(self)
+    }
+
+    #[cfg(feature = "mobile-ui-runtime")]
+    pub fn with_damage_regions(
+        self,
+        damage_regions: DamageRegions,
+    ) -> Result<Self, BufferPresentError> {
+        self.with_damage_rects(damage_regions.rects())
+    }
+
+    /// Converts a provisional mobile frame into a queue-draining transaction.
+    /// SurfaceServer must acknowledge it as cancelled without allocating a
+    /// compositor frame id or displaying pixels.
+    #[cfg(feature = "mobile-ui-runtime")]
+    pub fn as_discard(mut self) -> Self {
+        self.disposition = BufferPresentDisposition::Discard;
+        self.mode = BufferPresentMode::Full;
+        self.damage_rects = full_buffer_damage_rects();
+        self.damage_rect_count = 1;
+        self
     }
 
     /// Binds the independently generated trusted-chrome buffer to this v3
@@ -5100,23 +5332,45 @@ impl BufferPresent {
         wire[BUFFER_PRESENT_OFFSET_VERSION..BUFFER_PRESENT_OFFSET_VERSION + 2]
             .copy_from_slice(&BUFFER_PRESENT_VERSION.to_le_bytes());
         wire[BUFFER_PRESENT_OFFSET_KIND] = BUFFER_PRESENT_KIND;
-        wire[BUFFER_PRESENT_OFFSET_MODE] = BUFFER_PRESENT_MODE_FULL;
+        wire[BUFFER_PRESENT_OFFSET_MODE] = match self.mode {
+            BufferPresentMode::Full => BUFFER_PRESENT_MODE_FULL,
+            #[cfg(feature = "mobile-ui-runtime")]
+            BufferPresentMode::Damage => BUFFER_PRESENT_MODE_DAMAGE,
+            #[cfg(not(feature = "mobile-ui-runtime"))]
+            BufferPresentMode::Damage => BUFFER_PRESENT_MODE_FULL,
+        };
         wire[BUFFER_PRESENT_OFFSET_CLIENT_FRAME_ID..BUFFER_PRESENT_OFFSET_CLIENT_FRAME_ID + 4]
             .copy_from_slice(&self.client_frame_id.to_le_bytes());
         wire[BUFFER_PRESENT_OFFSET_GLOBAL_FRAME_ID..BUFFER_PRESENT_OFFSET_GLOBAL_FRAME_ID + 4]
             .copy_from_slice(&self.global_frame_id.to_le_bytes());
         wire[BUFFER_PRESENT_OFFSET_FOCUS_GENERATION..BUFFER_PRESENT_OFFSET_FOCUS_GENERATION + 4]
             .copy_from_slice(&self.focus_generation.to_le_bytes());
+        #[cfg(feature = "mobile-ui-runtime")]
+        {
+            wire[BUFFER_PRESENT_OFFSET_CLIENT_SLOT] = self.client_buffer_slot;
+            wire[BUFFER_PRESENT_OFFSET_DISPOSITION] = match self.disposition {
+                BufferPresentDisposition::Present => BUFFER_PRESENT_DISPOSITION_PRESENT,
+                BufferPresentDisposition::Discard => BUFFER_PRESENT_DISPOSITION_DISCARD,
+            };
+            wire[BUFFER_PRESENT_OFFSET_DAMAGE_COUNT] = if self.mode == BufferPresentMode::Damage {
+                self.damage_rect_count
+            } else {
+                0
+            };
+        }
         wire[BUFFER_PRESENT_OFFSET_BUFFER_GENERATION..BUFFER_PRESENT_OFFSET_BUFFER_GENERATION + 8]
             .copy_from_slice(&self.buffer_generation.to_le_bytes());
-        wire[BUFFER_PRESENT_OFFSET_X..BUFFER_PRESENT_OFFSET_X + 2]
-            .copy_from_slice(&BUFFER_PRESENT_X.to_le_bytes());
-        wire[BUFFER_PRESENT_OFFSET_Y..BUFFER_PRESENT_OFFSET_Y + 2]
-            .copy_from_slice(&BUFFER_PRESENT_Y.to_le_bytes());
-        wire[BUFFER_PRESENT_OFFSET_WIDTH..BUFFER_PRESENT_OFFSET_WIDTH + 2]
-            .copy_from_slice(&BUFFER_PRESENT_WIDTH.to_le_bytes());
-        wire[BUFFER_PRESENT_OFFSET_HEIGHT..BUFFER_PRESENT_OFFSET_HEIGHT + 2]
-            .copy_from_slice(&BUFFER_PRESENT_HEIGHT.to_le_bytes());
+        #[cfg(not(feature = "mobile-ui-runtime"))]
+        {
+            wire[BUFFER_PRESENT_OFFSET_X..BUFFER_PRESENT_OFFSET_X + 2]
+                .copy_from_slice(&BUFFER_PRESENT_X.to_le_bytes());
+            wire[BUFFER_PRESENT_OFFSET_Y..BUFFER_PRESENT_OFFSET_Y + 2]
+                .copy_from_slice(&BUFFER_PRESENT_Y.to_le_bytes());
+            wire[BUFFER_PRESENT_OFFSET_WIDTH..BUFFER_PRESENT_OFFSET_WIDTH + 2]
+                .copy_from_slice(&BUFFER_PRESENT_WIDTH.to_le_bytes());
+            wire[BUFFER_PRESENT_OFFSET_HEIGHT..BUFFER_PRESENT_OFFSET_HEIGHT + 2]
+                .copy_from_slice(&BUFFER_PRESENT_HEIGHT.to_le_bytes());
+        }
         wire[BUFFER_PRESENT_OFFSET_SYSTEM_UI_REVISION
             ..BUFFER_PRESENT_OFFSET_SYSTEM_UI_REVISION + 8]
             .copy_from_slice(&self.system_ui_revision.to_le_bytes());
@@ -5124,6 +5378,21 @@ impl BufferPresent {
         wire[BUFFER_PRESENT_OFFSET_SYSTEM_CHROME_GENERATION
             ..BUFFER_PRESENT_OFFSET_SYSTEM_CHROME_GENERATION + 8]
             .copy_from_slice(&self.system_chrome_generation.to_le_bytes());
+        #[cfg(feature = "mobile-ui-runtime")]
+        if self.mode == BufferPresentMode::Damage {
+            write_buffer_damage_rect(
+                &mut wire,
+                BUFFER_PRESENT_OFFSET_DAMAGE_0_X,
+                self.damage_rects[0],
+            );
+            if self.damage_rect_count == 2 {
+                write_buffer_damage_rect(
+                    &mut wire,
+                    BUFFER_PRESENT_OFFSET_DAMAGE_X,
+                    self.damage_rects[1],
+                );
+            }
+        }
         wire
     }
 
@@ -5134,48 +5403,262 @@ impl BufferPresent {
         if read_u32(wire, BUFFER_PRESENT_OFFSET_MAGIC) != BUFFER_PRESENT_MAGIC {
             return Err(BufferPresentError::InvalidMagic);
         }
-        if read_u16(wire, BUFFER_PRESENT_OFFSET_VERSION) != BUFFER_PRESENT_VERSION {
+        let wire_version = read_u16(wire, BUFFER_PRESENT_OFFSET_VERSION);
+        #[cfg(feature = "mobile-ui-runtime")]
+        let version_is_supported = matches!(
+            wire_version,
+            BUFFER_PRESENT_VERSION | BUFFER_PRESENT_LEGACY_DAMAGE_VERSION
+        );
+        #[cfg(not(feature = "mobile-ui-runtime"))]
+        let version_is_supported = wire_version == BUFFER_PRESENT_VERSION;
+        if !version_is_supported {
             return Err(BufferPresentError::InvalidVersion);
         }
         if wire[BUFFER_PRESENT_OFFSET_KIND] != BUFFER_PRESENT_KIND {
             return Err(BufferPresentError::InvalidKind);
         }
-        if wire[BUFFER_PRESENT_OFFSET_MODE] != BUFFER_PRESENT_MODE_FULL {
+        #[cfg(feature = "mobile-ui-runtime")]
+        let mode = match wire[BUFFER_PRESENT_OFFSET_MODE] {
+            BUFFER_PRESENT_MODE_FULL => BufferPresentMode::Full,
+            BUFFER_PRESENT_MODE_DAMAGE => BufferPresentMode::Damage,
+            _ => return Err(BufferPresentError::InvalidMode),
+        };
+        #[cfg(not(feature = "mobile-ui-runtime"))]
+        let mode = if wire[BUFFER_PRESENT_OFFSET_MODE] == BUFFER_PRESENT_MODE_FULL {
+            BufferPresentMode::Full
+        } else {
             return Err(BufferPresentError::InvalidMode);
-        }
-        if wire[BUFFER_PRESENT_OFFSET_HEADER_RESERVED..BUFFER_PRESENT_HEADER_RESERVED_END]
+        };
+        #[cfg(feature = "mobile-ui-runtime")]
+        let header_reserved_start = if wire_version == BUFFER_PRESENT_VERSION {
+            BUFFER_PRESENT_OFFSET_HEADER_RESERVED
+        } else {
+            BUFFER_PRESENT_OFFSET_DAMAGE_COUNT
+        };
+        #[cfg(not(feature = "mobile-ui-runtime"))]
+        let header_reserved_start = BUFFER_PRESENT_OFFSET_HEADER_RESERVED;
+        if wire[header_reserved_start..BUFFER_PRESENT_HEADER_RESERVED_END]
             .iter()
             .any(|byte| *byte != 0)
         {
             return Err(BufferPresentError::NonZeroHeaderReserved);
         }
-        if read_u16(wire, BUFFER_PRESENT_OFFSET_X) != BUFFER_PRESENT_X
-            || read_u16(wire, BUFFER_PRESENT_OFFSET_Y) != BUFFER_PRESENT_Y
-            || read_u16(wire, BUFFER_PRESENT_OFFSET_WIDTH) != BUFFER_PRESENT_WIDTH
-            || read_u16(wire, BUFFER_PRESENT_OFFSET_HEIGHT) != BUFFER_PRESENT_HEIGHT
+        #[cfg(feature = "mobile-ui-runtime")]
+        let client_buffer_slot = {
+            let slot = wire[BUFFER_PRESENT_OFFSET_CLIENT_SLOT];
+            if usize::from(slot) >= BUFFER_PRESENT_CLIENT_SLOT_COUNT {
+                return Err(BufferPresentError::InvalidClientBufferSlot);
+            }
+            slot
+        };
+        #[cfg(not(feature = "mobile-ui-runtime"))]
+        let client_buffer_slot = 0;
+        #[cfg(feature = "mobile-ui-runtime")]
+        let disposition = match wire[BUFFER_PRESENT_OFFSET_DISPOSITION] {
+            BUFFER_PRESENT_DISPOSITION_PRESENT => BufferPresentDisposition::Present,
+            BUFFER_PRESENT_DISPOSITION_DISCARD => BufferPresentDisposition::Discard,
+            _ => return Err(BufferPresentError::InvalidDisposition),
+        };
+        #[cfg(not(feature = "mobile-ui-runtime"))]
+        let disposition = BufferPresentDisposition::Present;
+        #[cfg(feature = "mobile-ui-runtime")]
+        if disposition == BufferPresentDisposition::Discard && mode == BufferPresentMode::Damage {
+            return Err(BufferPresentError::DamageOnDiscard);
+        }
+        #[cfg(feature = "mobile-ui-runtime")]
+        let geometry_must_be_explicit = wire_version == BUFFER_PRESENT_LEGACY_DAMAGE_VERSION;
+        #[cfg(not(feature = "mobile-ui-runtime"))]
+        let geometry_must_be_explicit = true;
+        if geometry_must_be_explicit
+            && (read_u16(wire, BUFFER_PRESENT_OFFSET_X) != BUFFER_PRESENT_X
+                || read_u16(wire, BUFFER_PRESENT_OFFSET_Y) != BUFFER_PRESENT_Y
+                || read_u16(wire, BUFFER_PRESENT_OFFSET_WIDTH) != BUFFER_PRESENT_WIDTH
+                || read_u16(wire, BUFFER_PRESENT_OFFSET_HEIGHT) != BUFFER_PRESENT_HEIGHT)
         {
             return Err(BufferPresentError::InvalidGeometry);
         }
+        #[cfg(feature = "mobile-ui-runtime")]
+        if wire[BUFFER_PRESENT_OFFSET_PADDING..BUFFER_PRESENT_OFFSET_DAMAGE_X]
+            .iter()
+            .any(|byte| *byte != 0)
+        {
+            return Err(BufferPresentError::NonZeroPadding);
+        }
+        #[cfg(not(feature = "mobile-ui-runtime"))]
         if wire[BUFFER_PRESENT_OFFSET_PADDING..]
             .iter()
             .any(|byte| *byte != 0)
         {
             return Err(BufferPresentError::NonZeroPadding);
         }
+        #[cfg(feature = "mobile-ui-runtime")]
+        let (damage_rects, damage_rect_count) = if wire_version
+            == BUFFER_PRESENT_LEGACY_DAMAGE_VERSION
+        {
+            match mode {
+                BufferPresentMode::Full => {
+                    if wire[BUFFER_PRESENT_OFFSET_DAMAGE_X..]
+                        .iter()
+                        .any(|byte| *byte != 0)
+                    {
+                        return Err(BufferPresentError::NonZeroPadding);
+                    }
+                    (full_buffer_damage_rects(), 1)
+                }
+                BufferPresentMode::Damage => canonical_damage_rects(&[read_buffer_damage_rect(
+                    wire,
+                    BUFFER_PRESENT_OFFSET_DAMAGE_X,
+                )])?,
+            }
+        } else {
+            let count = usize::from(wire[BUFFER_PRESENT_OFFSET_DAMAGE_COUNT]);
+            match mode {
+                BufferPresentMode::Full => {
+                    if count != 0
+                        || wire
+                            [BUFFER_PRESENT_OFFSET_DAMAGE_0_X..BUFFER_PRESENT_OFFSET_DAMAGE_0_X + 8]
+                            .iter()
+                            .chain(wire[BUFFER_PRESENT_OFFSET_DAMAGE_X..].iter())
+                            .any(|byte| *byte != 0)
+                    {
+                        return Err(BufferPresentError::NonZeroPadding);
+                    }
+                    (full_buffer_damage_rects(), 1)
+                }
+                BufferPresentMode::Damage => {
+                    if count == 0 {
+                        return Err(BufferPresentError::EmptyDamage);
+                    }
+                    if count > MAX_BUFFER_DAMAGE_RECTS {
+                        return Err(BufferPresentError::TooManyDamageRects);
+                    }
+                    let raw = [
+                        read_buffer_damage_rect(wire, BUFFER_PRESENT_OFFSET_DAMAGE_0_X),
+                        read_buffer_damage_rect(wire, BUFFER_PRESENT_OFFSET_DAMAGE_X),
+                    ];
+                    if count == 1 && raw[1] != DamageRect::EMPTY {
+                        return Err(BufferPresentError::NonZeroPadding);
+                    }
+                    let canonical = canonical_damage_rects(&raw[..count])?;
+                    if canonical.0[..count] != raw[..count] {
+                        return Err(BufferPresentError::NonCanonicalDamageRects);
+                    }
+                    canonical
+                }
+            }
+        };
+        #[cfg(not(feature = "mobile-ui-runtime"))]
+        let (damage_rects, damage_rect_count) = (full_buffer_damage_rects(), 1);
         #[cfg(feature = "mobile-system-chrome0")]
         let system_chrome_generation =
             read_u64(wire, BUFFER_PRESENT_OFFSET_SYSTEM_CHROME_GENERATION);
         #[cfg(not(feature = "mobile-system-chrome0"))]
         let system_chrome_generation = 0;
-        Self::try_new_allowing_zero_system_ui_revision(
+        let mut present = Self::try_new_allowing_zero_system_ui_revision(
             read_u32(wire, BUFFER_PRESENT_OFFSET_CLIENT_FRAME_ID),
             read_u32(wire, BUFFER_PRESENT_OFFSET_GLOBAL_FRAME_ID),
             read_u32(wire, BUFFER_PRESENT_OFFSET_FOCUS_GENERATION),
             read_u64(wire, BUFFER_PRESENT_OFFSET_BUFFER_GENERATION),
             read_u64(wire, BUFFER_PRESENT_OFFSET_SYSTEM_UI_REVISION),
             system_chrome_generation,
-        )
+        )?;
+        present.client_buffer_slot = client_buffer_slot;
+        present.disposition = disposition;
+        present.mode = mode;
+        present.damage_rects = damage_rects;
+        present.damage_rect_count = damage_rect_count;
+        Ok(present)
     }
+}
+
+fn full_buffer_damage_rects() -> [DamageRect; MAX_BUFFER_DAMAGE_RECTS_INTERNAL] {
+    let mut rects = [DamageRect::EMPTY; MAX_BUFFER_DAMAGE_RECTS_INTERNAL];
+    rects[0] = DamageRect::FULL;
+    rects
+}
+
+#[cfg(feature = "mobile-ui-runtime")]
+fn canonical_damage_rects(
+    source: &[DamageRect],
+) -> Result<([DamageRect; MAX_BUFFER_DAMAGE_RECTS], u8), BufferPresentError> {
+    if source.is_empty() {
+        return Err(BufferPresentError::EmptyDamage);
+    }
+    if source.len() > MAX_BUFFER_DAMAGE_RECTS {
+        return Err(BufferPresentError::TooManyDamageRects);
+    }
+    let mut rects = [DamageRect::EMPTY; MAX_BUFFER_DAMAGE_RECTS];
+    for (destination, damage) in rects.iter_mut().zip(source.iter().copied()) {
+        validate_buffer_damage(damage)?;
+        *destination = damage;
+    }
+    if source.len() == 2 {
+        if damage_rect_sort_key(rects[1]) < damage_rect_sort_key(rects[0]) {
+            rects.swap(0, 1);
+        }
+        if damage_rects_overlap(rects[0], rects[1]) {
+            return Err(BufferPresentError::OverlappingDamageRects);
+        }
+    }
+    Ok((rects, source.len() as u8))
+}
+
+#[cfg(feature = "mobile-ui-runtime")]
+const fn damage_rect_sort_key(rect: DamageRect) -> (u16, u16, u16, u16) {
+    (rect.y, rect.x, rect.height, rect.width)
+}
+
+#[cfg(feature = "mobile-ui-runtime")]
+fn damage_rects_overlap(first: DamageRect, second: DamageRect) -> bool {
+    let first_right = first.x + first.width;
+    let first_bottom = first.y + first.height;
+    let second_right = second.x + second.width;
+    let second_bottom = second.y + second.height;
+    first.x < second_right
+        && second.x < first_right
+        && first.y < second_bottom
+        && second.y < first_bottom
+}
+
+#[cfg(feature = "mobile-ui-runtime")]
+fn write_buffer_damage_rect(
+    wire: &mut [u8; BUFFER_PRESENT_WIRE_SIZE],
+    offset: usize,
+    damage: DamageRect,
+) {
+    wire[offset..offset + 2].copy_from_slice(&damage.x.to_le_bytes());
+    wire[offset + 2..offset + 4].copy_from_slice(&damage.y.to_le_bytes());
+    wire[offset + 4..offset + 6].copy_from_slice(&damage.width.to_le_bytes());
+    wire[offset + 6..offset + 8].copy_from_slice(&damage.height.to_le_bytes());
+}
+
+#[cfg(feature = "mobile-ui-runtime")]
+fn read_buffer_damage_rect(wire: &[u8], offset: usize) -> DamageRect {
+    DamageRect {
+        x: read_u16(wire, offset),
+        y: read_u16(wire, offset + 2),
+        width: read_u16(wire, offset + 4),
+        height: read_u16(wire, offset + 6),
+    }
+}
+
+#[cfg(feature = "mobile-ui-runtime")]
+fn validate_buffer_damage(damage: DamageRect) -> Result<(), BufferPresentError> {
+    if damage.width == 0 || damage.height == 0 {
+        return Err(BufferPresentError::EmptyDamage);
+    }
+    let right = damage
+        .x
+        .checked_add(damage.width)
+        .ok_or(BufferPresentError::DamageOutOfBounds)?;
+    let bottom = damage
+        .y
+        .checked_add(damage.height)
+        .ok_or(BufferPresentError::DamageOutOfBounds)?;
+    if right > SURFACE_WIDTH || bottom > SURFACE_HEIGHT {
+        return Err(BufferPresentError::DamageOutOfBounds);
+    }
+    Ok(())
 }
 
 fn validate_buffer_present_fields(
@@ -11595,6 +12078,13 @@ pub struct DamageRect {
 }
 
 impl DamageRect {
+    pub const EMPTY: Self = Self {
+        x: 0,
+        y: 0,
+        width: 0,
+        height: 0,
+    };
+
     pub const FULL: Self = Self {
         x: 0,
         y: 0,
@@ -11619,6 +12109,68 @@ impl DamageRect {
             width: right - left,
             height: bottom - top,
         }
+    }
+
+    pub fn intersects(self, other: Self) -> bool {
+        if self.width == 0 || self.height == 0 || other.width == 0 || other.height == 0 {
+            return false;
+        }
+        let self_right = self.x.saturating_add(self.width);
+        let self_bottom = self.y.saturating_add(self.height);
+        let other_right = other.x.saturating_add(other.width);
+        let other_bottom = other.y.saturating_add(other.height);
+        self.x < other_right
+            && other.x < self_right
+            && self.y < other_bottom
+            && other.y < self_bottom
+    }
+}
+
+/// Canonical bounded set carried by a mobile buffer-present Damage frame.
+///
+/// Rectangles are nonempty, in bounds, sorted by `(y, x, height, width)`, and
+/// pairwise non-overlapping. The fixed capacity keeps planning allocation-free
+/// and matches protocol v6's two physical wire slots.
+#[cfg(feature = "mobile-ui-runtime")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DamageRegions {
+    rects: [DamageRect; MAX_BUFFER_DAMAGE_RECTS],
+    count: u8,
+}
+
+#[cfg(feature = "mobile-ui-runtime")]
+impl DamageRegions {
+    pub fn try_new(rects: &[DamageRect]) -> Result<Self, BufferPresentError> {
+        let (rects, count) = canonical_damage_rects(rects)?;
+        Ok(Self { rects, count })
+    }
+
+    pub fn single(rect: DamageRect) -> Result<Self, BufferPresentError> {
+        Self::try_new(&[rect])
+    }
+
+    pub fn rects(&self) -> &[DamageRect] {
+        &self.rects[..usize::from(self.count)]
+    }
+
+    pub const fn count(self) -> u8 {
+        self.count
+    }
+
+    pub fn bounds(self) -> DamageRect {
+        let first = self.rects[0];
+        if self.count == 2 {
+            first.union(self.rects[1])
+        } else {
+            first
+        }
+    }
+
+    pub fn pixel_count(self) -> usize {
+        self.rects()
+            .iter()
+            .map(|rect| usize::from(rect.width) * usize::from(rect.height))
+            .sum()
     }
 }
 
@@ -15817,13 +16369,24 @@ mod tests {
         ];
         for (base_flags, base) in base_states {
             for software_dimming in dimming_levels {
-                let appearance = base.with_software_dimming(software_dimming);
-                let flags = base_flags | (u64::from(software_dimming.raw()) << 2);
-                assert_eq!(appearance.flags(), flags);
-                assert_eq!(UiAppearance::from_flags(flags), Ok(appearance));
-                assert_eq!(appearance.software_dimming(), software_dimming);
-                assert_eq!(appearance.dark_theme(), base.dark_theme());
-                assert_eq!(appearance.alternate_accent(), base.alternate_accent());
+                for (large_text, high_contrast) in
+                    [(false, false), (true, false), (false, true), (true, true)]
+                {
+                    let appearance = base
+                        .with_software_dimming(software_dimming)
+                        .with_accessibility(large_text, high_contrast);
+                    let flags = base_flags
+                        | (u64::from(software_dimming.raw()) << 2)
+                        | ((large_text as u64) << 5)
+                        | ((high_contrast as u64) << 6);
+                    assert_eq!(appearance.flags(), flags);
+                    assert_eq!(UiAppearance::from_flags(flags), Ok(appearance));
+                    assert_eq!(appearance.software_dimming(), software_dimming);
+                    assert_eq!(appearance.dark_theme(), base.dark_theme());
+                    assert_eq!(appearance.alternate_accent(), base.alternate_accent());
+                    assert_eq!(appearance.large_text(), large_text);
+                    assert_eq!(appearance.high_contrast(), high_contrast);
+                }
             }
         }
         assert_eq!(UiAppearance::default(), UiAppearance::new(true, false));
@@ -15833,6 +16396,8 @@ mod tests {
             UiAppearance::default().software_dimming(),
             UiSoftwareDimming::Off
         );
+        assert!(!UiAppearance::default().large_text());
+        assert!(!UiAppearance::default().high_contrast());
         for (raw, level) in dimming_levels.into_iter().enumerate() {
             assert_eq!(
                 UiSoftwareDimming::from_raw(raw as u64),
@@ -15849,7 +16414,7 @@ mod tests {
                 Err(UiAppearanceError::InvalidSoftwareDimming)
             );
         }
-        for flags in [1_u64 << 5, 1 << 63, u64::MAX] {
+        for flags in [1_u64 << 7, 1 << 63, u64::MAX] {
             assert_eq!(
                 UiAppearance::from_flags(flags),
                 Err(UiAppearanceError::UnknownFlags)
@@ -16899,6 +17464,71 @@ mod tests {
     }
 
     #[test]
+    fn appearance_session_serializes_accessibility_without_losing_other_fields() {
+        let mut session = UiAppearanceSession::new();
+
+        let large = session
+            .apply(UiClientId::Launcher, UiAppearanceAction::ToggleLargeText, 1)
+            .unwrap();
+        assert_eq!(
+            large.appearance(),
+            UiAppearance::new(true, false).with_accessibility(true, false)
+        );
+        assert_eq!(large.revision(), 2);
+
+        let high = session
+            .apply(UiClientId::App, UiAppearanceAction::ToggleHighContrast, 1)
+            .unwrap();
+        assert_eq!(
+            high.appearance(),
+            UiAppearance::new(true, false).with_accessibility(true, true)
+        );
+        assert_eq!(high.revision(), 3);
+
+        let violet = session
+            .apply(UiClientId::Launcher, UiAppearanceAction::ToggleAccent, 2)
+            .unwrap();
+        assert_eq!(
+            violet.appearance(),
+            UiAppearance::new(true, true).with_accessibility(true, true)
+        );
+
+        let dimmed = session
+            .apply(
+                UiClientId::App,
+                UiAppearanceAction::SetSoftwareDimmingStrong,
+                2,
+            )
+            .unwrap();
+        assert_eq!(
+            dimmed.appearance(),
+            UiAppearance::new(true, true)
+                .with_software_dimming(UiSoftwareDimming::Strong)
+                .with_accessibility(true, true)
+        );
+
+        let light = session
+            .apply(UiClientId::Launcher, UiAppearanceAction::ToggleTheme, 3)
+            .unwrap();
+        assert_eq!(
+            light.appearance(),
+            UiAppearance::new(false, true)
+                .with_software_dimming(UiSoftwareDimming::Strong)
+                .with_accessibility(true, true)
+        );
+        assert_eq!(light.revision(), 6);
+        assert_eq!(session.last_request_id(UiClientId::Launcher), 3);
+        assert_eq!(session.last_request_id(UiClientId::App), 2);
+
+        let before = session;
+        assert_eq!(
+            session.apply(UiClientId::App, UiAppearanceAction::ToggleLargeText, 4),
+            Err(UiAppearanceSessionError::RequestGap)
+        );
+        assert_eq!(session, before);
+    }
+
+    #[test]
     fn boot_notification_session_is_one_way_shared_and_transactional() {
         let mut session = UiBootNotificationSession::new();
         assert_eq!(session, UiBootNotificationSession::default());
@@ -17101,6 +17731,120 @@ mod tests {
             Err(UiSystemUiSessionError::FocusAppRequiresHome)
         );
         assert_eq!(session, foreground);
+    }
+
+    #[test]
+    fn system_ui_dismiss_recent_requires_exact_stable_overview_identity() {
+        let mut session = UiSystemUiSession::new();
+        session
+            .apply_client_action(UiClientId::Launcher, UiSystemUiAction::Unlock, None, 1, 1)
+            .unwrap();
+        session.focus_app(ShellAppId::Phone).unwrap();
+        session.begin_nav().unwrap();
+        session.finish_nav(UiSystemUiMode::Overview).unwrap();
+
+        let overview = session;
+        assert_eq!(
+            session.apply_client_action(
+                UiClientId::Launcher,
+                UiSystemUiAction::DismissRecent,
+                Some(ShellAppId::Messages),
+                2,
+                session.revision(),
+            ),
+            Err(UiSystemUiSessionError::RecentAppMismatch)
+        );
+        assert_eq!(
+            session, overview,
+            "a mismatched card must not consume an epoch"
+        );
+
+        let dismissed = session
+            .apply_client_action(
+                UiClientId::Launcher,
+                UiSystemUiAction::DismissRecent,
+                Some(ShellAppId::Phone),
+                2,
+                session.revision(),
+            )
+            .unwrap();
+        assert_eq!(dismissed.mode(), UiSystemUiMode::Overview);
+        assert_eq!(dismissed.recent(), None);
+        assert_eq!(session.last_request_id(), 2);
+
+        let empty = session;
+        assert_eq!(
+            session.apply_client_action(
+                UiClientId::Launcher,
+                UiSystemUiAction::DismissRecent,
+                Some(ShellAppId::Phone),
+                3,
+                session.revision(),
+            ),
+            Err(UiSystemUiSessionError::RecentAppMismatch)
+        );
+        assert_eq!(session, empty);
+
+        let mut home = UiSystemUiSession::new();
+        home.apply_client_action(UiClientId::Launcher, UiSystemUiAction::Unlock, None, 1, 1)
+            .unwrap();
+        home.focus_app(ShellAppId::Settings).unwrap();
+        home.focus_home().unwrap();
+        let before = home;
+        assert_eq!(
+            home.apply_client_action(
+                UiClientId::Launcher,
+                UiSystemUiAction::DismissRecent,
+                Some(ShellAppId::Settings),
+                2,
+                home.revision(),
+            ),
+            Err(UiSystemUiSessionError::DismissRecentRequiresOverview)
+        );
+        assert_eq!(home, before);
+    }
+
+    #[test]
+    fn system_ui_dismiss_recent_accepts_exact_compatible_identity_without_kill_authority() {
+        let identity = UiCompatibleActivityIdentity::new(41, 9).unwrap();
+        let recent = UiRecentIdentity::CompatibleAndroid(identity);
+        let mut session = UiSystemUiSession::new();
+        session
+            .apply_client_recent_action(UiClientId::Launcher, UiSystemUiAction::Unlock, None, 1, 1)
+            .unwrap();
+        session
+            .apply_client_recent_action(
+                UiClientId::Launcher,
+                UiSystemUiAction::ReserveCompatibleActivity,
+                Some(recent),
+                2,
+                session.revision(),
+            )
+            .unwrap();
+        session
+            .apply_client_recent_action(
+                UiClientId::Launcher,
+                UiSystemUiAction::PresentCompatibleActivity,
+                Some(recent),
+                3,
+                session.revision(),
+            )
+            .unwrap();
+        session.begin_nav().unwrap();
+        session.finish_nav(UiSystemUiMode::Overview).unwrap();
+
+        let dismissed = session
+            .apply_client_recent_action(
+                UiClientId::Launcher,
+                UiSystemUiAction::DismissRecent,
+                Some(recent),
+                4,
+                session.revision(),
+            )
+            .unwrap();
+        assert_eq!(dismissed.mode(), UiSystemUiMode::Overview);
+        assert_eq!(dismissed.recent(), None);
+        assert!(!session.has_compatible_activity_reservation());
     }
 
     #[test]
@@ -18092,8 +18836,23 @@ mod tests {
         }
         assert_eq!(UiAppearanceAction::ToggleTheme.software_dimming(), None);
         assert_eq!(UiAppearanceAction::ToggleAccent.software_dimming(), None);
+        assert_eq!(UiAppearanceAction::ToggleLargeText.raw(), 8);
+        assert_eq!(UiAppearanceAction::ToggleHighContrast.raw(), 9);
+        assert_eq!(
+            UiAppearanceAction::from_raw(8),
+            Some(UiAppearanceAction::ToggleLargeText)
+        );
+        assert_eq!(
+            UiAppearanceAction::from_raw(9),
+            Some(UiAppearanceAction::ToggleHighContrast)
+        );
+        assert_eq!(UiAppearanceAction::ToggleLargeText.software_dimming(), None);
+        assert_eq!(
+            UiAppearanceAction::ToggleHighContrast.software_dimming(),
+            None
+        );
         assert_eq!(UiAppearanceAction::from_raw(0), None);
-        assert_eq!(UiAppearanceAction::from_raw(8), None);
+        assert_eq!(UiAppearanceAction::from_raw(10), None);
         for (raw, mode) in [
             (1, UiSystemUiMode::Locked),
             (2, UiSystemUiMode::Home),
@@ -18114,12 +18873,13 @@ mod tests {
             (6, UiSystemUiAction::FinishCompatibleActivity),
             (7, UiSystemUiAction::ReserveCompatibleActivity),
             (8, UiSystemUiAction::AbortCompatibleActivityVerification),
+            (9, UiSystemUiAction::DismissRecent),
         ] {
             assert_eq!(UiSystemUiAction::from_raw(raw), Some(action));
             assert_eq!(action.raw(), raw as u8);
         }
         assert_eq!(UiSystemUiAction::from_raw(0), None);
-        assert_eq!(UiSystemUiAction::from_raw(9), None);
+        assert_eq!(UiSystemUiAction::from_raw(10), None);
         assert_eq!(
             UiAndroidBoxExecutionKind::from_raw(1),
             Some(UiAndroidBoxExecutionKind::Boot)
@@ -18174,6 +18934,10 @@ mod tests {
         );
         assert_eq!(
             UiClientControl::update_system_ui(UiSystemUiAction::ActivateRecent, None, 1, 1,),
+            Err(UiClientControlError::SystemUiActionRequiresApp)
+        );
+        assert_eq!(
+            UiClientControl::update_system_ui(UiSystemUiAction::DismissRecent, None, 1, 1,),
             Err(UiClientControlError::SystemUiActionRequiresApp)
         );
         assert_eq!(
@@ -18252,6 +19016,13 @@ mod tests {
                 Some(ShellAppId::Messages),
                 3,
                 3,
+            )
+            .unwrap(),
+            UiClientControl::update_system_ui(
+                UiSystemUiAction::DismissRecent,
+                Some(ShellAppId::Phone),
+                4,
+                4,
             )
             .unwrap(),
         ] {
@@ -18503,7 +19274,7 @@ mod tests {
         )
         .unwrap()
         .encode();
-        for raw in [0_u64, 8, 0x101] {
+        for raw in [0_u64, 10, 0x101] {
             let mut invalid_action = appearance;
             invalid_action[CONTROL_OFFSET_CLIENT..CONTROL_OFFSET_CLIENT + 8]
                 .copy_from_slice(&raw.to_le_bytes());
@@ -18796,6 +19567,18 @@ mod tests {
                 Some(identity),
                 None,
             ),
+            (
+                UiSystemUiAction::DismissRecent,
+                UiSystemUiRequestStatus::Accepted,
+                None,
+                None,
+            ),
+            (
+                UiSystemUiAction::DismissRecent,
+                UiSystemUiRequestStatus::Accepted,
+                Some(identity),
+                None,
+            ),
         ] {
             let event = UiServerEvent::system_ui_request_completed(
                 session_id,
@@ -18876,6 +19659,18 @@ mod tests {
                 Err(UiServerEventError::NonCanonicalSystemUiRequestCompletion)
             );
         }
+        assert_eq!(
+            UiServerEvent::system_ui_request_completed(
+                session_id,
+                UiSystemUiAction::DismissRecent,
+                UiSystemUiRequestStatus::Accepted,
+                1,
+                1,
+                Some(identity),
+                Some(UiCompatibleActivityReservationOrigin::Overview),
+            ),
+            Err(UiServerEventError::NonCanonicalSystemUiRequestCompletion)
+        );
 
         let mut invalid_action = wire;
         invalid_action[EVENT_OFFSET_HEADER_RESERVED] &= !SYSTEM_UI_COMPLETION_ACTION_MASK;
@@ -19517,7 +20312,7 @@ mod tests {
                 ))
             );
         }
-        for flags in [1_u64 << 5, 1 << 63, u64::MAX] {
+        for flags in [1_u64 << 7, 1 << 63, u64::MAX] {
             let mut invalid_flags = canonical.encode();
             invalid_flags[EVENT_OFFSET_ARGUMENT_0..EVENT_OFFSET_ARGUMENT_0 + 8]
                 .copy_from_slice(&flags.to_le_bytes());
@@ -20324,18 +21119,29 @@ mod tests {
         assert_eq!(&wire[8..12], &[0x44, 0x33, 0x22, 0x11]);
         assert_eq!(&wire[12..16], &[0x88, 0x77, 0x66, 0x55]);
         assert_eq!(&wire[16..20], &[0xcc, 0xbb, 0xaa, 0x99]);
+        #[cfg(feature = "mobile-ui-runtime")]
+        assert_eq!(
+            &wire[20..24],
+            &[0, BUFFER_PRESENT_DISPOSITION_PRESENT, 0, 0]
+        );
+        #[cfg(not(feature = "mobile-ui-runtime"))]
         assert_eq!(&wire[20..24], &[0; 4]);
         assert_eq!(&wire[24..32], &[8, 7, 6, 5, 4, 3, 2, 1]);
-        let x = BUFFER_PRESENT_X.to_le_bytes();
-        let y = BUFFER_PRESENT_Y.to_le_bytes();
-        let width = BUFFER_PRESENT_WIDTH.to_le_bytes();
-        let height = BUFFER_PRESENT_HEIGHT.to_le_bytes();
-        assert_eq!(
-            &wire[32..40],
-            &[
-                x[0], x[1], y[0], y[1], width[0], width[1], height[0], height[1],
-            ]
-        );
+        #[cfg(feature = "mobile-ui-runtime")]
+        assert_eq!(&wire[32..40], &[0; 8]);
+        #[cfg(not(feature = "mobile-ui-runtime"))]
+        {
+            let x = BUFFER_PRESENT_X.to_le_bytes();
+            let y = BUFFER_PRESENT_Y.to_le_bytes();
+            let width = BUFFER_PRESENT_WIDTH.to_le_bytes();
+            let height = BUFFER_PRESENT_HEIGHT.to_le_bytes();
+            assert_eq!(
+                &wire[32..40],
+                &[
+                    x[0], x[1], y[0], y[1], width[0], width[1], height[0], height[1],
+                ]
+            );
+        }
         assert_eq!(&wire[40..48], &[0; 8]);
         #[cfg(feature = "mobile-system-chrome0")]
         {
@@ -20354,6 +21160,8 @@ mod tests {
         assert_eq!(present.focus_generation(), 0x99aa_bbcc);
         assert_eq!(present.buffer_generation(), 0x0102_0304_0506_0708);
         assert_eq!(present.system_ui_revision(), 0);
+        assert_eq!(present.client_buffer_slot(), 0);
+        assert_eq!(present.disposition(), BufferPresentDisposition::Present);
     }
 
     #[test]
@@ -20548,6 +21356,10 @@ mod tests {
             wire[offset] ^= 0x80;
             assert_eq!(BufferPresent::decode(&wire), Err(expected));
         }
+        #[cfg(feature = "mobile-ui-runtime")]
+        let unknown_modes = [0, 3, u8::MAX];
+        #[cfg(not(feature = "mobile-ui-runtime"))]
+        let unknown_modes = [0, 2, u8::MAX];
         for unknown in [0, 2, u8::MAX] {
             let mut wire = canonical;
             wire[BUFFER_PRESENT_OFFSET_KIND] = unknown;
@@ -20555,6 +21367,8 @@ mod tests {
                 BufferPresent::decode(&wire),
                 Err(BufferPresentError::InvalidKind)
             );
+        }
+        for unknown in unknown_modes {
             let mut wire = canonical;
             wire[BUFFER_PRESENT_OFFSET_MODE] = unknown;
             assert_eq!(
@@ -20562,6 +21376,247 @@ mod tests {
                 Err(BufferPresentError::InvalidMode)
             );
         }
+    }
+
+    #[cfg(feature = "mobile-ui-runtime")]
+    #[test]
+    fn buffer_present_v6_slots_and_discard_are_bounded_and_round_trip() {
+        assert_eq!(BUFFER_PRESENT_VERSION, 6);
+        assert_eq!(BUFFER_PRESENT_CLIENT_SLOT_COUNT, 2);
+        let present = BufferPresent::client_with_system_ui_revision(7, 11, 13, 17)
+            .unwrap()
+            .with_client_buffer_slot(1)
+            .unwrap();
+        let discard = present.as_discard();
+        let present_wire = submitted_buffer_present(present).encode();
+        let discard_wire = submitted_buffer_present(discard).encode();
+        assert_eq!(present_wire[BUFFER_PRESENT_OFFSET_CLIENT_SLOT], 1);
+        assert_eq!(
+            present_wire[BUFFER_PRESENT_OFFSET_DISPOSITION],
+            BUFFER_PRESENT_DISPOSITION_PRESENT
+        );
+        assert_eq!(
+            discard_wire[BUFFER_PRESENT_OFFSET_DISPOSITION],
+            BUFFER_PRESENT_DISPOSITION_DISCARD
+        );
+        assert_eq!(
+            BufferPresent::decode(&present_wire)
+                .unwrap()
+                .client_buffer_slot(),
+            1
+        );
+        assert_eq!(
+            BufferPresent::decode(&discard_wire).unwrap().disposition(),
+            BufferPresentDisposition::Discard
+        );
+        assert_eq!(
+            present.with_client_buffer_slot(2),
+            Err(BufferPresentError::InvalidClientBufferSlot)
+        );
+
+        let mut invalid_slot = present_wire;
+        invalid_slot[BUFFER_PRESENT_OFFSET_CLIENT_SLOT] = 2;
+        assert_eq!(
+            BufferPresent::decode(&invalid_slot),
+            Err(BufferPresentError::InvalidClientBufferSlot)
+        );
+        for unknown in [0, 3, u8::MAX] {
+            let mut invalid_disposition = present_wire;
+            invalid_disposition[BUFFER_PRESENT_OFFSET_DISPOSITION] = unknown;
+            assert_eq!(
+                BufferPresent::decode(&invalid_disposition),
+                Err(BufferPresentError::InvalidDisposition)
+            );
+        }
+    }
+
+    #[cfg(feature = "mobile-ui-runtime")]
+    #[test]
+    fn buffer_present_v6_damage_regions_are_exact_bounded_and_discard_canonicalizes_full() {
+        let damage = DamageRect {
+            x: 12,
+            y: 34,
+            width: 56,
+            height: 78,
+        };
+        let full = BufferPresent::client_with_system_ui_revision(7, 11, 13, 17)
+            .unwrap()
+            .with_client_buffer_slot(1)
+            .unwrap();
+        assert_eq!(full.mode(), BufferPresentMode::Full);
+        assert_eq!(full.damage_rect(), DamageRect::FULL);
+
+        let present = full.with_damage(damage).unwrap();
+        let wire = submitted_buffer_present(present).encode();
+        assert_eq!(wire[BUFFER_PRESENT_OFFSET_MODE], BUFFER_PRESENT_MODE_DAMAGE);
+        assert_eq!(wire[BUFFER_PRESENT_OFFSET_DAMAGE_COUNT], 1);
+        assert_eq!(&wire[32..40], &[12, 0, 34, 0, 56, 0, 78, 0]);
+        assert_eq!(&wire[56..64], &[0; 8]);
+        assert_eq!(
+            BufferPresent::decode(&wire),
+            Ok(submitted_buffer_present(present))
+        );
+        assert_eq!(present.mode(), BufferPresentMode::Damage);
+        assert_eq!(present.damage_rect(), damage);
+        assert_eq!(present.damage_rects(), &[damage]);
+
+        let second = DamageRect {
+            x: 400,
+            y: 900,
+            width: 120,
+            height: 80,
+        };
+        let multi = full.with_damage_rects(&[second, damage]).unwrap();
+        let multi_wire = submitted_buffer_present(multi).encode();
+        assert_eq!(multi_wire[BUFFER_PRESENT_OFFSET_DAMAGE_COUNT], 2);
+        assert_eq!(&multi_wire[32..40], &[12, 0, 34, 0, 56, 0, 78, 0]);
+        assert_eq!(
+            &multi_wire[56..64],
+            &[0x90, 0x01, 0x84, 0x03, 120, 0, 80, 0]
+        );
+        assert_eq!(
+            BufferPresent::decode(&multi_wire),
+            Ok(submitted_buffer_present(multi))
+        );
+        assert_eq!(multi.damage_rects(), &[damage, second]);
+        assert_eq!(multi.damage_rect(), damage.union(second));
+
+        let mut reversed = multi_wire;
+        let first_slot: [u8; 8] = reversed[32..40].try_into().unwrap();
+        let second_slot: [u8; 8] = reversed[56..64].try_into().unwrap();
+        reversed[32..40].copy_from_slice(&second_slot);
+        reversed[56..64].copy_from_slice(&first_slot);
+        assert_eq!(
+            BufferPresent::decode(&reversed),
+            Err(BufferPresentError::NonCanonicalDamageRects)
+        );
+
+        let mut overlapping = multi_wire;
+        overlapping[56..64].copy_from_slice(&[20, 0, 40, 0, 20, 0, 20, 0]);
+        assert_eq!(
+            BufferPresent::decode(&overlapping),
+            Err(BufferPresentError::OverlappingDamageRects)
+        );
+
+        let discard = present.as_discard();
+        assert_eq!(discard.mode(), BufferPresentMode::Full);
+        assert_eq!(discard.damage_rect(), DamageRect::FULL);
+        assert_eq!(discard.damage_rects(), &[DamageRect::FULL]);
+        assert_eq!(discard.encode()[BUFFER_PRESENT_OFFSET_DAMAGE_COUNT], 0);
+        assert!(discard.encode()[32..40].iter().all(|byte| *byte == 0));
+        assert!(discard.encode()[56..].iter().all(|byte| *byte == 0));
+        assert_eq!(
+            discard.with_damage(damage),
+            Err(BufferPresentError::DamageOnDiscard)
+        );
+
+        for (damage, expected) in [
+            (
+                DamageRect {
+                    x: 0,
+                    y: 0,
+                    width: 0,
+                    height: 1,
+                },
+                BufferPresentError::EmptyDamage,
+            ),
+            (
+                DamageRect {
+                    x: SURFACE_WIDTH,
+                    y: 0,
+                    width: 1,
+                    height: 1,
+                },
+                BufferPresentError::DamageOutOfBounds,
+            ),
+            (
+                DamageRect {
+                    x: 0,
+                    y: SURFACE_HEIGHT,
+                    width: 1,
+                    height: 1,
+                },
+                BufferPresentError::DamageOutOfBounds,
+            ),
+        ] {
+            assert_eq!(full.with_damage(damage), Err(expected));
+        }
+
+        let mut damage_discard = wire;
+        damage_discard[BUFFER_PRESENT_OFFSET_DISPOSITION] = BUFFER_PRESENT_DISPOSITION_DISCARD;
+        assert_eq!(
+            BufferPresent::decode(&damage_discard),
+            Err(BufferPresentError::DamageOnDiscard)
+        );
+        let mut empty = wire;
+        empty[BUFFER_PRESENT_OFFSET_DAMAGE_0_X + 4..BUFFER_PRESENT_OFFSET_DAMAGE_0_X + 6].fill(0);
+        assert_eq!(
+            BufferPresent::decode(&empty),
+            Err(BufferPresentError::EmptyDamage)
+        );
+
+        assert_eq!(
+            full.with_damage_rects(&[damage, second, damage]),
+            Err(BufferPresentError::TooManyDamageRects)
+        );
+        assert_eq!(
+            full.with_damage_rects(&[
+                damage,
+                DamageRect {
+                    x: 20,
+                    y: 40,
+                    width: 20,
+                    height: 20,
+                },
+            ]),
+            Err(BufferPresentError::OverlappingDamageRects)
+        );
+    }
+
+    #[cfg(feature = "mobile-ui-runtime")]
+    #[test]
+    fn buffer_present_v6_decoder_accepts_canonical_v5_full_and_single_damage() {
+        let full = submitted_buffer_present(
+            BufferPresent::client_with_system_ui_revision(7, 11, 13, 17).unwrap(),
+        );
+        let mut legacy_full = full.encode();
+        legacy_full[BUFFER_PRESENT_OFFSET_VERSION..BUFFER_PRESENT_OFFSET_VERSION + 2]
+            .copy_from_slice(&BUFFER_PRESENT_LEGACY_DAMAGE_VERSION.to_le_bytes());
+        legacy_full[BUFFER_PRESENT_OFFSET_X..BUFFER_PRESENT_OFFSET_X + 2]
+            .copy_from_slice(&BUFFER_PRESENT_X.to_le_bytes());
+        legacy_full[BUFFER_PRESENT_OFFSET_Y..BUFFER_PRESENT_OFFSET_Y + 2]
+            .copy_from_slice(&BUFFER_PRESENT_Y.to_le_bytes());
+        legacy_full[BUFFER_PRESENT_OFFSET_WIDTH..BUFFER_PRESENT_OFFSET_WIDTH + 2]
+            .copy_from_slice(&BUFFER_PRESENT_WIDTH.to_le_bytes());
+        legacy_full[BUFFER_PRESENT_OFFSET_HEIGHT..BUFFER_PRESENT_OFFSET_HEIGHT + 2]
+            .copy_from_slice(&BUFFER_PRESENT_HEIGHT.to_le_bytes());
+        assert_eq!(BufferPresent::decode(&legacy_full), Ok(full));
+
+        let damage = DamageRect {
+            x: 12,
+            y: 34,
+            width: 56,
+            height: 78,
+        };
+        let damaged = submitted_buffer_present(full.with_damage(damage).unwrap());
+        let mut legacy_damage = damaged.encode();
+        legacy_damage[BUFFER_PRESENT_OFFSET_VERSION..BUFFER_PRESENT_OFFSET_VERSION + 2]
+            .copy_from_slice(&BUFFER_PRESENT_LEGACY_DAMAGE_VERSION.to_le_bytes());
+        legacy_damage[BUFFER_PRESENT_OFFSET_DAMAGE_COUNT] = 0;
+        legacy_damage[BUFFER_PRESENT_OFFSET_X..BUFFER_PRESENT_OFFSET_X + 2]
+            .copy_from_slice(&BUFFER_PRESENT_X.to_le_bytes());
+        legacy_damage[BUFFER_PRESENT_OFFSET_Y..BUFFER_PRESENT_OFFSET_Y + 2]
+            .copy_from_slice(&BUFFER_PRESENT_Y.to_le_bytes());
+        legacy_damage[BUFFER_PRESENT_OFFSET_WIDTH..BUFFER_PRESENT_OFFSET_WIDTH + 2]
+            .copy_from_slice(&BUFFER_PRESENT_WIDTH.to_le_bytes());
+        legacy_damage[BUFFER_PRESENT_OFFSET_HEIGHT..BUFFER_PRESENT_OFFSET_HEIGHT + 2]
+            .copy_from_slice(&BUFFER_PRESENT_HEIGHT.to_le_bytes());
+        write_buffer_damage_rect(&mut legacy_damage, BUFFER_PRESENT_OFFSET_DAMAGE_X, damage);
+        assert_eq!(BufferPresent::decode(&legacy_damage), Ok(damaged));
+        assert_eq!(
+            BufferPresent::decode(&legacy_damage).unwrap().encode(),
+            damaged.encode()
+        );
     }
 
     #[test]
@@ -20600,6 +21655,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(feature = "mobile-ui-runtime"))]
     #[test]
     fn buffer_present_decoder_rejects_every_non_full_geometry_field() {
         let canonical = submitted_buffer_present(BufferPresent::client(1, 1, 1).unwrap()).encode();
@@ -20619,7 +21675,7 @@ mod tests {
         }
     }
 
-    #[cfg(not(feature = "mobile-system-chrome0"))]
+    #[cfg(not(feature = "mobile-ui-runtime"))]
     #[test]
     fn buffer_present_parent_profile_remains_v2_full_surface() {
         assert_eq!(BUFFER_PRESENT_VERSION, 2);
@@ -20642,10 +21698,37 @@ mod tests {
         assert_eq!(&wire[38..40], &SURFACE_HEIGHT.to_le_bytes());
     }
 
+    #[cfg(all(feature = "mobile-ui-runtime", not(feature = "mobile-system-chrome0")))]
+    #[test]
+    fn buffer_present_mobile_parent_profile_is_v6_full_surface() {
+        assert_eq!(BUFFER_PRESENT_VERSION, 6);
+        assert_eq!(
+            (
+                BUFFER_PRESENT_X,
+                BUFFER_PRESENT_Y,
+                BUFFER_PRESENT_WIDTH,
+                BUFFER_PRESENT_HEIGHT,
+            ),
+            (0, 0, SURFACE_WIDTH, SURFACE_HEIGHT)
+        );
+        let wire = BufferPresent::client_with_system_ui_revision(1, 1, 1, 1)
+            .unwrap()
+            .with_client_buffer_slot(1)
+            .unwrap()
+            .encode();
+        assert_eq!(&wire[4..6], &6_u16.to_le_bytes());
+        assert_eq!(wire[20], 1);
+        assert_eq!(wire[21], BUFFER_PRESENT_DISPOSITION_PRESENT);
+        assert_eq!(wire[22], 0);
+        assert_eq!(&wire[32..34], &0_u16.to_le_bytes());
+        assert_eq!(&wire[34..36], &0_u16.to_le_bytes());
+        assert_eq!(&wire[36..40], &[0; 4]);
+    }
+
     #[cfg(feature = "mobile-system-chrome0")]
     #[test]
-    fn buffer_present_child_profile_is_v3_content_viewport_only() {
-        assert_eq!(BUFFER_PRESENT_VERSION, 3);
+    fn buffer_present_child_profile_is_v6_with_implicit_content_viewport() {
+        assert_eq!(BUFFER_PRESENT_VERSION, 6);
         assert_eq!(
             (
                 BUFFER_PRESENT_X,
@@ -20665,7 +21748,7 @@ mod tests {
         assert_eq!(
             BufferPresent::decode(&provisional.encode()),
             Ok(provisional),
-            "v3 decoder preserves the provisional client form; syscall 62 rejects it"
+            "v6 decoder preserves the provisional client form; syscall 62 rejects it"
         );
         assert_eq!(
             provisional.with_system_chrome_generation(0),
@@ -20675,8 +21758,8 @@ mod tests {
             .with_system_chrome_generation(0x3132_3334_3536_3738)
             .unwrap()
             .encode();
-        assert_eq!(&canonical[4..6], &3_u16.to_le_bytes());
-        assert_eq!(&canonical[32..40], &[0, 0, 64, 0, 0xd0, 0x02, 0xa8, 0x05,]);
+        assert_eq!(&canonical[4..6], &6_u16.to_le_bytes());
+        assert_eq!(&canonical[32..40], &[0; 8]);
         assert_eq!(
             &canonical[48..56],
             &[0x38, 0x37, 0x36, 0x35, 0x34, 0x33, 0x32, 0x31]
@@ -20687,14 +21770,6 @@ mod tests {
                 .unwrap()
                 .system_chrome_generation(),
             0x3132_3334_3536_3738
-        );
-
-        let mut legacy_full = canonical;
-        legacy_full[34..36].copy_from_slice(&0_u16.to_le_bytes());
-        legacy_full[38..40].copy_from_slice(&SURFACE_HEIGHT.to_le_bytes());
-        assert_eq!(
-            BufferPresent::decode(&legacy_full),
-            Err(BufferPresentError::InvalidGeometry)
         );
 
         let mut legacy_version = canonical;

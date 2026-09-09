@@ -1,5 +1,7 @@
 use crate::digest::{adler32, sha1};
-use crate::resources::{ActivityScene, ResourceString, ViewKind};
+#[cfg(feature = "androidbox-string-text12")]
+use crate::resources::ResourceString;
+use crate::resources::{ActivityScene, ViewKind};
 use crate::{
     ActivityConstructorInfo, ActivityMethodInfo, BOOT_METHOD, ENTRY_CLASS, Error, MAX_DEX_BYTES,
     MAX_INTERACTIVE_ACTIVITY_CALLBACKS, MethodInfo, ON_TAP_METHOD, ViewText,
@@ -1835,8 +1837,12 @@ fn execute_interactive_on_create(
     let mut pending_result = None;
     #[cfg(feature = "androidbox-activity-fields10")]
     let mut checked_field_candidate = None;
-    let mut activity_text_field_value: Option<(u32, u8)> = None;
-    let mut activity_int_field_value: Option<(u32, i32)> = None;
+    let activity_text_field_value: Option<(u32, u8)> = None;
+    #[cfg(feature = "androidbox-activity-fields10")]
+    let mut activity_text_field_value = activity_text_field_value;
+    let activity_int_field_value: Option<(u32, i32)> = None;
+    #[cfg(feature = "androidbox-activity-state11")]
+    let mut activity_int_field_value = activity_int_field_value;
     let mut pc = 0u32;
     let mut steps = 0u16;
     while pc < code.units {
@@ -2158,7 +2164,9 @@ fn execute_on_click(
     let mut incremented_int = None;
     #[cfg(feature = "androidbox-string-builder13")]
     let mut string_builder_stage = 0u8;
-    let mut next_activity_field = retained_activity_field;
+    let next_activity_field = retained_activity_field;
+    #[cfg(feature = "androidbox-activity-state11")]
+    let mut next_activity_field = next_activity_field;
     let mut pc = 0u32;
     let mut steps = 0u16;
     while pc < code.units {

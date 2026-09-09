@@ -1,0 +1,307 @@
+# Mobile mapped double-buffer and damage frame transaction
+
+日期：2026-08-24；2026-09-09 补充 copied layers 的局部 producer 渲染。
+
+本里程碑把 Bndroid 自有 `mobile-ui-runtime` 与有界 `androidbox-dex0` 预览从
+“每个 producer 一个映射 backing、提交后同步等待”推进为真正有所有权约束的
+双缓冲 frame transaction。Launcher 与 App 各拥有两个 720×1600 XRGB8888
+backing；producer 只写 `Writable` 槽，SurfaceServer 只读已 queue/acquire 的精确
+槽。页面切换期间允许当前帧等待提交确认时，下一帧在另一槽完成光栅和 queue。
+最新修订把同一 transaction 的 Damage 扩展为最多两个精确、非空、surface-local
+region；producer planner、SurfaceServer、内核逐行 copy 与 compositor 共享同一有界
+region set，不建立第二套显示管线，也不把两个远离目标之间的空隙扩成写入区域。
+
+适用条件仍严格限定为：
+
+```text
+mobile-ui-runtime && !androidbox-apk-install0
+```
+
+因此纯 mobile UI 和 `androidbox-dex0` 使用 mapped double-buffer 路径。持久安装、
+interactive 及更高 AndroidBox profile 仍使用单 content buffer 加 SurfaceServer
+chrome buffer 的有界 copy/layered 路径，但现已复用同一个 v6 region validation、
+逐区域 copy 与 compositor publish。layered producer 现也只生成和传输受影响区域，
+内核继续验证两个完整 source 的 canonical XRGB 高字节；这没有放宽
+`SurfacePresentBufferLayers` 权限、content/chrome owner 或 generation 约束。本轮没有
+下载 AOSP、修改 Android SDK、连接或操作实体设备。
+
+## 2026-09-09：copied layers 局部生成与传输
+
+`mobile_raster.rs` 是现有 `bndr-ui::mobile` 的内部模块，复用同一 Canvas、页面、字体、
+布局和 damage planner。它为有界传输缓冲提供 stride 等于 region width 的紧凑渲染，
+没有建立第二套 compositor、服务或 wire。全宽条带仍以一批 `GraphicsBufferWrite`
+传输，窄矩形通过原 ABI 按扫描线写入，矩形外的水平空隙和两区域之间的空隙均不写。
+
+`MobileRasterCache` 分别记录 written backing 和已确认 presented scene。被取消的
+提交只影响前者；下一次 raster 对照实际 backing 修复，下一次 present 对照已显示
+画面规划。焦点代际变化仍强制完整 present。系统栏另由 SurfaceServer 保存最小
+`MobileSystemChromeState` 缓存，原有顶部/底部权限边界不变；内容回调不再重画系统栏。
+这些缓存只描述像素，不能发布焦点、应用、包或设备权限。
+
+动态 Scene-RPC2 的增量路径逐节点检查结构、身份与几何，使用原渲染器的控件矩形，
+同时容纳文字更新和 pressed 反馈。超出两个区域、结构变化和过小精确高度导致的
+文字溢出均回退 Full。默认 UI 测试 `252/252`、最高 UI 测试 `298/298` 通过；其中
+覆盖紧凑区域与整帧等价、边界哨兵、取消帧修复、系统栏重用、跨 owner 拒绝和动态
+场景变化。另修复三项 mobile-only 测试的 feature 限定及低版本 AndroidBox 的条件
+导入/可变绑定，默认测试和 Install-0 AArch64 Clippy 也能通过。
+
+内核 `MOBILE_LAYER_COPY_COST_OK` 在每个实际 layered commit 后报告原
+`GraphicsBufferWrite` 的累计调用数与字节数。共用
+`scripts/verify-mobile-layer-copy.py` 按 frame/producer/generation 关联这些记录，
+验证回调的实际复制量、系统栏零写入和区域面积。篡改计数、代际、owner 以及删除
+证据的四个负例均被拒绝。这里测量的是 copy 字节，不能据此声称 GPU 性能或实测 FPS。
+
+Interactive-0 双启动门通过于 `target/androidbox-interactive0/check.Aq9VJK`：
+35 次 commit 中 34 次重用系统栏；真实按钮回调只复制 `710,144` 字节，覆盖
+`177,536` 像素，比原先完整 content+chrome 的 `4,608,000` 字节少 `84.59%`。
+代价是窄区域按行使用 304 次 copy 调用；调用次数与字节量分别报告。重新打开时
+Activity 像素完全恢复，source-free recovery 的 package disk 逐字节不变。
+原有纯 mobile 门也重新通过于 `target/mobile-ui/check-overview.BsRdLr`，
+36 次 commit/grant 与分钟跳变、锁屏通知、Overview 的像素证据保持通过。
+
+最终 ABI69 三启动门通过于 `target/layout-mixed19/coexist.aqo6Ud`，完成两个 SDK
+APK 的安装、启动、独立 worker 恢复、两路回调、应用图标/Overview 像素及无 source
+重启恢复。第三次启动的 34 次 commit 中有 33 次重用系统栏；两路回调实测如下：
+
+| 回调 | 内容区域面积 | 实际 copy 字节 | copy 调用 | 系统栏写入 | 相比原完整两层减少 |
+|---|---:|---:|---:|---:|---:|
+| 固定宽度 Button | 80,512 px | 322,048 | 208 | 0 | 93.01% |
+| 权重宽度 Button | 77,632 px | 310,528 | 192 | 0 | 93.26% |
+
+两路均只修改同一 status TextView 与相应 Button，控件间的间隔不写入。证据为该
+目录的 `copy-evidence.json`、`dex-method-raster-evidence.txt`、
+`recovery-catalog-activity-{approved,rejected}.ppm`。恢复后 package disk SHA-256 为
+`aca06d7edd173362f76b7b08119add97eeab36af3e6c48fdfa15cc45aeaa7520`，与安装后完全相同。
+另把真实日志中的回调复制量改回旧整帧 `4,608,000` 字节，验证器按精确复制量拒绝，
+因此旧的整层传输不能借助相同 damage 声明通过此门。
+
+最高 ABI69 门同时修正了旧抽屉脚本的等待条件：一次拖动产生 held reveal 与 settled
+release 两帧；旧的四帧等待会把随后两次分钟更新计入。两个打开抽屉入口现复用同一
+helper，以最终把手位置的像素栅栏等待 settled 状态，防止计数混入尚未结束的 Home 帧；
+后续真实应用启动和图标像素断言继续完整执行。
+
+可交互 Cocoa 预览使用同一 ABI69 kernel 与最终证据盘 snapshot，窗口名为
+`Bndroid - Android apps / region rendering`；串口与截图放在
+`target/mobile-ui/region-preview.7lqPpu/`。已目视 `Catalog ready` 经真实按钮回调变为
+`Review count: 1`；`android-after.png` SHA-256 为
+`6ba77e98d0fd97b0548377b350cc07168e3a95727bdce2395f3b69a3cd2e7856`。
+该 opt-in profile 首次打开时仍按原测试契约注入一次 worker fault；日志中 armed、
+fault reap 与 `ANDROID_APP_RESTART_OK errors=0` 完整匹配，随后回调来自新 worker。
+这次改进仍针对现有受限 APK 路径，完整
+ART/Bionic/Binder/Framework、GPU、真实面板和输入延迟指标仍需继续实现与验证。
+
+## 一个 DisplayServer、两个 client slot
+
+- Launcher 固定映射 `0x0000000200400000`、`0x0000000200880000`；App 固定映射
+  `0x0000000200d00000`、`0x0000000201180000`。
+- 每个 backing 是 `720×1600×4 = 4,608,000` 字节、1125 个 4 KiB 页面；四个
+  backing 总计 18,432,000 字节。producer 映射为 RW，SurfaceServer 映射为 RO。
+- 每个 producer 只有 `Writable -> Queued -> Submitted -> Writable` 生命周期；收到
+  accepted/cancel ack 或完成显式 release 前，不能重写原槽。
+- SurfaceServer 依据 wire 中的 logical client slot 选择精确 allocation identity，
+  不能把 slot 号当作提示后任意 acquire 另一 backing。
+- 适用用户地址空间配置 11 张 L3 表；连同上层私有表，QEMU 报告
+  `private_tables=14`。原有 user stack guard、W^X 与 capability rights 不变。
+
+`BUP1` `BufferPresent` 仍是固定 64 bytes，mobile profile 升级为 v6。byte 7 的 mode
+可为 `Full(1)` 或 `Damage(2)`；byte 20 是 client slot `0/1`，byte 21 是
+`Present/Discard` disposition；byte 22 是 Damage region count `0/1/2`，byte 23
+保留为零。rect0 复用 bytes 32..39 的四个 little-endian u16 geometry 字段，rect1
+使用 bytes 56..63；System UI revision 和独立 chrome generation 仍位于 bytes
+40..47 与 48..55。Damage region 按 `(y,x,height,width)` 规范排序，必须非空、位于
+surface 内且互不重叠，并只能与 `Present` 组合；Full/Discard 的 count 和两个 rect
+slot 均为零。decoder 继续接受规范化 v5 Full/单矩形 Damage，并在重新编码时归一化为
+v6。frame、focus、buffer generation 和 owner 约束不变；非 mobile profile 继续使用
+v2，这不是全局 ABI 69 的升级。
+
+`Discard` 是服务端可审计的规范化 Full 释放事务：SurfaceServer acquire 精确
+generation 后立即 release，返回 `PresentCancelled`，不分配 display frame grant，
+也不推进 client/global frame id。启动时每个 producer 先把两个 fresh black backing
+全部 queue，再逐一 Discard 完成映射注册；这让“两槽已可同时排队”的初始化证明不再
+依赖 SurfaceServer 恰好在两次 queue 之间被调度；
+页面切换中若 one-ahead 准备帧已被新状态取代，也走同一显式释放路径，避免把陈旧帧
+变成可见提交。
+
+## 异步 one-ahead 调度
+
+页面切换使用一个深度为 2 的有界管线：
+
+```text
+submit current(slot N)
+  -> prepare + queue next(slot 1-N)
+  -> await current ack
+  -> submit next immediately
+  -> accepted/cancel ack releases the submitted slot
+```
+
+启动证据必须同时满足 `peak_queued >= 2`、`peak_in_flight >= 2` 和至少一次 dual
+publication，才会发布 `MOBILE_DOUBLE_BUFFER_RUNTIME_OK`。这防止只把 backing 从两个
+扩为四个、却仍然串行等待的“名义双缓冲”。采集顺序还记录 allocation slot：门禁要求
+Launcher 在 `0/1`、App 在 `2/3` 间严格交替，并验证每次 acquire 最终只能对应一个
+可见 commit 或一个显式 release。
+
+## damage 基线与事务边界
+
+每个 producer 在固定进程 BSS 中保存两个 slot model、一个已确认 displayed model 和
+一个等待 ack 的 pending model，不使用 heap，也不增加 capability。光栅 damage 相对
+“目标槽上次包含的 model”计算；present damage 则相对“当前已显示或 one-ahead 预测将
+显示的 model”计算。这样即使两个槽内容不同，也不会把视觉上陈旧的槽用 1×1 伪
+damage 提交。只有 `Presented` ack 才推进 displayed model；cancel 会清除 pending，
+focus generation 改变则强制 Full。
+
+内核在任何 scene 或计数器 mutation 前完成 mode、region count/顺序/重叠/边界、首帧
+和 generation 校验。每个 Surface session 的第一张可见 buffer 帧必须为 Full；合法
+Damage 只逐行复制所有 region 覆盖的像素，并把同一 translated region set 发布给
+compositor。cursor 与其中一个 region 相交时只补回 region 外的 cursor 像素并绘制一次。
+host tests 证明两个 region 的 bounding gap 和其余哨兵像素保持不变；失败解码、首帧
+Damage、空/超量/乱序/重叠/越界集合均不改变 session 状态。
+
+几何统一放在 `bndr-ui::mobile`，直接复用输入与渲染使用的 target。原有固定控件、滚动
+裁剪、Lock/shade 通知位移、多包目标和动态 Scene Button 仍受支持；pressed target 从 A 切到 B 时
+保留两个独立 region，不再取大并集。planner 还覆盖状态栏、Home、锁屏和通知 shade 的
+时钟/日期，以及 Phone 的号码区 + 按键、Calculator 的结果区 + 按键。installed Android
+Activity 的稳定真实 APK 回调使用 label `68/448/584/176` 与 Button
+`68/664/584/128` 两个 region。无视觉反馈的 Overview background 保留规范化 1×1
+no-op；非法索引、非稳定 overlay、动态 Scene-RPC2 未证明的多节点变化及超过两个合并后
+region 的状态都 fail safely 到 Full。首次显示、页面/主题/焦点基线变化仍为 Full。
+
+host tests 对完整渲染和“旧帧 + planned regions”逐像素比较，并用哨兵证明 region set
+之外无写入；覆盖时钟、Phone、Calculator、固定/滚动/移动目标和真实 installed Activity
+callback。QEMU 门按各 region 面积之和校验 `damage_pixels == raster_writes`，同时验证
+规范排序、互不重叠、global bounds 和 compositor accounting；不再用 bounding box
+面积冒充实际工作量。
+
+Display 节拍继续复用内核唯一 `FrameClock`：100 Hz logical timer、divider 2，给每个
+accepted present 一个连续 software epoch grant。`Discard` 不消耗 grant。这里的
+nominal 50 Hz 只是提交上限与所有权证明；QEMU 单核全帧软件光栅通常远慢于 20 ms，
+所以仍明确保持 `fps_claim=0`、`hardware_vsync_claim=0`。
+
+Overview recent-card dismissal v1 没有引入第二套 scene、input 或 compositor：32 px
+启动、8 px 量化的卡片偏移仍由同一 `MobileModel`/`TouchController` 驱动；移动整张卡片
+时安全回退 Full，释放后的 recent 清空则由 SurfaceServer 的精确 identity transaction
+产生新 baseline。该路径只清除 boot-local identity，明确不拥有进程终止、后台 task、
+APK image、Activity pixels 或 thumbnail 权限。compatible card 的图标也复用同一
+package catalog snapshot：session、generation、APK digest 必须一致；只有 decoded icon
+资源进入图标 raster，旧 profile 才使用 title/digest 派生 fallback，stale identity 始终
+fail closed。它没有引入 Activity surface、截图、缩略图或第二套 package authority。
+Overview 顶部 `y < 120` 也先保留给同一 shade controller，不再为 background press 排入
+无意义的 present；partial/full shade 与关闭后的 exact Overview 均沿用现有 BufferQueue、
+damage planner 和唯一 compositor，没有新增 overlay buffer 或 producer authority。
+
+## 2026-08-24 本地 QEMU 历史证据
+
+纯 mobile UI 门：
+
+```text
+terminal=MOBILE_UI_RUNTIME_CHECK_OK
+evidence=target/mobile-ui/check-overview.EGC0fq
+resolution=720x1600
+buffer_present_version=6
+buffers=4
+maps=8/8
+startup_queues/acquires/releases=5/5/5
+startup_explicit_release_calls=4
+startup_mapped_presents=1
+copy_path=mapped-double-buffer
+client_buffers_per_producer=2
+frame_transaction_depth=2
+transition_scheduling=async-one-ahead
+stale_prepared_policy=server-discard
+peak_queued=3
+peak_in_flight=3
+dual_in_flight_publications=3
+accepted_commits/frame_acquires=36/36
+full_commits=23
+damage_commits/visible_damage_commits=13/13
+damage_pixels_total=2558648
+max_damage_pixels=474240
+min_visible_damage_pixels=14336
+raster_writes_total=29054648
+raster_pixels_saved_vs_all_full=12417352
+clock_revisions=2
+clock_minute_transition=29755301-29755302
+clock_display_transition=09:41-09:42
+clock_damage_pixels=122336
+clock_pixel_changes=4085
+lock_notification_short_restore_exact=1
+lock_notification_dismiss_revision=2
+damage_per_commit_limit=<576000
+private_tables=14
+write_calls/write_bytes=0/0
+user_faults=0
+```
+
+真实仓库 APK 的有界 DEX0 门：
+
+```text
+terminal=ANDROIDBOX_RESOURCES1_QEMU_CHECK_OK
+evidence=target/androidbox-dex0/check.F3cZue
+apk_sha256=2cf96bb6a0de3bba9b981539014c29d2c0adcc17cc9738b24f69cf3046ce4ac7
+manifest/resources/layout/classes_dex=checked
+activity_onCreate/resource_view/tap_callback=executed
+launcher_commits/frame_acquires=16/16
+damage_commits/visible_damage_commits=4/4
+damage_pixels_total=261312
+max_damage_pixels=89856
+min_visible_damage_pixels=40800
+client_buffers_per_producer=2
+peak_in_flight=2
+user_stack_pages=8
+guards_unmapped=2
+user_faults=0
+```
+
+最高 ABI69 layered 三启动门也以最终源码通过：
+
+```text
+terminal=ANDROIDBOX_LAYOUT_MIXED19_QEMU_OK
+evidence=target/layout-mixed19/coexist.PRwG0E
+qemu_starts=3
+qemu_network=disabled
+apk_overview_recent_icon_pixels=1
+overview_icon_binding=session+generation+apk-digest
+overview_icon_activity_pixels=0
+overview_icon_thumbnail_pixels=0
+```
+
+layered Interactive-0 另以 `target/androidbox-interactive0/check.rnOedO` 完成两次
+QEMU 启动、APK 点击、source-free recovery 和 compatible recent dismissal。35 次
+layered commit 中有 7 次 Damage，
+其中一次真实 APK callback 为两个 region：实际复制/合成 `177,536` 像素；其 bounds
+面积为 `200,896`，因此中间 `584×40 = 23,360` 像素空隙未写入。门禁还证明完整
+source XRGB 校验、top/bottom chrome 隔离、恢复前后初始 Activity 像素相同、磁盘未变，
+以及 260 px pointer travel 对应 256 px held card raster；request 6 只删除
+`compatible-activity/1/1` identity，App 保持存活且没有新增 image claim。门禁继续明确
+`process_kill=0 background_task_authority=0 art=0 binder=0 general_apk_claim=0`。
+
+分钟时钟的确定性门以固定 QEMU RTC 真实从 `09:41` 跨到 `09:42`，
+Launcher/App 均收到 revision `1→2`。该帧的两个 damage region 为
+`32/12/200/52` 和 `96/232/528/212`，恰好写入 `122,336` 像素；前后帧
+4,085 个变化像素全在这两个区域内。确定性 PNG 为
+`target/mobile-ui/clock-minute-v1-lock-0941.png` 和
+`target/mobile-ui/clock-minute-v1-lock-0942.png`。
+
+该历史里程碑的 Cocoa QEMU 窗口名为
+`Bndroid Mobile UI + AndroidBox Preview - Live minute clock`，使用证据盘 snapshot
+且 `-nic none`。它已在宿主实时 RTC 下目视 `08:58→08:59`，截图为
+`target/mobile-ui/clock-minute-v1-live-before.png` 和
+`target/mobile-ui/clock-minute-v1-live-after.png`。同一 highest profile 仍完整启动
+AndroidBox ABI69；本轮没有下载 AOSP、修改 SDK 或操作真机。
+
+当时最高 feature host 回归覆盖 `bndr-ui` 292 项；其中包括 minute-clock damage、Lock notification swipe、recent identity dismissal、
+跟手/回弹/阈值、region callback、八组 dynamic scheme/contrast gate、语义字号、
+Android 动态文本省略号、split chrome 等价和 elevated surface 越界像素哨兵。此前
+mobile kernel 375 项、interactive kernel 383 项仍为本协议实现的验证基线。最终
+ABI69 QEMU 证据为 `target/layout-mixed19/coexist.PRwG0E`。
+
+## 仍未完成
+
+当前管线解决的是 CPU producer 与 SurfaceServer 之间的有界并行、安全释放，以及最多
+两个语义 region 的精确提交，不是产品级显示栈。copied AndroidBox 已局部生成与传输，
+仍需以 P50/P95/P99 帧时间、输入延迟及内存数据决定 mapped multi-slot layers 或
+triple buffering；现有内核仍校验完整 source，窄矩形按行 copy 的调用开销也需测量。真实
+vblank/page-flip feedback、GPU/display device host、输入到显示延迟、内存峰值和丢帧
+仍未实现或测量。
+
+这份证据不证明一般 Android App 兼容、ART/Bionic/Binder/Framework、硬件显示、
+60/120 Hz、功耗、真机驱动或 iOS 级产品完成度。

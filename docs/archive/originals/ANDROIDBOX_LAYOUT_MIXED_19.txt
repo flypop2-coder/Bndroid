@@ -1,0 +1,226 @@
+# AndroidBox Layout Mixed-19（ABI 69）
+
+## 结论
+
+opt-in profile `androidbox-layout-mixed19` 是 ABI68
+`androidbox-layout-size18` 的 child。两份由本机 Android 36 SDK、AAPT2 和 D8
+离线构建、并由仓库测试证书签名的真实 APK，现在可以在一个横向
+`LinearLayout` 中同时使用：
+
+```text
+固定子项：android:layout_width="132dp"，layout_weight=0
+权重子项：android:layout_width="0dp"，android:layout_weight="1"
+```
+
+固定宽度、权重、精确高度和逐边 margin/padding 从 AAPT2 二进制 XML 经过严格
+解析器、独立 AndroidApp EL0 worker、定长进程协议与可信 App scene model，进入
+720×1600、20:9 UI 的同一套布局、光栅、按压反馈和点击命中。ABI68 的两个纯权重
+Button、ABI67 的逐边间距以及更早 profile 均保持隔离兼容。
+
+本里程碑没有下载 AOSP、没有修改 Android SDK、没有让 QEMU 联网，也没有连接或
+操作实体设备。门禁启动的三个 QEMU 实例均在取证完成后正常终止。
+
+## 严格接纳范围
+
+ABI69 只扩展横向 `LinearLayout` 的直接子项组合。每个直接子项必须二选一：
+
+- `Button + width=Exact(Ndp) + weight=0`；或
+- `Button + width=0dp + weight=1..=8`。
+
+`wrap_content` 子项、`Exact + weight`、横向 `TextView`、零权重 `0dp`、未知或
+重复属性全部 fail closed。精确尺寸仍只接受 AAPT2 `TYPE_DIMENSION` 的正整数
+`1..=255dp`；权重仍只接受 canonical 整数 `1..=8`。所有加减乘除均使用 checked
+arithmetic，固定外宽、权重子项 margin 或累计权重无法放入父矩形时不产生布局。
+
+布局只维护一个几何真相：同一个最终 rectangle 同时供光栅、语义文本适配、按压
+反馈和 hit-test 使用。Host test 还要求两个完整按钮标签都能在内容宽度内显示，禁止
+通过裁字让几何测试“看起来通过”。
+
+## 剩余空间算法与最终几何
+
+横向父项的可分配宽度定义为：
+
+```text
+distributable = parent_inner_width
+              - sum(fixed_content_width + fixed_left/right_margin)
+              - sum(weighted_left/right_margin)
+```
+
+权重子项按累计整数权重分配 `distributable`，避免逐项取整留下不可归属像素。固定
+子项可以位于权重子项前后；前序固定外宽、前序权重宽和前序 margin 共同决定起点。
+
+真实 fixture 使用：
+
+```text
+title width       = 240dp
+row height        = 120dp
+fixed Button      = width 132dp / height 64dp / weight 0
+weighted Button   = width 0dp / height 56dp / weight 1
+row padding LTRB  = 6/4/2/8dp
+button margins    = 2/1/4/3dp + 6/5/2/1dp
+```
+
+最终几何：
+
+```text
+title logical       = 34/216/240/40
+status logical      = 34/260/292/40
+row logical         = 34/304/292/120
+row inner           = 40/308/284/108
+fixed logical       = 42/309/132/64
+weighted logical    = 184/313/138/56
+
+fixed physical      = 84/618/264/128
+weighted physical   = 368/626/276/112
+```
+
+物理点 `(358,682)` 位于两个内容矩形之间的 margin gap 且不命中；QEMU 使用
+`(216,682)` 与 `(506,682)` 分别触发两个真实 APK callback Button。
+
+## ABI 与 AndroidApp 协议
+
+系统 ABI 提升为 69。ABI69 没有增加 syscall、wire 字段或权限，因此 AndroidApp
+协议保持 `BNDAPC14` v14，scene descriptor 保持 v5、24 bytes。已有字段足以表达：
+
+```text
+layout_width  = Exact / Zero
+layout_weight = 0 / 1..8
+exact_width   = 132 / 0
+margin LTRB   = four bounded dp values
+```
+
+六节点 scene 继续使用单 outstanding pull transcript：
+
+```text
+Ready(0)
+Open(1) -> SceneOpened(node_count=6)
+DescribeNode(2..7) -> Node(v5)/TextChunk
+Click(8) -> Updated/TextChunk
+Click(9) -> Updated/TextChunk
+Close(10) -> Closed
+```
+
+parser、init admission、AndroidApp worker、App scene model、UI renderer 与 kernel
+tracer 都独立复验 mixed 约束。kernel 的最终 transcript 要求节点 4 为
+`Exact(132dp), weight=0`，节点 5 为 `Zero, weight=1`，并继续绑定尺寸、逐边
+间距、两个 callback ID、动态 StringBuilder 文本和最终 revision。
+
+## 真实 APK 与 QEMU 证据
+
+运行：
+
+```sh
+CARGO_NET_OFFLINE=true ./scripts/check-androidbox-layout-mixed19.sh
+```
+
+门禁从本机 SDK 重建两份真实 APK：
+
+```text
+package0=org.bndroid.envelope
+apk0_bytes=12806
+apk0_sha256=e050556ac8ca32ec5748d30702b378ad82084bd4aa7ff0c218658d01363f948b
+
+package1=org.bndroid.catalog
+apk1_bytes=12728
+apk1_sha256=d9cad51cd361137ebc6c4e3ffdb10d8b86b964141592971065641656a95e6046
+```
+
+最终三启动证据：
+
+```text
+terminal=ANDROIDBOX_LAYOUT_MIXED19_QEMU_OK
+evidence=target/layout-mixed19/coexist.CPxa8T
+abi=69
+capacity=2
+rpc_protocol=BNDAPC14
+rpc_protocol_version=14
+two_distinct_packages=1
+two_launcher_entries=1
+two_activity_launches_same_boot=1
+app_defined_method_transcripts=2
+activity_int_state_values_per_transcript=1/2
+source_free_recovery=1
+source_free_writes=0
+qemu_starts=3
+qemu_network=disabled
+aosp_downloaded=0
+storage_handle_granted=0
+block_handle_granted=0
+initial_disk_sha256=c82bffe86b4fea83e5483723dc659b43f11bb9f320c6b2c7442d00e5026cdadc
+final_disk_sha256=aca06d7edd173362f76b7b08119add97eeab36af3e6c48fdfa15cc45aeaa7520
+```
+
+门禁证明：第一、第二包分别持久安装；Settings 只读选择两个包；Launcher 显示两个
+真实 APK 图标；同一次启动分别运行 Catalog 与 Envelope Activity；受控
+AndroidApp fault 后只允许同 slot、generation+1 worker 重绑定并重放完整 scene；
+两个 callback 都执行；第三次启动完全没有 APK source，零 package write 恢复并再次
+运行两个 Activity。AndroidApp 仍没有 Surface、graphics、input、storage 或 block
+handle。
+
+2026-08-24 的同源重跑还覆盖了共用 `surface-frame-pacing` 路径：三次启动中的
+每个成功 `USER_SURFACE_LAYERED_COMMIT_OK` 都必须先由唯一 SurfaceServer acquire
+一个 frame grant，epoch 连续且 boundary 至少跨越两个 100 Hz logical tick；完整
+门禁仍通过。该 nominal 50 Hz 软件节拍不是硬件 VSync 或实测 FPS，layered
+content/chrome 仍保留原有有界 copy 与单事务所有权。
+
+720×1600 截图：
+
+```text
+target/layout-mixed19/coexist.u8jymH/two-app-drawer.png
+target/layout-mixed19/coexist.u8jymH/catalog-activity.png
+target/layout-mixed19/coexist.u8jymH/catalog-activity-approved.png
+target/layout-mixed19/coexist.u8jymH/catalog-activity-rejected.png
+target/layout-mixed19/coexist.u8jymH/envelope-activity.png
+```
+
+初始 Catalog Activity PNG SHA-256 为
+`945f9b21ba7460fc4440b4801f60d4d8d0ba74c7fac48cda49ee7cf966b97f33`；第二次
+回调页为
+`93bc9628d8ac5c8d9917c46503cc9cd06e00da510df31ad7e8659277b8fb9e95`。两张图均
+经原始 720×1600 PPM 转换并人工检查，完整显示 `Show components` 与
+`Show permissions`，没有裁切、重叠或越出圆角屏幕。
+
+## Host validation 与父 profile 回归
+
+最终源码验证：
+
+```text
+bndr-abi androidbox-layout-mixed19            59/59
+bndr-androidbox androidbox-layout-mixed19     113/113
+bndr-ui androidbox-layout-mixed19             270/270
+bndroid-kernel androidbox-layout-mixed19      377/377
+bndroid-init aarch64-unknown-none check       passed
+cargo fmt                                     passed
+relevant shell syntax                         passed
+five Clippy groups with -D warnings           passed
+```
+
+Clippy 发现并促成 parser 中一个冗余嵌套条件合并；修改后 AndroidBox 全量测试和五组
+Clippy 重新通过。两个父 profile 使用最终共享源码重新完成三启动门禁：
+
+```text
+terminal=ANDROIDBOX_LAYOUT_SIZE18_QEMU_OK
+evidence=target/layout-size18/coexist.IFMTWM
+
+terminal=ANDROIDBOX_LAYOUT_DIRECTIONAL17_QEMU_OK
+evidence=target/layout-directional17/coexist.gGL0nv
+```
+
+ABI68 仍输出两个 `weight=1/1` 的 270 px 等宽内容矩形；ABI67 仍输出逐边
+margin/padding 几何，证明 ABI69 分支没有改变父 profile 的协议或布局。
+
+## AOSP 边界与仍未完成
+
+ABI69 证明的是两个真实、仓库控制的 SDK APK 在受限
+`LinearLayout/TextView/Button` 子集中的 fixed+weighted 横向布局。它不是 ART、
+Dalvik、ActivityThread、Binder、Bionic、JNI、native library、完整 Android
+Framework/system services、一般 APK 或真机兼容证明。
+
+继续扩展有界布局解析不需要 AOSP。进入通用 Android App 路线时，仍应按
+`TODO.md` 先确定 Android API/AOSP 基线、许可证、构建资源和 Bndroid 适配边界，
+取得用户明确授权后再获取外部组件。
+
+当前仍缺少通用 ViewGroup、vertical weight、start/end 与 RTL、gravity、滚动、
+RecyclerView、Compose、主题和 qualifier 布局、完整 PackageManager/权限、网络和
+多媒体 bridge、硬件 BSP、GPU、Wi-Fi、基带、摄像头、音频、传感器及实体触控，
+因此系统仍不能宣称为可日用真机。

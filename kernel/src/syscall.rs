@@ -60,13 +60,15 @@ use bndr_abi::{SYSTEM_CLOCK_READ_FLAGS_NONE, SYSTEM_CLOCK_SOURCE_QEMU_PL031};
 use bndr_abi::{SYSTEM_SHUTDOWN_COMMIT, SYSTEM_SHUTDOWN_FLAGS_NONE, SYSTEM_SHUTDOWN_PREPARE};
 #[cfg(feature = "app-data-runtime")]
 use bndr_appdata::{Error as AppDataError, IoError as AppDataIoError, ReplaceCondition};
+#[cfg(feature = "mobile-ui-runtime")]
+use bndr_ui::DamageRect;
 use bndr_ui::{
     APP_LIFECYCLE_MAGIC, APP_LIFECYCLE_WIRE_SIZE, AppInstanceIdentity, AppLifecycleAction,
     AppLifecycleMessage, AppLifecyclePayload, AppLifecycleReason, AppLifecycleState,
-    AppLifecycleTracker, BUFFER_PRESENT_WIRE_SIZE, BufferPresent, PRESENT_WIRE_SIZE, PresentFrame,
-    PresentMode, ProtocolError, UI_SUPERVISOR_CONTROL_MAGIC, UI_SUPERVISOR_CONTROL_WIRE_SIZE,
-    UiSupervisorControlMessage, UiSupervisorControlPayload, UiSupervisorOperation,
-    UiSupervisorTracker,
+    AppLifecycleTracker, BUFFER_PRESENT_WIRE_SIZE, BufferPresent, BufferPresentDisposition,
+    PRESENT_WIRE_SIZE, PresentFrame, PresentMode, ProtocolError, UI_SUPERVISOR_CONTROL_MAGIC,
+    UI_SUPERVISOR_CONTROL_WIRE_SIZE, UiSupervisorControlMessage, UiSupervisorControlPayload,
+    UiSupervisorOperation, UiSupervisorTracker,
 };
 #[cfg(feature = "surface-trace-evidence")]
 use bndr_ui::{ShellAppId, UiClientId};
@@ -7087,6 +7089,14 @@ fn graphics_buffer_acquire(
         Err(error) => return complete(frame, graphics_buffer_error_status(error), 0, 0),
     };
     GRAPHICS_BUFFER_ACQUIRE_SUCCESSES.fetch_add(1, Ordering::Relaxed);
+    crate::kprintln!(
+        "GRAPHICS_BUFFER_ACQUIRE_OK consumer_pid={} producer_pid={} allocation_slot={} allocation_generation={} buffer_generation={}",
+        consumer_pid,
+        buffer.producer_pid(),
+        buffer.slot(),
+        buffer.slot_generation(),
+        generation,
+    );
     complete(frame, Status::Ok, generation, 0)
 }
 
@@ -7141,6 +7151,14 @@ fn graphics_buffer_release(
     GRAPHICS_BUFFER_RELEASE_SUCCESSES.fetch_add(1, Ordering::Relaxed);
     GRAPHICS_BUFFER_RELEASES.fetch_add(1, Ordering::Relaxed);
     crate::scheduler::wake_object_waiters();
+    crate::kprintln!(
+        "GRAPHICS_BUFFER_RELEASE_OK consumer_pid={} producer_pid={} allocation_slot={} allocation_generation={} buffer_generation={}",
+        consumer_pid,
+        buffer.producer_pid(),
+        buffer.slot(),
+        buffer.slot_generation(),
+        generation,
+    );
     complete(frame, Status::Ok, generation, 0)
 }
 
@@ -7579,7 +7597,7 @@ fn surface_acquire(
 }
 
 #[cfg(all(
-    feature = "graphics-frame-clock-runtime",
+    feature = "surface-frame-pacing",
     not(feature = "graphics-owner-death-runtime"),
     not(feature = "app-crash-recovery-runtime")
 ))]
@@ -7654,7 +7672,7 @@ fn surface_frame_acquire(
 }
 
 #[cfg(not(all(
-    feature = "graphics-frame-clock-runtime",
+    feature = "surface-frame-pacing",
     not(feature = "graphics-owner-death-runtime"),
     not(feature = "app-crash-recovery-runtime")
 )))]
@@ -7846,6 +7864,9 @@ fn surface_present_buffer(
         Ok(present) => present,
         Err(_) => return complete(frame, Status::InvalidArgument, 0, 0),
     };
+    if present.disposition() != BufferPresentDisposition::Present {
+        return complete(frame, Status::InvalidArgument, 0, 0);
+    }
     let Some(process_id) = crate::process::current_live_user_process_id() else {
         return complete(frame, Status::InvalidState, 0, 0);
     };
@@ -8196,14 +8217,66 @@ fn surface_present_buffer(
     GRAPHICS_BUFFER_PRESENTS.fetch_add(1, Ordering::Relaxed);
     let global = evidence.surface.global_damage;
     let composition = evidence.composition.composition;
+    #[cfg(feature = "mobile-ui-runtime")]
+    let damage_rects = present.damage_rects();
+    #[cfg(feature = "mobile-ui-runtime")]
+    let damage0 = damage_rects[0];
+    #[cfg(feature = "mobile-ui-runtime")]
+    let damage1 = damage_rects.get(1).copied().unwrap_or(DamageRect::EMPTY);
+    #[cfg(feature = "mobile-ui-runtime")]
     crate::kprintln!(
-        "USER_SURFACE_BUFFER_COMMIT_OK owner=userspace pid={} session={} producer_pid={} client_frame_id={} frame_id={} commit={} mode=full buffer_generation={} format=xrgb8888 width={} height={} global_damage={}/{}/{}/{} raster_writes={} composition={}/{}/{}/{} scene_digest={:#018x} scanout_digest={:#018x} cursor_preserved=1 dma_barrier=1",
+        "USER_SURFACE_BUFFER_COMMIT_OK owner=userspace pid={} session={} producer_pid={} client_frame_id={} frame_id={} commit={} mode={} client_buffer_slot={} buffer_generation={} format=xrgb8888 width={} height={} damage_rects={} damage0={}/{}/{}/{} damage1={}/{}/{}/{} global_damage={}/{}/{}/{} damage_pixels={} raster_writes={} composition={}/{}/{}/{} composition_rects={} composition_pixels={} scene_digest={:#018x} scanout_digest={:#018x} cursor_preserved=1 dma_barrier=1",
         process_id,
         evidence.session_id,
         buffer.producer_pid(),
         present.client_frame_id(),
         evidence.surface.frame_id,
         evidence.surface.commits,
+        match evidence.surface.mode {
+            PresentMode::Full => "full",
+            PresentMode::Damage => "damage",
+        },
+        present.client_buffer_slot(),
+        present.buffer_generation(),
+        GRAPHICS_BUFFER_WIDTH,
+        GRAPHICS_BUFFER_HEIGHT,
+        damage_rects.len(),
+        damage0.x,
+        damage0.y,
+        damage0.width,
+        damage0.height,
+        damage1.x,
+        damage1.y,
+        damage1.width,
+        damage1.height,
+        global.x,
+        global.y,
+        global.width,
+        global.height,
+        evidence.composition.damage_pixels,
+        evidence.surface.raster_writes,
+        composition.x,
+        composition.y,
+        composition.width,
+        composition.height,
+        evidence.composition.composition_regions,
+        evidence.composition.composition_pixels,
+        evidence.composition.scene_digest,
+        evidence.composition.scanout_digest,
+    );
+    #[cfg(not(feature = "mobile-ui-runtime"))]
+    crate::kprintln!(
+        "USER_SURFACE_BUFFER_COMMIT_OK owner=userspace pid={} session={} producer_pid={} client_frame_id={} frame_id={} commit={} mode={} buffer_generation={} format=xrgb8888 width={} height={} global_damage={}/{}/{}/{} raster_writes={} composition={}/{}/{}/{} scene_digest={:#018x} scanout_digest={:#018x} cursor_preserved=1 dma_barrier=1",
+        process_id,
+        evidence.session_id,
+        buffer.producer_pid(),
+        present.client_frame_id(),
+        evidence.surface.frame_id,
+        evidence.surface.commits,
+        match evidence.surface.mode {
+            PresentMode::Full => "full",
+            PresentMode::Damage => "damage",
+        },
         present.buffer_generation(),
         GRAPHICS_BUFFER_WIDTH,
         GRAPHICS_BUFFER_HEIGHT,
@@ -8220,7 +8293,7 @@ fn surface_present_buffer(
         evidence.composition.scanout_digest,
     );
     #[cfg(all(
-        feature = "graphics-frame-clock-runtime",
+        feature = "surface-frame-pacing",
         not(feature = "graphics-owner-death-runtime"),
         not(feature = "app-crash-recovery-runtime")
     ))]
@@ -8235,11 +8308,12 @@ fn surface_present_buffer(
             panic!("paced buffer commit published inconsistent clock evidence");
         }
         crate::kprintln!(
-            "SURFACE_FRAME_COMMIT_OK pid={} session={} epoch={} frame_id={} buffer_generation={}",
+            "SURFACE_FRAME_COMMIT_OK pid={} session={} epoch={} frame_id={} client_buffer_slot={} buffer_generation={}",
             process_id,
             evidence.session_id,
             pacing.clock.last_presented_epoch,
             evidence.surface.frame_id,
+            present.client_buffer_slot(),
             present.buffer_generation(),
         );
     }
@@ -8352,6 +8426,11 @@ fn surface_present_buffer_layers(
         Ok(present) => present,
         Err(_) => return complete(frame, Status::InvalidArgument, 0, 0),
     };
+    if present.disposition() != BufferPresentDisposition::Present
+        || present.client_buffer_slot() != 0
+    {
+        return complete(frame, Status::InvalidArgument, 0, 0);
+    }
     if let Err(error) = validate_layered_present_preflight(LayeredPresentPreflight::Submission(
         LayeredPresentSubmissionPreflight {
             content_and_chrome_are_same_buffer: content.same_buffer(&chrome),
@@ -8405,8 +8484,11 @@ fn surface_present_buffer_layers(
     GRAPHICS_BUFFER_PRESENTS.fetch_add(1, Ordering::Relaxed);
     let global = evidence.surface.global_damage;
     let composition = evidence.composition.composition;
+    let damage_rects = present.damage_rects();
+    let damage0 = damage_rects[0];
+    let damage1 = damage_rects.get(1).copied().unwrap_or(DamageRect::EMPTY);
     crate::kprintln!(
-        "USER_SURFACE_LAYERED_COMMIT_OK owner=surface-server pid={} session={} content_producer_pid={} chrome_producer_pid={} client_frame_id={} frame_id={} commit={} mode=content-plus-system-chrome content_generation={} chrome_generation={} format=xrgb8888 surface={}x{} viewport={}/{}/{}/{} chrome_regions=0-64/1512-1600 global_damage={}/{}/{}/{} raster_writes={} composition={}/{}/{}/{} scene_digest={:#018x} scanout_digest={:#018x} atomic_sources=2 system_chrome_owner=surface-server",
+        "USER_SURFACE_LAYERED_COMMIT_OK owner=surface-server pid={} session={} content_producer_pid={} chrome_producer_pid={} client_frame_id={} frame_id={} commit={} mode=content-plus-system-chrome damage_mode={} client_buffer_slot={} content_generation={} chrome_generation={} format=xrgb8888 surface={}x{} viewport={}/{}/{}/{} chrome_regions=0-64/1512-1600 damage_rects={} damage0={}/{}/{}/{} damage1={}/{}/{}/{} global_damage={}/{}/{}/{} damage_pixels={} raster_writes={} composition={}/{}/{}/{} composition_rects={} composition_pixels={} scene_digest={:#018x} scanout_digest={:#018x} atomic_sources=2 system_chrome_owner=surface-server",
         process_id,
         evidence.session_id,
         content.producer_pid(),
@@ -8414,6 +8496,11 @@ fn surface_present_buffer_layers(
         present.client_frame_id(),
         evidence.surface.frame_id,
         evidence.surface.commits,
+        match evidence.surface.mode {
+            PresentMode::Full => "full",
+            PresentMode::Damage => "damage",
+        },
+        present.client_buffer_slot(),
         present.buffer_generation(),
         present.system_chrome_generation(),
         GRAPHICS_BUFFER_WIDTH,
@@ -8422,17 +8509,38 @@ fn surface_present_buffer_layers(
         bndr_ui::MOBILE_CONTENT_VIEWPORT_Y,
         bndr_ui::MOBILE_CONTENT_VIEWPORT_WIDTH,
         bndr_ui::MOBILE_CONTENT_VIEWPORT_HEIGHT,
+        damage_rects.len(),
+        damage0.x,
+        damage0.y,
+        damage0.width,
+        damage0.height,
+        damage1.x,
+        damage1.y,
+        damage1.width,
+        damage1.height,
         global.x,
         global.y,
         global.width,
         global.height,
+        evidence.composition.damage_pixels,
         evidence.surface.raster_writes,
         composition.x,
         composition.y,
         composition.width,
         composition.height,
+        evidence.composition.composition_regions,
+        evidence.composition.composition_pixels,
         evidence.composition.scene_digest,
         evidence.composition.scanout_digest,
+    );
+    crate::kprintln!(
+        "MOBILE_LAYER_COPY_COST_OK frame_id={} content_producer_pid={} content_generation={} chrome_generation={} write_calls_total={} write_bytes_total={}",
+        evidence.surface.frame_id,
+        content.producer_pid(),
+        present.buffer_generation(),
+        present.system_chrome_generation(),
+        GRAPHICS_BUFFER_WRITE_CALLS.load(Ordering::Relaxed),
+        GRAPHICS_BUFFER_WRITE_BYTES.load(Ordering::Relaxed),
     );
     complete(
         frame,
@@ -12717,7 +12825,7 @@ fn trace_ui_channel_read(result: &EnvelopeReadResult) {
             appearance,
             revision,
         } => crate::kprintln!(
-            "UI_APPEARANCE_CHANGED_OK sender_image={} sender_pid={} receiver_image={} receiver_pid={} session={} revision={} theme={} accent={} software_dimming={}",
+            "UI_APPEARANCE_CHANGED_OK sender_image={} sender_pid={} receiver_image={} receiver_pid={} session={} revision={} theme={} accent={} software_dimming={} large_text={} high_contrast={}",
             sender_role.image_name(),
             result.sender_pid,
             receiver_role.image_name(),
@@ -12735,6 +12843,8 @@ fn trace_ui_channel_read(result: &EnvelopeReadResult) {
                 "ocean"
             },
             ui_software_dimming_percent(appearance.software_dimming()),
+            u8::from(appearance.large_text()),
+            u8::from(appearance.high_contrast()),
         ),
         UiChannelTrace::BootNotificationDismissRequest { request_id } => crate::kprintln!(
             "UI_BOOT_NOTIFICATION_DISMISS_REQUEST_OK sender_image={} sender_pid={} receiver_image={} receiver_pid={} request_id={}",
@@ -12946,6 +13056,8 @@ const fn ui_appearance_action_name(action: bndr_ui::UiAppearanceAction) -> &'sta
         bndr_ui::UiAppearanceAction::SetSoftwareDimmingMedium => "set-software-dimming-60",
         bndr_ui::UiAppearanceAction::SetSoftwareDimmingStrong => "set-software-dimming-40",
         bndr_ui::UiAppearanceAction::SetSoftwareDimmingMaximum => "set-software-dimming-20",
+        bndr_ui::UiAppearanceAction::ToggleLargeText => "toggle-large-text",
+        bndr_ui::UiAppearanceAction::ToggleHighContrast => "toggle-high-contrast",
     }
 }
 
@@ -12960,6 +13072,7 @@ const fn ui_system_ui_action_name(action: bndr_ui::UiSystemUiAction) -> &'static
         bndr_ui::UiSystemUiAction::FinishCompatibleActivity => "finish-compatible",
         bndr_ui::UiSystemUiAction::ReserveCompatibleActivity => "reserve-compatible",
         bndr_ui::UiSystemUiAction::AbortCompatibleActivityVerification => "abort-compatible",
+        bndr_ui::UiSystemUiAction::DismissRecent => "dismiss-recent",
     }
 }
 
@@ -13050,6 +13163,18 @@ mod ui_appearance_action_name_tests {
     }
 
     #[test]
+    fn accessibility_action_names_are_exact_and_unambiguous() {
+        assert_eq!(
+            ui_appearance_action_name(UiAppearanceAction::ToggleLargeText),
+            "toggle-large-text"
+        );
+        assert_eq!(
+            ui_appearance_action_name(UiAppearanceAction::ToggleHighContrast),
+            "toggle-high-contrast"
+        );
+    }
+
+    #[test]
     fn software_dimming_state_percentages_match_the_action_names() {
         for (software_dimming, expected) in [
             (UiSoftwareDimming::Off, "100"),
@@ -13097,6 +13222,7 @@ mod ui_appearance_action_name_tests {
                 UiSystemUiAction::AbortCompatibleActivityVerification,
                 "abort-compatible",
             ),
+            (UiSystemUiAction::DismissRecent, "dismiss-recent"),
         ] {
             assert_eq!(ui_system_ui_action_name(action), expected);
         }
