@@ -19,4 +19,8 @@ esac
   -O2 -g -Wall -Wextra -Werror -pthread -fPIE -pie \
   -Wl,-z,max-page-size=4096 -Wl,-z,separate-loadable-segments \
   "$ROOT/fixtures/art-runtime/memory.c" "$ROOT/fixtures/art-runtime/proc.c" -o "$OUT/memory-probe"
+"$NDK_ROOT/toolchains/llvm/prebuilt/$HOST_TAG/bin/aarch64-linux-android35-clang" \
+  -O2 -g -Wall -Wextra -Werror -pthread -fPIE -pie \
+  -Wl,-z,max-page-size=4096 -Wl,-z,separate-loadable-segments \
+  "$ROOT/fixtures/art-runtime/signals.c" "$ROOT/fixtures/art-runtime/signals.S" -o "$OUT/signals-probe"
 printf 'ART_DEX_BUILD_OK path=%s\n' "$OUT/probe.dex"

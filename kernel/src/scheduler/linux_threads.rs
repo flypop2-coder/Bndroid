@@ -5,6 +5,9 @@ use crate::linux_runtime as runtime;
 use bndroid_kernel::linux_abi::errno;
 use bndroid_kernel::linux_sync::{self, FutexQueue, Wait};
 
+#[cfg(feature = "art-runtime")]
+pub mod signals;
+
 #[derive(Clone, Copy)]
 struct Local {
     tid: u32,
@@ -193,7 +196,13 @@ fn current_tid() -> u64 {
     }
 }
 
+// Keep thread/VM branch temporaries out of the common syscall frame under LTO.
+#[cfg_attr(feature = "art-runtime", inline(never))]
 pub fn dispatch(frame: *mut TrapFrame, r: &[u64; 31]) -> Option<*mut TrapFrame> {
+    #[cfg(feature = "art-runtime")]
+    if let Some(next) = signals::dispatch(frame, r) {
+        return Some(next);
+    }
     let result = match r[8] {
         93 | 94 => return Some(exit(frame, r[0] & 255, r[8] == 94)),
         96 => {
@@ -370,9 +379,25 @@ fn thread_name(r: &[u64; 31]) -> Result<u64, i64> {
     Ok(0)
 }
 
+#[cfg(feature = "art-runtime")]
 fn deadline(address: u64, absolute: bool) -> Result<u64, i64> {
+    clock_deadline(address, absolute, false)
+}
+fn clock_deadline(address: u64, absolute: bool, realtime: bool) -> Result<u64, i64> {
     let mut bytes = [0; 16];
     runtime::copy_in(address, &mut bytes)?;
+    #[cfg(feature = "art-runtime")]
+    if realtime && absolute {
+        return runtime::realtime_anchor().deadline(
+            i64::from_le_bytes(bytes[..8].try_into().unwrap()),
+            i64::from_le_bytes(bytes[8..].try_into().unwrap()),
+            crate::arch::aarch64::timer::frequency_hz(),
+        );
+    }
+    #[cfg(not(feature = "art-runtime"))]
+    if realtime {
+        return Err(22);
+    }
     linux_sync::deadline(
         i64::from_le_bytes(bytes[..8].try_into().unwrap()),
         i64::from_le_bytes(bytes[8..].try_into().unwrap()),
@@ -382,11 +407,18 @@ fn deadline(address: u64, absolute: bool) -> Result<u64, i64> {
     )
 }
 fn futex(frame: *mut TrapFrame, r: &[u64; 31]) -> *mut TrapFrame {
+    #[cfg(feature = "art-runtime")]
+    let restarted_timeout = signals::restart_deadline(frame, r);
+    #[cfg(not(feature = "art-runtime"))]
+    let restarted_timeout: Option<Option<u64>> = None;
     let operation = r[1];
-    let command = operation & !128;
-    // No shared mappings or process cloning yet: both forms key by the full
-    // address-space owner. Realtime and PI operations remain unsupported.
-    if !matches!(command, 0 | 1 | 9 | 10) {
+    let command = operation & !(128 | 256);
+    let realtime = operation & 256 != 0;
+    // Both forms key by the full address-space owner. Other processes cannot
+    // alias these mappings. Priority inheritance remains unsupported.
+    if !matches!(command, 0 | 1 | 3 | 4 | 9 | 10)
+        || (realtime && (command != 9 || !cfg!(feature = "art-runtime")))
+    {
         return runtime::complete(frame, errno(38));
     }
     let address = runtime::user_address(r[0]);
@@ -407,6 +439,25 @@ fn futex(frame: *mut TrapFrame, r: &[u64; 31]) -> *mut TrapFrame {
     }
     let context = current_running_context();
     let process = owner(context);
+    if matches!(command, 3 | 4) {
+        let target = runtime::user_address(r[4]);
+        if (r[2] as i32) < 0 || (r[3] as i32) < 0 || !target.is_multiple_of(4) {
+            return runtime::complete(frame, errno(22));
+        }
+        let mut destination = [0; 4];
+        if let Err(error) = runtime::copy_in(target, &mut destination) {
+            return runtime::complete(frame, errno(error));
+        }
+        if command == 4 && u32::from_le_bytes(bytes) != r[5] as u32 {
+            return runtime::complete(frame, errno(11));
+        }
+        // IRQs stay masked throughout comparison, migration and wakeup on
+        // this single-CPU profile; no waiter can be lost between these steps.
+        let (selected, moved) = queue().requeue(process, address, target, r[2] as u32, r[3] as u32);
+        wake(selected, 0);
+        WAKES.fetch_add(selected.count_ones() as u64, Ordering::Relaxed);
+        return runtime::complete(frame, selected.count_ones() as u64 + u64::from(moved));
+    }
     if matches!(command, 1 | 10) {
         if (r[2] as i32) < 0 {
             return runtime::complete(frame, errno(22));
@@ -419,10 +470,12 @@ fn futex(frame: *mut TrapFrame, r: &[u64; 31]) -> *mut TrapFrame {
     if u32::from_le_bytes(bytes) != r[2] as u32 {
         return runtime::complete(frame, errno(11));
     }
-    let timeout = if r[3] == 0 {
+    let timeout = if let Some(saved) = restarted_timeout {
+        saved
+    } else if r[3] == 0 {
         None
     } else {
-        match deadline(r[3], command == 9) {
+        match clock_deadline(r[3], command == 9, realtime) {
             Ok(end) => Some(end),
             Err(error) => return runtime::complete(frame, errno(error)),
         }
@@ -442,19 +495,21 @@ fn futex(frame: *mut TrapFrame, r: &[u64; 31]) -> *mut TrapFrame {
         return runtime::complete(frame, errno(error));
     }
     local(context).timeout_result = errno(110);
+    #[cfg(feature = "art-runtime")]
+    signals::note_futex(frame, r, timeout);
     runtime::complete(frame, 0);
     WAITS.fetch_add(1, Ordering::Relaxed);
     block(frame, ThreadState::Waiting)
 }
 fn sleep(frame: *mut TrapFrame, r: &[u64; 31]) -> *mut TrapFrame {
-    let (request, absolute) = if r[8] == 101 {
-        (r[0], false)
-    } else if r[0] == 1 && r[1] <= 1 {
-        (r[2], r[1] == 1)
+    let (request, absolute, realtime) = if r[8] == 101 {
+        (r[0], false, false)
+    } else if (r[0] == 1 || (r[0] == 0 && cfg!(feature = "art-runtime"))) && r[1] <= 1 {
+        (r[2], r[1] == 1, r[0] == 0)
     } else {
         return runtime::complete(frame, errno(22));
     };
-    let end = match deadline(request, absolute) {
+    let end = match clock_deadline(request, absolute, realtime) {
         Ok(end) => end,
         Err(error) => return runtime::complete(frame, errno(error)),
     };
@@ -472,6 +527,17 @@ fn sleep(frame: *mut TrapFrame, r: &[u64; 31]) -> *mut TrapFrame {
         return runtime::complete(frame, errno(error));
     }
     local(context).timeout_result = 0;
+    #[cfg(feature = "art-runtime")]
+    signals::note_sleep(
+        if absolute {
+            0
+        } else if r[8] == 101 {
+            r[1]
+        } else {
+            r[3]
+        },
+        end,
+    );
     runtime::complete(frame, 0);
     block(frame, ThreadState::Waiting)
 }
@@ -481,6 +547,10 @@ fn block(frame: *mut TrapFrame, state: ThreadState) -> *mut TrapFrame {
         .saved_frame
         .store(frame, Ordering::Relaxed);
     transition_state(context, ThreadState::Running, state);
+    #[cfg(feature = "art-runtime")]
+    if state == ThreadState::Waiting && signals::has_pending(context) {
+        signals::interrupt(context);
+    }
     BLOCK_DISPATCHES.fetch_add(1, Ordering::Relaxed);
     select_next_context(context)
 }
@@ -495,6 +565,8 @@ fn wake(selected: u64, result: u64) {
         unsafe {
             (*frame).x[0] = result;
         }
+        #[cfg(feature = "art-runtime")]
+        signals::clear_wait(context);
         transition_state(context, ThreadState::Waiting, ThreadState::Runnable);
     }
 }
@@ -627,6 +699,8 @@ pub(super) fn terminate_group(process: u64) -> Result<bool, TerminateUserError> 
 
 pub(super) fn reset_context(context: usize) {
     queue().cancel(context);
+    #[cfg(feature = "art-runtime")]
+    signals::reset(context);
     *local(context) = Local::EMPTY;
 }
 pub fn reap() {
@@ -690,5 +764,7 @@ pub fn evidence(marker: &str) {
         CREATED.load(Ordering::Relaxed),
         REAPED.load(Ordering::Relaxed)
     );
+    #[cfg(feature = "art-runtime")]
+    signals::evidence();
     crate::arch::aarch64::restore_daif(saved);
 }

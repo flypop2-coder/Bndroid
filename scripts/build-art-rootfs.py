@@ -13,7 +13,7 @@ def main():
     parser.add_argument("--runtime", required=True, type=Path)
     parser.add_argument("--dex", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--mode", choices=("java", "memory", "help"), default="java")
+    parser.add_argument("--mode", choices=("java", "memory", "help", "signals", "signal-bad-frame", "signal-bad-pc", "signal-bad-fp", "signal-default", "signal-guard"), default="java")
     args = parser.parse_args()
     provenance = json.loads((args.runtime / "art-provenance.json").read_text())
     inputs = {}
@@ -57,6 +57,8 @@ def main():
     inputs["system/etc/public.libraries.txt"] = b"libc.so\nlibdl.so\nlibm.so\nliblog.so\nlibz.so\n"
     if args.mode == "memory":
         inputs["system/bin/art-memory-probe"] = (args.dex.parent / "memory-probe").read_bytes()
+    if args.mode.startswith("signal"):
+        inputs["system/bin/art-signals-probe"] = (args.dex.parent / "signals-probe").read_bytes()
     if not inputs["system/framework/bndroid-probe.dex"].startswith(b"dex\n"):
         raise SystemExit("Expected a standard DEX input")
     if len(inputs) + len(aliases) + 4 + 7 > 128:
@@ -84,6 +86,8 @@ def main():
     arguments += ["-help"] if args.mode == "help" else ["-Xint", "-Xusejit:false", "-Xms4m", "-Xmx16m", "-Xnoimage-dex2oat", "-Xbootclasspath:" + ":".join(jars), "-cp", "/system/framework/bndroid-probe.dex", "Main"]
     if args.mode == "memory":
         arguments = [arguments[0], "/system/bin/art-memory-probe"]
+    if args.mode.startswith("signal"):
+        arguments = [arguments[0], "/system/bin/art-signals-probe", args.mode]
     environment = ["LANG=C", "ANDROID_ROOT=/system", "ANDROID_ART_ROOT=/apex/com.android.art",
                    "ANDROID_I18N_ROOT=/apex/com.android.i18n", "ANDROID_TZDATA_ROOT=/apex/com.android.tzdata",
                    "ANDROID_DATA=/data"]

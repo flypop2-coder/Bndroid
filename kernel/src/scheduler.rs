@@ -356,6 +356,8 @@ pub enum UserFaultReason {
     InvalidReturnState = 1,
     SynchronousException = 2,
     InvalidSyscallContext = 3,
+    #[cfg(feature = "art-runtime")]
+    LinuxSignal = 4,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1501,6 +1503,37 @@ pub fn assert_current_kernel_stack_headroom(stack_pointer: usize, required: usiz
         || stack_pointer > top
         || !stack_canary_intact(context)
     {
+        crate::kprintln!(
+            "KERNEL_STACK_HEADROOM context={} sp={:#x} bottom={:#x} top={:#x} required={}",
+            current,
+            stack_pointer,
+            bottom,
+            top,
+            required
+        );
+        #[cfg(feature = "art-runtime")]
+        {
+            let mut fp: usize;
+            unsafe {
+                core::arch::asm!("mov {}, x29", out(reg) fp, options(nomem, nostack));
+            }
+            for _ in 0..12 {
+                if !fp.is_multiple_of(16)
+                    || fp < bottom
+                    || fp.checked_add(16).is_none_or(|end| end > top)
+                {
+                    break;
+                }
+                // Forced kernel frame pointers; read only this owned stack.
+                let next = unsafe { core::ptr::read_volatile(fp as *const usize) };
+                let lr = unsafe { core::ptr::read_volatile((fp + 8) as *const usize) };
+                crate::kprintln!("KERNEL_STACK_FRAME fp={:#x} lr={:#x}", fp, lr);
+                if next <= fp {
+                    break;
+                }
+                fp = next;
+            }
+        }
         panic!("kernel stack lacks nested-exception headroom");
     }
 }

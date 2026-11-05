@@ -102,6 +102,50 @@ fn log_datagram(bytes: &[u8]) -> Result<u64, i64> {
     Ok(bytes.len() as u64)
 }
 
+// Keep packet buffers out of console write/writev frames: ART's error path
+// uses writev, whose per-vector write must not stack two 4 KiB log buffers.
+#[cfg(feature = "art-runtime")]
+#[inline(never)]
+fn write_log_packet(file: &FileRef, address: u64, count: u64) -> Result<u64, i64> {
+    if !file.log_connected() {
+        return Err(107);
+    }
+    if count > 4096 {
+        return Err(90);
+    }
+    let mut bytes = [0; 4096];
+    input(address, &mut bytes[..count as usize])?;
+    log_datagram(&bytes[..count as usize])
+}
+
+#[cfg(feature = "art-runtime")]
+#[inline(never)]
+fn writev_log_packet(fd: u64, address: u64, count: u64) -> Result<u64, i64> {
+    if !file(fd)?.log_connected() {
+        return Err(107);
+    }
+    if count > 64 {
+        return Err(EINVAL);
+    }
+    let mut packet = [0; 4096];
+    let mut length = 0usize;
+    for index in 0..count {
+        let mut vector = [0; 16];
+        input(address.checked_add(index * 16).ok_or(14)?, &mut vector)?;
+        let base = u64::from_le_bytes(vector[..8].try_into().unwrap());
+        let requested = u64::from_le_bytes(vector[8..].try_into().unwrap());
+        if requested > (packet.len() - length) as u64 {
+            return Err(90);
+        }
+        let end = length + requested as usize;
+        input(base, &mut packet[length..end])?;
+        length = end;
+    }
+    log_datagram(&packet[..length])
+}
+
+// File I/O's bounded gather buffer must not remain live beneath signal frames.
+#[cfg_attr(feature = "art-runtime", inline(never))]
 pub fn dispatch(r: &[u64; 31]) -> Option<u64> {
     let result = match r[8] {
         17 => {
@@ -331,6 +375,7 @@ fn read(fd: u64, address: u64, count: u64, offset: Option<u64>) -> Result<u64, i
     }
     Ok(length as u64)
 }
+#[cfg_attr(feature = "art-runtime", inline(never))]
 fn write(fd: u64, address: u64, count: u64) -> Result<u64, i64> {
     let file = file(fd)?;
     if !file.writable() {
@@ -338,17 +383,7 @@ fn write(fd: u64, address: u64, count: u64) -> Result<u64, i64> {
     }
     match file.target() {
         #[cfg(feature = "art-runtime")]
-        Target::UnixDatagram => {
-            if !file.log_connected() {
-                return Err(107);
-            }
-            if count > 4096 {
-                return Err(90);
-            }
-            let mut bytes = [0; 4096];
-            input(address, &mut bytes[..count as usize])?;
-            log_datagram(&bytes[..count as usize])
-        }
+        Target::UnixDatagram => write_log_packet(&file, address, count),
         Target::Null => Ok(count.min(0x7ffff000)),
         Target::Console => {
             let count = count.min(256) as usize;
@@ -360,30 +395,11 @@ fn write(fd: u64, address: u64, count: u64) -> Result<u64, i64> {
         _ => Err(30),
     }
 }
+#[cfg_attr(feature = "art-runtime", inline(never))]
 fn writev(fd: u64, address: u64, count: u64) -> Result<u64, i64> {
     #[cfg(feature = "art-runtime")]
     if matches!(file(fd)?.target(), Target::UnixDatagram) {
-        if !file(fd)?.log_connected() {
-            return Err(107);
-        }
-        if count > 64 {
-            return Err(EINVAL);
-        }
-        let mut packet = [0; 4096];
-        let mut length = 0usize;
-        for index in 0..count {
-            let mut vector = [0; 16];
-            input(address.checked_add(index * 16).ok_or(14)?, &mut vector)?;
-            let base = u64::from_le_bytes(vector[..8].try_into().unwrap());
-            let requested = u64::from_le_bytes(vector[8..].try_into().unwrap());
-            if requested > (packet.len() - length) as u64 {
-                return Err(90);
-            }
-            let end = length + requested as usize;
-            input(base, &mut packet[length..end])?;
-            length = end;
-        }
-        return log_datagram(&packet[..length]);
+        return writev_log_packet(fd, address, count);
     }
     if !file(fd)?.writable() {
         return Err(EBADF);

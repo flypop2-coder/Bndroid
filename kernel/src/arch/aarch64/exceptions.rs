@@ -199,6 +199,10 @@ extern "C" fn lower_sync_dispatch(frame: *mut TrapFrame) -> *mut TrapFrame {
         return crate::syscall::reject_svc_immediate(frame, immediate);
     }
     if source_mode == 0 {
+        #[cfg(feature = "art-runtime")]
+        if let Some(next) = crate::scheduler::linux_threads::signals::synchronous(frame, esr, far) {
+            return next;
+        }
         return crate::scheduler::fault_current_user(
             frame,
             crate::scheduler::UserFaultReason::SynchronousException,

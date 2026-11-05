@@ -15,9 +15,7 @@ python3 "$ROOT/scripts/build-art-rootfs.py" --runtime "$RUNTIME" --dex "$ARTIFAC
 export BNDROID_LINUX_APP_ELF="$RUNTIME/linker64"
 export BNDROID_LINUX_LAUNCH_CONFIG="$ARTIFACTS/rootfs.launch"
 FEATURES=art-runtime
-DEFAULT_TRACE=0
-[[ "$BNDROID_ART_MODE" != java ]] || DEFAULT_TRACE=1
-[[ "${BNDROID_ART_SYSCALL_TRACE:-$DEFAULT_TRACE}" != 1 ]] || FEATURES+=,linux-syscall-trace
+[[ "${BNDROID_ART_SYSCALL_TRACE:-0}" != 1 ]] || FEATURES+=,linux-syscall-trace
 CARGO_TARGET_DIR="$ROOT/target/art-build" BNDROID_PROFILE=release \
   BNDROID_KERNEL_FEATURES="$FEATURES" BNDROID_USERSPACE_FEATURES=art-runtime \
   "$ROOT/scripts/build-kernel.sh" >"$ARTIFACTS/kernel-build.log" 2>&1 || { tail -60 "$ARTIFACTS/kernel-build.log" >&2; exit 1; }

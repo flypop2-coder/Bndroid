@@ -2,6 +2,8 @@
 
 Date: November 6, 2026. ABI 70 remains an isolated integration profile. A1 and general APK acceptance remain incomplete.
 
+Historical snapshot: [ART Signals-0](ART_SIGNALS_0.md) resolves the signal-registration blocker below and records the first two successful managed Java execution/cleanup cycles.
+
 ## Observed behavior
 
 The unmodified Android 16 ART runtime now reads its core Java jars, initializes the main-thread stack and heap, and loads `libicu_jni.so`, `libjavacore.so` and `libopenjdk.so` through Android's actual exported linker namespaces. The previous `/proc/self/stat` failure is resolved. This advances [Frontend-0](ART_FRONTEND_0.md); it does not yet complete `JNI_CreateJavaVM` or the supplied Java program.

@@ -17,6 +17,7 @@ static ABORT_MAPPING: AtomicU64 = AtomicU64::new(0);
 #[cfg(feature = "linux-syscall-trace")]
 static ABORT_OWNER: AtomicU64 = AtomicU64::new(0);
 
+#[cfg_attr(feature = "art-runtime", inline(never))]
 pub fn dispatch(frame: *mut TrapFrame) -> *mut TrapFrame {
     assert_eq!(
         crate::process::current_live_user_image_id(),
@@ -336,7 +337,45 @@ fn prctl(registers: &[u64; 31]) -> u64 {
     }
 }
 
+#[cfg(feature = "art-runtime")]
+pub fn realtime_anchor() -> bndroid_kernel::linux_sync::RealtimeAnchor {
+    use core::sync::atomic::AtomicBool;
+    static READY: AtomicBool = AtomicBool::new(false);
+    static SECONDS: AtomicU64 = AtomicU64::new(0);
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    assert!(aarch64::irq_is_masked());
+    // This profile has one CPU and no RTC setters. Sample once, then advance
+    // from the same counter used for absolute wait deadlines.
+    if !READY.load(Ordering::Relaxed) {
+        let seconds = crate::platform::qemu_virt::read_pl031_unix_seconds();
+        SECONDS.store(seconds, Ordering::Relaxed);
+        COUNTER.store(aarch64::timer::counter_value(), Ordering::Relaxed);
+        READY.store(true, Ordering::Relaxed);
+        crate::kprintln!(
+            "LINUX_REALTIME_SOURCE source=qemu-pl031 seconds={} initial_resolution_seconds=1",
+            seconds
+        );
+    }
+    bndroid_kernel::linux_sync::RealtimeAnchor {
+        seconds: SECONDS.load(Ordering::Relaxed),
+        counter: COUNTER.load(Ordering::Relaxed),
+    }
+}
+
 fn clock_gettime(clock: u64, address: u64) -> u64 {
+    #[cfg(feature = "art-runtime")]
+    if matches!(clock, 0 | 5) {
+        let anchor = realtime_anchor();
+        let frequency = aarch64::timer::frequency_hz();
+        let mut elapsed = aarch64::timer::counter_value().wrapping_sub(anchor.counter);
+        if clock == 5 {
+            let quantum = (frequency / 100).max(1);
+            elapsed -= elapsed % quantum;
+        }
+        return anchor
+            .timespec(anchor.counter.wrapping_add(elapsed), frequency)
+            .map_or_else(|| errno(EINVAL), |bytes| copy_out(address, &bytes));
+    }
     if !matches!(clock, 1 | 6) {
         return errno(EINVAL);
     } // CLOCK_MONOTONIC and CLOCK_MONOTONIC_COARSE.
@@ -468,7 +507,14 @@ pub fn monitor() -> ! {
                 aarch64::wait_for_interrupt();
             }
         }
-        if aarch64::timer::tick_count().wrapping_sub(start) > 3000 {
+        // Two cold interpreter launches of the upstream ART/core jars exceed
+        // the native smoke test's 30 seconds. Keep a finite ART-specific bound.
+        let timeout_ticks = if cfg!(feature = "art-runtime") {
+            9000
+        } else {
+            3000
+        };
+        if aarch64::timer::tick_count().wrapping_sub(start) > timeout_ticks {
             panic!(
                 "LINUX_RUNTIME_TIMEOUT calls={} created={} live={} reaped={}",
                 CALLS.load(Ordering::Relaxed),
@@ -484,11 +530,22 @@ pub fn monitor() -> ! {
 #[cfg(feature = "bionic-dynamic-runtime")]
 pub(crate) fn copy_in(address: u64, bytes: &mut [u8]) -> Result<(), i64> {
     let address = user_address(address);
-    if !crate::process::current_user_range_is_readable(address, bytes.len())
-        || usercopy::copy_from_user(bytes, address).is_err()
-    {
+    if !crate::process::current_user_range_is_readable(address, bytes.len()) {
         bad_address();
         return Err(EFAULT);
+    }
+    // AArch64 signal frames exceed the native IPC copy window. Validate all
+    // pages first, then retain the bounded fault-recoverable copy primitive.
+    for (index, chunk) in bytes.chunks_mut(usercopy::MAX_USER_COPY_BYTES).enumerate() {
+        if usercopy::copy_from_user(
+            chunk,
+            address + (index * usercopy::MAX_USER_COPY_BYTES) as u64,
+        )
+        .is_err()
+        {
+            bad_address();
+            return Err(EFAULT);
+        }
     }
     Ok(())
 }

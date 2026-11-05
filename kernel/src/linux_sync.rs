@@ -14,6 +14,40 @@ pub const CLONE_PARENT_SETTID: u64 = 0x100000;
 pub const CLONE_CHILD_CLEARTID: u64 = 0x200000;
 pub const CLONE_CHILD_SETTID: u64 = 0x1000000;
 
+/// RTC seconds sampled with an architectural counter. The RTC sets the Unix
+/// epoch; elapsed counter ticks supply subsecond time without repeated RTC
+/// reads causing jumps. Initial accuracy is limited by the one-second RTC.
+#[derive(Clone, Copy)]
+pub struct RealtimeAnchor {
+    pub seconds: u64,
+    pub counter: u64,
+}
+impl RealtimeAnchor {
+    pub fn timespec(self, now: u64, frequency: u64) -> Option<[u8; 16]> {
+        let mut bytes =
+            crate::linux_abi::monotonic_timespec(now.wrapping_sub(self.counter), frequency)?;
+        let elapsed = u64::from_le_bytes(bytes[..8].try_into().unwrap());
+        let seconds = i64::try_from(self.seconds.checked_add(elapsed)?).ok()?;
+        bytes[..8].copy_from_slice(&seconds.to_le_bytes());
+        Some(bytes)
+    }
+    pub fn deadline(self, seconds: i64, nanos: i64, frequency: u64) -> Result<u64, i64> {
+        if seconds < 0 || !(0..1_000_000_000).contains(&nanos) || frequency == 0 {
+            return Err(EINVAL);
+        }
+        if (seconds as u64) < self.seconds {
+            return Ok(self.counter); // Already expired before this anchor.
+        }
+        deadline(
+            (seconds as u64 - self.seconds) as i64,
+            nanos,
+            frequency,
+            self.counter,
+            false,
+        )
+    }
+}
+
 pub fn validate_clone(flags: u64) -> Result<(), i64> {
     const REQUIRED: u64 =
         CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD | CLONE_SYSVSEM;
@@ -103,6 +137,29 @@ impl<const N: usize> FutexQueue<N> {
         }
         selected
     }
+    /// Wake first, then transfer remaining waiters without changing their
+    /// deadlines or bitsets. The caller serializes comparison and this update.
+    pub fn requeue(
+        &mut self,
+        process: u64,
+        source: u64,
+        target: u64,
+        wake_count: u32,
+        move_count: u32,
+    ) -> (u64, u32) {
+        let selected = self.wake(process, source, wake_count, !0);
+        let mut moved = 0;
+        for wait in self.slots.iter_mut().flatten() {
+            if moved == move_count {
+                break;
+            }
+            if wait.process == process && wait.address == source {
+                wait.address = target;
+                moved += 1;
+            }
+        }
+        (selected, moved)
+    }
     pub fn expire(&mut self, now: u64) -> u64 {
         let mut selected = 0;
         for (index, slot) in self.slots.iter_mut().enumerate() {
@@ -127,6 +184,37 @@ impl<const N: usize> FutexQueue<N> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn rtc_epoch_and_counter_share_read_and_absolute_wait_time() {
+        let anchor = RealtimeAnchor {
+            seconds: 1_800_000_000,
+            counter: u64::MAX - 4,
+        };
+        let value = anchor.timespec(10, 10).unwrap();
+        assert_eq!(
+            i64::from_le_bytes(value[..8].try_into().unwrap()),
+            1_800_000_001
+        );
+        assert_eq!(
+            i64::from_le_bytes(value[8..].try_into().unwrap()),
+            500_000_000
+        );
+        assert_eq!(anchor.deadline(1_800_000_001, 500_000_000, 10), Ok(10));
+        assert_eq!(anchor.deadline(1_800_000_001, 500_000_001, 10), Ok(11));
+        assert_eq!(anchor.deadline(1, 0, 10), Ok(anchor.counter));
+        assert!(anchor.deadline(-1, 0, 10).is_err());
+        assert!(anchor.deadline(1_800_000_001, 1_000_000_000, 10).is_err());
+        assert!(anchor.deadline(i64::MAX, 0, u64::MAX).is_err());
+        assert!(anchor.timespec(10, 0).is_none());
+        assert!(
+            RealtimeAnchor {
+                seconds: i64::MAX as u64,
+                counter: 0
+            }
+            .timespec(10, 10)
+            .is_none()
+        );
+    }
     #[test]
     fn requires_one_shared_thread_group_without_process_fork() {
         let flags = 0x3d0f00;
@@ -200,5 +288,39 @@ mod tests {
         .unwrap();
         assert!(q.cancel(1));
         assert_eq!(q.expire(102), 0);
+    }
+    #[test]
+    fn requeue_keeps_owner_deadline_bitset_and_counts_each_waiter_once() {
+        let mut q = FutexQueue::<8>::new();
+        for (context, process, bitset) in [(1, 2, 1), (2, 2, 2), (3, 2, 4), (4, 3, 1)] {
+            q.insert(
+                context,
+                Wait {
+                    process,
+                    address: 4096,
+                    bitset,
+                    deadline: Some(100),
+                },
+            )
+            .unwrap();
+        }
+        assert_eq!(q.requeue(2, 4096, 8192, 1, 2), (2, 2));
+        assert_eq!(q.wake(2, 4096, 8, !0), 0);
+        assert_eq!(q.wake(2, 8192, 8, 2), 1 << 2);
+        assert_eq!(q.expire(99), 0);
+        assert_eq!(q.expire(100), (1 << 3) | (1 << 4));
+        assert!(q.is_empty());
+        q.insert(
+            0,
+            Wait {
+                process: 2,
+                address: 4096,
+                bitset: 1,
+                deadline: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(q.requeue(2, 4096, 4096, 0, 8), (0, 1));
+        assert_eq!(q.wake(2, 4096, 8, !0), 1);
     }
 }

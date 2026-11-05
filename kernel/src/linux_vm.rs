@@ -11,7 +11,7 @@ pub const ARENA_END: u64 = 0x80_0000_0000;
 pub const LOW_START: u64 = 0x8000_0000;
 pub const LOW_END: u64 = 0x1_0000_0000;
 pub const MAX_REGIONS: usize = if cfg!(feature = "art-runtime") {
-    512
+    1024
 } else {
     128
 };
@@ -384,6 +384,24 @@ pub fn is_arena_address(address: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn region_limit_failure_preserves_existing_mappings_and_recovers_after_unmap() {
+        let mut layout = Layout::default();
+        for n in 0..MAX_REGIONS {
+            layout = layout
+                .map(ARENA_START + n as u64 * PAGE * 2, PAGE, 3, 0x100022, 0)
+                .unwrap()
+                .layout;
+        }
+        let extra = ARENA_START + MAX_REGIONS as u64 * PAGE * 2;
+        let before = layout.regions.clone();
+        assert_eq!(layout.map(extra, PAGE, 3, 0x100022, 0).err(), Some(ENOMEM));
+        assert_eq!(layout.regions, before);
+        layout = layout.unmap(ARENA_START, PAGE).unwrap().layout;
+        let restored = layout.map(extra, PAGE, 3, 0x100022, 0).unwrap().layout;
+        assert_eq!(restored.regions.len(), MAX_REGIONS);
+        assert_eq!(restored.regions.last().unwrap().start, extra);
+    }
     #[test]
     fn split_file_mappings_keep_their_original_offset_identity() {
         let backing = FileBacking {

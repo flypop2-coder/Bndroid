@@ -181,8 +181,24 @@ impl LinuxMappings {
                 Err(EINVAL)
             };
         }
-        let change = self.layout.protect(address, length, protection)?;
-        self.apply(l1, asid, change, None)?;
+        let result = self
+            .layout
+            .protect(address, length, protection)
+            .and_then(|change| self.apply(l1, asid, change, None));
+        #[cfg(feature = "art-runtime")]
+        if let Err(error) = result {
+            crate::kprintln!(
+                "LINUX_MPROTECT_FAILED address={:#x} length={} protection={} errno={} regions={} pages={} tables={}",
+                address,
+                length,
+                protection,
+                error,
+                self.layout.regions.len(),
+                self.pages.len(),
+                self.tables.len()
+            );
+        }
+        result?;
         Ok(0)
     }
 
@@ -542,6 +558,41 @@ fn page_descriptor(page: &Page) -> u64 {
 }
 
 impl UserAddressSpace {
+    #[cfg(feature = "art-runtime")]
+    pub fn linux_file_eof(&self, address: u64) -> bool {
+        self.linux.layout.regions.iter().any(|r| {
+            r.file_backed && r.start <= address && address < r.end && address >= r.file_page_end
+        })
+    }
+    #[cfg(feature = "art-runtime")]
+    pub fn linux_user_mapped(&self, address: u64) -> bool {
+        self.mappings
+            .pages
+            .iter()
+            .any(|page| page.virtual_address as u64 == address & !(PAGE_SIZE as u64 - 1))
+            || self
+                .linux
+                .layout
+                .regions
+                .iter()
+                .any(|region| region.start <= address && address < region.end)
+    }
+    #[cfg(feature = "art-runtime")]
+    pub fn linux_signal_trampoline(&mut self) -> Result<u64, i64> {
+        // mov x8, #139; svc #0; brk #0. Owned RX mapping, never a writable
+        // stack trampoline or a shared privileged kernel page.
+        static CODE: [u8; 12] = [0x68, 0x11, 0x80, 0xd2, 1, 0, 0, 0xd4, 0, 0, 0x20, 0xd4];
+        self.linux_mmap_file(
+            [0, PAGE_SIZE as u64, 5, 2, 0, 0],
+            bndroid_kernel::linux_fs::Node {
+                path: "[bndroid-sigreturn]",
+                data: &CODE,
+                kind: bndroid_kernel::linux_fs::Kind::File,
+                mode: 0o555,
+                inode: 0,
+            },
+        )
+    }
     #[cfg(feature = "art-runtime")]
     pub fn linux_mremap(&mut self, r: &[u64; 31]) -> Result<u64, i64> {
         self.linux

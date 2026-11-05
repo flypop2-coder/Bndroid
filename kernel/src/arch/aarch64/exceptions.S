@@ -168,6 +168,11 @@ __irq_common:
     .endif
     bl irq_dispatch
     .if {accounting}
+1:  mov sp, x0
+    mov x19, x0
+    bl linux_signal_return
+    cmp x0, x19
+    b.ne 1b
     bl linux_account_leave
     .endif
     mov sp, x0
@@ -183,6 +188,11 @@ __sync_common:
     .endif
     bl sync_dispatch
     .if {accounting}
+1:  mov sp, x0
+    mov x19, x0
+    bl linux_signal_return
+    cmp x0, x19
+    b.ne 1b
     bl linux_account_leave
     .endif
     mov sp, x0
@@ -201,6 +211,11 @@ __lower_sync_common:
     .endif
     bl lower_sync_dispatch
     .if {accounting}
+1:  mov sp, x0
+    mov x19, x0
+    bl linux_signal_return
+    cmp x0, x19
+    b.ne 1b
     bl linux_account_leave
     .endif
     mov sp, x0

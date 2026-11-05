@@ -151,12 +151,13 @@ Tasks follow dependencies, not optimistic calendar dates. Each stage requires co
 - [x] Establish a restricted Linux arm64 entry foundation: NDK static ELF, validated startup stack/program headers, isolated syscall dispatch, checked user copies, and two native process exit/reap cycles (ABI 70). This does not include Bionic startup or ART.
 - [x] Run unmodified local NDK Bionic static startup and a C program with ELF TLS, Scudo allocation, stdio, constructors/destructors, sparse anonymous mappings, tagged pointers, host entropy, and complete process mapping cleanup. This does not include ART or general APK execution.
 - [x] Execute an NDK PIE with unmodified local Android linker/shared Bionic, dynamically loaded plugin TLS, bounded immutable runtime files, shared descriptor offsets, private file mappings, and normal/fault cleanup. APK JNI loading and ART remain open.
-- [x] Run real Bionic pthreads with shared process ownership, private TLS, futex synchronization, join/detach, timed waits, leader-first exit, worker group exit, and worker-fault cleanup. Signal delivery, advanced futex modes, and ART remain open.
+- [x] Run real Bionic pthreads with shared process ownership, private TLS, futex synchronization, join/detach, timed waits, leader-first exit, worker group exit, and worker-fault cleanup. Later ART-profile signal/requeue work is recorded below.
 - [x] Record the initial local-prebuilt baseline, source strategy, provenance/distribution boundaries, update gates, and resource envelope in [ADR 0001](docs/decisions/0001-android-runtime-baseline.md). No AOSP download or repository binary import is part of this decision.
-- [ ] Boot minimal ART/Bionic userspace and test a restricted Linux ABI personality.
+- [x] Boot minimal ART/Bionic userspace and test a restricted Linux ABI personality with two standard DEX interpreter launches and complete process/thread cleanup. This does not complete ActivityThread/APK acceptance.
 - [x] Load unmodified local ART through its own `dalvikvm64` frontend, verify two normal help/cleanup cycles, and validate low-address/shared memory prerequisites. This does not complete A1.
 - [x] Supply real process/VM snapshots and accounting, stack guards, large reads, shared read-only runtime files, private anonymous remapping and bounded log transport; load ICU/core/OpenJDK native libraries using verified Android linker namespaces.
-- [ ] Implement signal actions, alternate stacks, handler delivery and safe return; resolve the current managed initialization failure at `rt_sigaction` and pass the unchanged Java gate with complete cleanup.
+- [x] Implement real AArch64 signal actions, alternate stacks, queued/synchronous delivery, safe return, interrupted waits, futex requeue and RTC-backed realtime deadlines; pass the unchanged Java gate and signal fault-containment gates with complete cleanup.
+- [ ] Expand managed validation to GC pressure, Java threads, JNI/native libraries, timezone/properties and real runtime storage; complete missing memory-discard, proc/time and scheduling semantics before general APK claims.
 - [ ] Implement Binder identity, transaction/reply/death, and capability mapping.
 - [ ] Run a non-customized managed APK through ActivityThread and Framework.
 - [ ] Run a JNI/native-library APK with W^X, RELRO, ASLR, and crash-isolation checks.

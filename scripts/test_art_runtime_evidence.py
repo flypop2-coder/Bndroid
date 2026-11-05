@@ -1,6 +1,6 @@
 import unittest
 
-from art_runtime_evidence import completion_status
+from art_runtime_evidence import completion_status, signal_failure_status
 
 
 HELP = "dalvikvm: [options] class [argument ...]\nThe following ART arguments are supported:\n"
@@ -9,11 +9,31 @@ MEMORY += "ART_PROC_OK stack=1 maps=1 counters=1 snapshots=1 large_read=1 shared
 LOG = "ANDROID_LOG pid={} buffer=0 priority=4 tag=bndroid-probe message=PROC_LOG_TRANSPORT_OK\n"
 LOGS = LOG.format(4294967298) + LOG.format(8589934594)
 JAVA = "ART_JAVA_CORE_OK sum=4950 exceptions=1 collections=1\n"
+SIGNALS = "ART_SIGNALS_OK handlers=1 altstack=1 registers=1 masks=1 realtime=1 faults=1 threads=1 restart=1 waits=1\n"
+SIGNALS += "ART_SYNC_OK requeue=1 realtime_clock=1 absolute_wait=1\n"
+SIGNAL_PROOF = "LINUX_SIGNALS_OK delivered=30 returned=30 interrupted=10 pending=0\n"
 PROOF = "BIONIC_DYNAMIC_RUNTIME_OK abi=70 native_processes=2 native_exits=2 native_reaped=2 remaining_processes=1 native_handles=0 live_anonymous_pages=0 live_anonymous_tables=0 live_file_descriptions=0 loader=upstream-android-linker peak_anonymous_pages=17000 reclaimed_anonymous_pages=34000\n"
 PROCESS = "LINUX_PROCESS_EXIT pid=4294967298 code=0 native_handles=0\nLINUX_PROCESS_EXIT pid=8589934594 code=0 native_handles=0\nLINUX_THREADS_OK created=2 reaped=2 live=0 waiting=0\n"
 
 
 class EvidenceTests(unittest.TestCase):
+    def test_signal_proof_requires_returns_and_complete_thread_cleanup(self):
+        log=SIGNALS*2+PROCESS+PROOF+SIGNAL_PROOF
+        self.assertEqual(completion_status(log,"signals"),"signals-passed")
+        self.assertEqual(completion_status(log.replace("requeue=1", "requeue=0"),"signals"),"missing-sync-proof")
+        for bad in ("returned=29","pending=1"):
+            original="returned=30" if bad.startswith("returned") else "pending=0"
+            self.assertEqual(completion_status(log.replace(original,bad),"signals"),"invalid-signal-proof")
+
+    def test_bad_signal_frames_require_the_expected_fault_and_all_resource_cleanup(self):
+        log=("SIGNAL_BAD_FRAME_ARMED\nLINUX_SIGNAL_FATAL pid=42 tid=2 signal=11\nLINUX_USER_FAULT pid=42 reason=4\n"
+             "LINUX_THREADS_FAILURE_CLEANUP created=0 reaped=0 live=0 waiting=0\nLINUX_SIGNALS_OK delivered=1 returned=0 pending=0\n"
+             "LINUX_RUNTIME_FAILURE_CLEANUP live_processes=1 faulted=1 reaped=1 live_pages=0 live_tables=0 live_files=0\n")
+        self.assertEqual(signal_failure_status(log,"signal-bad-frame"),"signal-bad-frame-passed")
+        self.assertIsNone(signal_failure_status(log.rstrip(),"signal-bad-frame"))
+        for old,new in (("reason=4","reason=2"),("live_pages=0","live_pages=1"),("pending=0","pending=1"),("faulted=1","faulted=0"),("pid=42 reason","pid=43 reason")):
+            self.assertEqual(signal_failure_status(log.replace(old,new),"signal-bad-frame"),"invalid-signal-containment")
+        self.assertEqual(signal_failure_status(log+"LINUX_SIGNAL_FATAL pid=42 tid=2 signal=11\n","signal-bad-frame"),"invalid-signal-containment")
     def test_frontend_cannot_pass_managed_gate(self):
         log = HELP * 2 + PROCESS + PROOF
         self.assertEqual(completion_status(log, "help"), "help-passed")
