@@ -9753,7 +9753,8 @@ fn render_android_demo(canvas: &mut Canvas<'_>, model: &MobileModel) {
     let mut tap_count = MobileAsciiText::<10>::new();
     tap_count.push_u32(model.androidbox_tap_count);
     canvas.text_role(24, 556, "Restricted DEX-0", MobileTextRole::Label, muted);
-    canvas.card(DRect::new(18, 574, 324, 36), 18, model.dark_theme, false);
+    // Leave room below the second text row, including the rounded border.
+    canvas.card(DRect::new(18, 574, 324, 42), 18, model.dark_theme, false);
     canvas.text_role(
         34,
         578,

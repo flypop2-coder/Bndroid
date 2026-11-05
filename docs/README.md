@@ -5,6 +5,7 @@ Public Markdown documentation is maintained in English. Paths already establishe
 ## Start here
 
 - [Project overview](../README.md)
+- [Interactive demo and smoke checks](DEMO.md)
 - [Whitepaper](../WHITEPAPER.md)
 - [Roadmap](../TODO.md)
 - [Implementation status](../IMPLEMENTATION_STATUS.md)

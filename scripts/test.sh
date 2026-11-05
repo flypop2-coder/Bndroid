@@ -7,6 +7,8 @@ cd "$WORKSPACE_ROOT"
 export CARGO_TARGET_DIR="$WORKSPACE_ROOT/target"
 export CARGO_NET_OFFLINE=true
 
+python3 "$SCRIPT_DIR/test_mobile_ui_demo.py"
+
 "$SCRIPT_DIR/check-storage-server-static.sh"
 "$SCRIPT_DIR/check-storage-server-recovery-static.sh"
 "$SCRIPT_DIR/check-storage-server-repeated-recovery-static.sh"
@@ -65,6 +67,7 @@ BNDROID_PROFILE=debug "$SCRIPT_DIR/check-framebuffer.sh"
 BNDROID_PROFILE=debug "$SCRIPT_DIR/check-input.sh"
 BNDROID_PROFILE=debug "$SCRIPT_DIR/check-compositor.sh"
 BNDROID_PROFILE=debug "$SCRIPT_DIR/check-ui.sh"
+"$SCRIPT_DIR/run-mobile-ui.sh" --headless
 "$SCRIPT_DIR/check-scheduler-negative.sh"
 BNDROID_PROFILE=debug BNDROID_QEMU_VIRTUALIZATION=off "$SCRIPT_DIR/check-sleep-negative.sh"
 BNDROID_PROFILE=debug BNDROID_QEMU_VIRTUALIZATION=on "$SCRIPT_DIR/check-sleep-negative.sh"

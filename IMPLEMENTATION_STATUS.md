@@ -1,6 +1,16 @@
 # Implementation status
 
-This page summarizes implemented behavior recorded through September 9, 2026. Historical test counts below belong to the indicated development runs; they are not a claim that every historical gate was rerun during publication. The [complete original status log](docs/archive/originals/IMPLEMENTATION_STATUS.txt) preserves detailed evidence and earlier milestones. Future tasks belong only in [TODO.md](TODO.md).
+This page records implemented behavior and validation, with a September 9, 2026 platform baseline and dated updates below. Historical test counts belong to the indicated development runs; they are not a claim that every historical gate was rerun during publication. The [complete original status log](docs/archive/originals/IMPLEMENTATION_STATUS.txt) preserves detailed evidence and earlier milestones. Future tasks belong only in [TODO.md](TODO.md).
+
+## Interactive demo update — November 6, 2026
+
+`scripts/run-mobile-ui.sh` provides an offline interactive demo, `--tour` for a guided walkthrough that leaves Home open, and `--headless` for a finite smoke check. It uses a temporary disk overlay and the checked-in Resources-1 APK without requiring an SDK. Build outputs are isolated from the pure-mobile gate; each session retains separate logs, screenshots, and a success summary. Startup and QMP failures are bounded and clean up only the runner's child process.
+
+The guided QEMU run verified Calculator addition through a pixel comparison with the independently entered expected value, divide-by-zero recovery, shared theme/accent/accessibility changes, Activity/resource loading, a DEX callback, and return to Home. The AndroidBox result card now leaves room below its second text row instead of drawing its border through the result. The default workspace host suite also passes after correcting two compositor regression tests that incorrectly assumed mobile dimensions while running with the default 320x480 scanout. These tests continue to validate disjoint damage and cursor composition in both screen profiles.
+
+See [the demo guide](docs/DEMO.md) for commands, controls, evidence, and limits. This update retains session-local settings, temporary storage, and bounded Android compatibility.
+
+Validation for this update: 1,089 default-workspace host tests, 264 mobile UI host tests, 16 mobile compositor tests, 10 demo/QMP host checks, the mobile UI runtime gate, the AndroidBox Resources-1 QEMU gate, and the headless tour passed. Negative runs verified early QEMU exit and bounded startup timeout. The temporary disk's base image still matched the deterministic fixture after the tour. Evidence remains under ignored `target/`, including `usability-*.log` and each gate's session directory.
 
 ## Platform baseline
 

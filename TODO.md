@@ -114,6 +114,7 @@ Tasks follow dependencies, not optimistic calendar dates. Each stage requires co
 - [ ] Use a stable envelope with capability negotiation; change ABI versions for wire changes.
 - [ ] Generate codecs, length assertions, and compatibility matrices instead of duplicated constants.
 - [ ] Parameterize repeated fixture builds, QEMU launches, screenshots, and log checks.
+- [x] Provide an offline mobile demo entry with a temporary disk, guided interaction, headless smoke checks, isolated logs/screenshots, and bounded QMP failure handling.
 
 ### P3: Phone experience
 

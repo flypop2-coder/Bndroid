@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 import socket
 import sys
@@ -14,36 +15,72 @@ SCANOUT_HEIGHT = 1600
 
 
 class Qmp:
-    def __init__(self, socket_path: str) -> None:
+    def __init__(self, socket_path: str, timeout: float = 5.0) -> None:
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError("QMP timeout must be finite and positive")
+        self.timeout = timeout
         self.connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        for _ in range(400):
-            try:
-                self.connection.connect(socket_path)
-                break
-            except (FileNotFoundError, ConnectionRefusedError):
-                time.sleep(0.01)
-        else:
-            raise SystemExit("QMP socket did not become available")
-        self.stream = self.connection.makefile("rwb", buffering=0)
-        greeting = json.loads(self.stream.readline())
-        if "QMP" not in greeting:
-            raise SystemExit("invalid QMP greeting")
-        self.command({"execute": "qmp_capabilities"})
+        self.pending = bytearray()
+        self.request_id = 0
+        try:
+            deadline = time.monotonic() + timeout
+            while True:
+                self._set_deadline(deadline)
+                try:
+                    self.connection.connect(socket_path)
+                    break
+                except (FileNotFoundError, ConnectionRefusedError):
+                    time.sleep(min(0.01, max(0, deadline - time.monotonic())))
+            greeting = self._read(deadline)
+            if "QMP" not in greeting:
+                raise SystemExit("invalid QMP greeting")
+            self.command({"execute": "qmp_capabilities"})
+        except BaseException:
+            self.close()
+            raise
+
+    def _set_deadline(self, deadline: float) -> None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("QMP deadline exceeded")
+        self.connection.settimeout(remaining)
+
+    def _read(self, deadline: float) -> dict[str, object]:
+        while b"\n" not in self.pending:
+            self._set_deadline(deadline)
+            chunk = self.connection.recv(4096)
+            if not chunk:
+                raise SystemExit("QMP connection closed")
+            self.pending.extend(chunk)
+            if len(self.pending) > 1024 * 1024:
+                raise SystemExit("oversized QMP response")
+        line, _, remaining = self.pending.partition(b"\n")
+        self.pending = bytearray(remaining)
+        response = json.loads(line)
+        if not isinstance(response, dict):
+            raise SystemExit("invalid QMP response")
+        return response
 
     def close(self) -> None:
         self.connection.close()
 
     def command(self, payload: dict[str, object]) -> object:
-        self.stream.write(json.dumps(payload).encode("ascii") + b"\n")
+        self.request_id += 1
+        payload = {**payload, "id": self.request_id}
+        deadline = time.monotonic() + self.timeout
+        self._set_deadline(deadline)
+        self.connection.sendall(json.dumps(payload).encode("ascii") + b"\n")
         while True:
-            line = self.stream.readline()
-            if not line:
-                raise SystemExit("QMP connection closed")
-            response = json.loads(line)
+            response = self._read(deadline)
+            if "event" in response:
+                continue
+            if response.get("id") != self.request_id:
+                raise SystemExit("QMP response ID did not match the request")
             if "error" in response:
                 raise SystemExit(f"QMP error: {response['error']}")
             if "return" in response:
                 return response["return"]
+            raise SystemExit("QMP response has neither return nor error")
 
     def input_events(self, events: list[dict[str, object]]) -> None:
         self.command(

@@ -26,7 +26,24 @@ The shared software frame clock provides a nominal 50 Hz grant ceiling. It does 
 
 ## Quick start
 
-Install the Rust toolchain specified in `rust-toolchain.toml`, QEMU with AArch64 support, and Python 3. Run commands from the repository root:
+Install the Rust toolchain specified in `rust-toolchain.toml`, QEMU with AArch64 support, and Python 3.10 or newer. Run commands from the repository root:
+
+```sh
+./scripts/run-mobile-ui.sh
+```
+
+This opens the interactive phone demo with a temporary disk overlay. Swipe upward to unlock, click the dock icons, and swipe upward on Home to open All apps and the bundled AndroidBox demo. Close the QEMU window to stop. The demo uses a checked-in APK and does not require an Android SDK.
+
+For a guided demonstration, or a repeatable check without a window:
+
+```sh
+./scripts/run-mobile-ui.sh --tour
+./scripts/run-mobile-ui.sh --headless
+```
+
+The tour exercises Calculator, shared appearance/accessibility settings, and the bounded APK/DEX callback. Each run retains its own logs and screenshots under `target/mobile-ui/demo.*/`. See [the demo guide](docs/DEMO.md) for controls, prerequisites, and troubleshooting.
+
+For the underlying kernel boot checks:
 
 ```sh
 ./scripts/build-kernel.sh

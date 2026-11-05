@@ -905,7 +905,8 @@ mod tests {
     #[test]
     fn disjoint_scene_regions_never_publish_their_bounding_box_gap() {
         let first = Rect::new(10, 20, 4, 3);
-        let second = Rect::new(600, 1_400, 5, 2);
+        // Exercise both the default 320x480 and mobile 720x1600 scanouts.
+        let second = Rect::new(WIDTH - 20, HEIGHT - 20, 5, 2);
         let damage = validate_scene_damage_regions(&[first, second]).unwrap();
         let scene = vec![0x0011_2233; PIXEL_COUNT];
         let mut scanout = vec![0x0044_5566; PIXEL_COUNT];
@@ -914,7 +915,7 @@ mod tests {
 
         let evidence = publish_scene_damage_regions(scene, scanout, CursorState::hidden(), damage);
 
-        assert_eq!(evidence.damage, Rect::new(10, 20, 595, 1_382));
+        assert_eq!(evidence.damage, Rect::new(10, 20, WIDTH - 25, HEIGHT - 38));
         assert_eq!(evidence.damage_regions, 2);
         assert_eq!(evidence.damage_pixels, 22);
         assert_eq!(evidence.composition, evidence.damage);
@@ -937,7 +938,7 @@ mod tests {
     #[test]
     fn disjoint_scene_regions_recompose_one_intersecting_cursor_exactly_once() {
         let first = Rect::new(104, 206, 2, 2);
-        let second = Rect::new(520, 1_300, 3, 4);
+        let second = Rect::new(WIDTH - 40, HEIGHT - 40, 3, 4);
         let mut scene = vec![0x0001_0203; PIXEL_COUNT];
         let cursor = CursorState::visible(100, 200, true);
         let mut scanout = scene.clone();
