@@ -150,6 +150,7 @@ Tasks follow dependencies, not optimistic calendar dates. Each stage requires co
 
 - [x] Establish a restricted Linux arm64 entry foundation: NDK static ELF, validated startup stack/program headers, isolated syscall dispatch, checked user copies, and two native process exit/reap cycles (ABI 70). This does not include Bionic startup or ART.
 - [x] Run unmodified local NDK Bionic static startup and a C program with ELF TLS, Scudo allocation, stdio, constructors/destructors, sparse anonymous mappings, tagged pointers, host entropy, and complete process mapping cleanup. This does not include ART or general APK execution.
+- [x] Execute an NDK PIE with unmodified local Android linker/shared Bionic, dynamically loaded plugin TLS, bounded immutable runtime files, shared descriptor offsets, private file mappings, and normal/fault cleanup. APK JNI loading and ART remain open.
 - [ ] Write an ADR selecting the Android baseline, source/prebuilt strategy, licensing, updates, and maintenance budget before authorized acquisition.
 - [ ] Boot minimal ART/Bionic userspace and test a restricted Linux ABI personality.
 - [ ] Implement Binder identity, transaction/reply/death, and capability mapping.

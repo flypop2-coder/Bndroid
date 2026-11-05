@@ -459,22 +459,33 @@ const EXPECTED_PAYLOAD: u64 = 0x0123_4567_89ab_cdef;
 const INIT_READY_MAGIC: u64 = 0xc0de_1a17_baad_f00d;
 const REGISTER_SENTINEL: u64 = 0xd15c_a11e_0bad_c0de;
 const STACK_SENTINEL: u64 = 0x5a5a_c3c3_f00d_baad;
-const USER_GUARD_HIGH: u64 = 0x0000_0002_001f_f000;
+const USER_GUARD_HIGH: u64 = if cfg!(feature = "bionic-dynamic-runtime") {
+    0x0000_0002_00ff_f000
+} else {
+    0x0000_0002_001f_f000
+};
+#[cfg(feature = "bionic-dynamic-runtime")]
+const USER_GUARD_LOW: u64 = 0x0000_0002_00fb_e000;
+#[cfg(feature = "bionic-dynamic-runtime")]
+const USER_STACK_START: usize = 0x0000_0002_00fb_f000;
 #[cfg(feature = "storage-server-runtime")]
 const USER_GUARD_LOW: u64 = 0x0000_0002_001b_e000;
 #[cfg(all(
     not(feature = "storage-server-runtime"),
+    not(feature = "bionic-dynamic-runtime"),
     feature = "androidbox-interactive0"
 ))]
 const USER_GUARD_LOW: u64 = 0x0000_0002_001e_a000;
 #[cfg(all(
     not(feature = "storage-server-runtime"),
+    not(feature = "bionic-dynamic-runtime"),
     not(feature = "androidbox-interactive0"),
     any(feature = "androidbox-apk-install0", feature = "androidbox-dex0")
 ))]
 const USER_GUARD_LOW: u64 = 0x0000_0002_001f_6000;
 #[cfg(all(
     not(feature = "storage-server-runtime"),
+    not(feature = "bionic-dynamic-runtime"),
     not(feature = "androidbox-interactive0"),
     not(feature = "androidbox-apk-install0"),
     not(feature = "androidbox-dex0")
@@ -484,37 +495,43 @@ const USER_GUARD_LOW: u64 = 0x0000_0002_001f_a000;
 const USER_STACK_START: usize = 0x0000_0002_001b_f000;
 #[cfg(all(
     not(feature = "storage-server-runtime"),
+    not(feature = "bionic-dynamic-runtime"),
     feature = "androidbox-interactive0"
 ))]
 const USER_STACK_START: usize = 0x0000_0002_001e_b000;
 #[cfg(all(
     not(feature = "storage-server-runtime"),
+    not(feature = "bionic-dynamic-runtime"),
     not(feature = "androidbox-interactive0"),
     any(feature = "androidbox-apk-install0", feature = "androidbox-dex0")
 ))]
 const USER_STACK_START: usize = 0x0000_0002_001f_7000;
 #[cfg(all(
     not(feature = "storage-server-runtime"),
+    not(feature = "bionic-dynamic-runtime"),
     not(feature = "androidbox-interactive0"),
     not(feature = "androidbox-apk-install0"),
     not(feature = "androidbox-dex0")
 ))]
 const USER_STACK_START: usize = 0x0000_0002_001f_b000;
-#[cfg(feature = "storage-server-runtime")]
+#[cfg(any(feature = "storage-server-runtime", feature = "bionic-dynamic-runtime"))]
 const USER_STACK_PAGES: usize = 64;
 #[cfg(all(
     not(feature = "storage-server-runtime"),
+    not(feature = "bionic-dynamic-runtime"),
     feature = "androidbox-interactive0"
 ))]
 const USER_STACK_PAGES: usize = 20;
 #[cfg(all(
     not(feature = "storage-server-runtime"),
+    not(feature = "bionic-dynamic-runtime"),
     not(feature = "androidbox-interactive0"),
     any(feature = "androidbox-apk-install0", feature = "androidbox-dex0")
 ))]
 const USER_STACK_PAGES: usize = 8;
 #[cfg(all(
     not(feature = "storage-server-runtime"),
+    not(feature = "bionic-dynamic-runtime"),
     not(feature = "androidbox-interactive0"),
     not(feature = "androidbox-apk-install0"),
     not(feature = "androidbox-dex0")

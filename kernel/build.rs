@@ -858,6 +858,11 @@ fn run_rustc(command: &mut Command, label: &str) {
 }
 
 fn add_userspace_feature_cfgs(command: &mut Command) {
+    if env::var_os("CARGO_FEATURE_BIONIC_DYNAMIC_RUNTIME").is_some() {
+        command
+            .arg("--cfg")
+            .arg("feature=\"bionic-dynamic-runtime\"");
+    }
     if env::var_os("CARGO_FEATURE_LINUX_ABI_RUNTIME").is_some() {
         command.arg("--cfg").arg("feature=\"linux-abi-runtime\"");
     }

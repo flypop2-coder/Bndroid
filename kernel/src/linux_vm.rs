@@ -1,4 +1,4 @@
-//! Checked Linux anonymous virtual-memory plans, without page-table side effects.
+//! Checked Linux private virtual-memory plans, without page-table side effects.
 use alloc::vec::Vec;
 
 pub const PAGE: u64 = 4096;
@@ -17,6 +17,7 @@ pub enum Protection {
     None,
     Read,
     ReadWrite,
+    ReadExecute,
 }
 impl Protection {
     pub fn from_linux(raw: u64) -> Result<Self, i64> {
@@ -24,6 +25,8 @@ impl Protection {
             0 => Ok(Self::None),
             1 => Ok(Self::Read),
             3 => Ok(Self::ReadWrite),
+            #[cfg(feature = "bionic-dynamic-runtime")]
+            5 => Ok(Self::ReadExecute),
             _ => Err(EACCES),
         }
     }
@@ -34,6 +37,9 @@ pub struct Region {
     pub start: u64,
     pub end: u64,
     pub protection: Protection,
+    pub file_backed: bool,
+    pub file_page_end: u64,
+    pub wipe_on_fork: bool,
 }
 
 #[derive(Debug, Default)]
@@ -68,6 +74,18 @@ impl Layout {
         flags: u64,
         offset: u64,
     ) -> Result<Change, i64> {
+        self.map_with_backing(hint, length, prot, flags, offset, None)
+    }
+
+    pub fn map_with_backing(
+        &self,
+        hint: u64,
+        length: u64,
+        prot: u64,
+        flags: u64,
+        offset: u64,
+        file_bytes: Option<u64>,
+    ) -> Result<Change, i64> {
         const PRIVATE_ANONYMOUS: u64 = 0x22;
         const FIXED: u64 = 0x10;
         const NOREPLACE: u64 = 0x100000;
@@ -98,7 +116,7 @@ impl Layout {
                 self.first_fit(size)?
             }
         };
-        self.change(start, size, Some(protection), true)
+        self.change(start, size, Some(protection), true, file_bytes)
     }
 
     pub fn protect(&self, address: u64, length: u64, prot: u64) -> Result<Change, i64> {
@@ -120,11 +138,53 @@ impl Layout {
         if cursor < end {
             return Err(ENOMEM);
         }
-        self.change(address, size, Some(protection), false)
+        self.change(address, size, Some(protection), false, None)
     }
 
     pub fn unmap(&self, address: u64, length: u64) -> Result<Change, i64> {
-        self.change(address, rounded_length(length)?, None, true)
+        self.change(address, rounded_length(length)?, None, true, None)
+    }
+
+    pub fn advise_fork(&self, address: u64, length: u64, wipe: bool) -> Result<Self, i64> {
+        let size = rounded_length(length)?;
+        let end = checked_range(address, size)?;
+        let mut regions = Vec::new();
+        regions
+            .try_reserve_exact(MAX_REGIONS + 3)
+            .map_err(|_| ENOMEM)?;
+        let mut cursor = address;
+        for &r in &self.regions {
+            if r.end <= address || end <= r.start {
+                regions.push(r);
+                continue;
+            }
+            if r.start > cursor {
+                return Err(ENOMEM);
+            }
+            if wipe && r.file_backed {
+                return Err(EINVAL);
+            }
+            if r.start < address {
+                regions.push(Region { end: address, ..r });
+            }
+            regions.push(Region {
+                start: r.start.max(address),
+                end: r.end.min(end),
+                wipe_on_fork: wipe,
+                ..r
+            });
+            if end < r.end {
+                regions.push(Region { start: end, ..r });
+            }
+            cursor = r.end;
+        }
+        if cursor < end {
+            return Err(ENOMEM);
+        }
+        if regions.len() > MAX_REGIONS {
+            return Err(ENOMEM);
+        }
+        Ok(Self { regions })
     }
 
     fn free(&self, address: u64, size: u64) -> bool {
@@ -152,6 +212,7 @@ impl Layout {
         size: u64,
         protection: Option<Protection>,
         replace: bool,
+        file_bytes: Option<u64>,
     ) -> Result<Change, i64> {
         let end = checked_range(start, size)?;
         let mut regions = Vec::new();
@@ -169,12 +230,27 @@ impl Layout {
             if end < r.end {
                 regions.push(Region { start: end, ..r });
             }
+            if !replace {
+                regions.push(Region {
+                    start: r.start.max(start),
+                    end: r.end.min(end),
+                    protection: protection.unwrap(),
+                    ..r
+                });
+            }
         }
-        if let Some(protection) = protection {
+        if replace && let Some(protection) = protection {
             regions.push(Region {
                 start,
                 end,
                 protection,
+                file_backed: file_bytes.is_some(),
+                file_page_end: match file_bytes {
+                    Some(0) => start,
+                    Some(bytes) => start.checked_add(rounded_length(bytes)?).ok_or(ENOMEM)?,
+                    None => 0,
+                },
+                wipe_on_fork: false,
             });
         }
         regions.sort_unstable_by_key(|r| r.start);
@@ -182,6 +258,9 @@ impl Layout {
         while index < regions.len() {
             if regions[index - 1].end == regions[index].start
                 && regions[index - 1].protection == regions[index].protection
+                && regions[index - 1].file_backed == regions[index].file_backed
+                && regions[index - 1].file_page_end == regions[index].file_page_end
+                && regions[index - 1].wipe_on_fork == regions[index].wipe_on_fork
             {
                 regions[index - 1].end = regions[index].end;
                 regions.remove(index);
@@ -217,6 +296,34 @@ pub fn checked_range(start: u64, size: u64) -> Result<u64, i64> {
 mod tests {
     use super::*;
     #[test]
+    fn fork_advice_preserves_backing_and_survives_protection_changes() {
+        let layout = Layout::default()
+            .map(0, PAGE * 3, 3, 0x22, 0)
+            .unwrap()
+            .layout;
+        let advised = layout.advise_fork(ARENA_START + PAGE, PAGE, true).unwrap();
+        assert_eq!(advised.regions.len(), 3);
+        assert!(advised.regions[1].wipe_on_fork);
+        let protected = advised.protect(ARENA_START, PAGE * 3, 1).unwrap().layout;
+        assert_eq!(protected.regions.len(), 3);
+        assert!(protected.regions[1].wipe_on_fork);
+        assert!(!protected.regions[0].wipe_on_fork);
+        let file = protected
+            .map_with_backing(ARENA_START + PAGE, PAGE, 1, 0x32, 0, Some(PAGE))
+            .unwrap()
+            .layout;
+        assert!(file.regions[1].file_backed);
+        assert!(!file.regions[1].wipe_on_fork);
+        assert_eq!(
+            file.advise_fork(ARENA_START + PAGE, PAGE, true).err(),
+            Some(EINVAL)
+        );
+        assert_eq!(
+            layout.advise_fork(ARENA_START, PAGE * 4, true).err(),
+            Some(ENOMEM)
+        );
+    }
+    #[test]
     fn sparse_reservation_and_protection_split_merge() {
         let layout = Layout::default()
             .map(0, 1 << 38, 0, 0x4022, 0)
@@ -227,7 +334,10 @@ mod tests {
             Region {
                 start: ARENA_START,
                 end: ARENA_START + (1 << 38),
-                protection: Protection::None
+                protection: Protection::None,
+                file_backed: false,
+                file_page_end: 0,
+                wipe_on_fork: false,
             }
         );
         let split = layout.protect(ARENA_START + PAGE, 7, 3).unwrap().layout;

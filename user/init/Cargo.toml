@@ -87,6 +87,7 @@ bndr-ui = { path = "../../crates/bndr-ui" }
 default = []
 linux-abi-runtime = ["bndr-abi/linux-abi-runtime"]
 bionic-runtime = ["linux-abi-runtime"]
+bionic-dynamic-runtime = ["bionic-runtime"]
 app-lifecycle-runtime = []
 app-crash-recovery-runtime = ["app-lifecycle-runtime"]
 mapped-graphics-runtime = ["app-lifecycle-runtime"]

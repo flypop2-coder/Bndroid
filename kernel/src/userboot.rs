@@ -25,21 +25,24 @@ pub const USER_IMAGE_START: usize = mmu::INIT_USER_WINDOW_START;
 pub const USER_IMAGE_END: usize = USER_IMAGE_START + mmu::MAX_USER_LOAD_PAGES * PAGE_SIZE;
 #[cfg(feature = "el0-fault-containment-self-test")]
 pub const USER_CODE_START: usize = USER_IMAGE_START;
-#[cfg(feature = "storage-server-runtime")]
+#[cfg(any(feature = "storage-server-runtime", feature = "bionic-dynamic-runtime"))]
 pub const USER_STACK_PAGES: usize = 64;
 #[cfg(all(
     not(feature = "storage-server-runtime"),
+    not(feature = "bionic-dynamic-runtime"),
     feature = "androidbox-interactive0"
 ))]
 pub const USER_STACK_PAGES: usize = 20;
 #[cfg(all(
     not(feature = "storage-server-runtime"),
+    not(feature = "bionic-dynamic-runtime"),
     not(feature = "androidbox-interactive0"),
     any(feature = "androidbox-apk-install0", feature = "androidbox-dex0")
 ))]
 pub const USER_STACK_PAGES: usize = 8;
 #[cfg(all(
     not(feature = "storage-server-runtime"),
+    not(feature = "bionic-dynamic-runtime"),
     not(feature = "androidbox-interactive0"),
     not(feature = "androidbox-apk-install0"),
     not(feature = "androidbox-dex0")
@@ -377,7 +380,9 @@ fn populate_stack_pages(mappings: &mut OwnedUserMappings) -> Result<(), UserBoot
 
 #[cfg(not(feature = "el0-fault-containment-self-test"))]
 fn parse_linux_image(bytes: &[u8]) -> Result<ElfImage<'_>, bndr_elf::ElfError> {
-    if cfg!(feature = "bionic-runtime") {
+    if cfg!(feature = "bionic-dynamic-runtime") {
+        ElfImage::parse_bionic_linker(bytes)
+    } else if cfg!(feature = "bionic-runtime") {
         ElfImage::parse_bionic_static(bytes)
     } else {
         ElfImage::parse_linux_static(bytes)
@@ -405,29 +410,53 @@ fn populate_linux_stack(
     } else {
         None
     };
+    let bias = if cfg!(feature = "bionic-dynamic-runtime") {
+        USER_IMAGE_START as u64
+    } else {
+        0
+    };
+    let arguments: &[&[u8]] = if cfg!(feature = "bionic-dynamic-runtime") {
+        &[
+            b"/apex/com.android.runtime/bin/linker64",
+            b"/system/bin/dynamic-probe",
+            b"--verify",
+        ]
+    } else if cfg!(feature = "bionic-runtime") {
+        &[b"/system/bin/bionic-probe", b"--verify"]
+    } else {
+        &[b"/system/bin/linux-probe", b"--verify"]
+    };
+    let environment: &[&[u8]] = if cfg!(feature = "bionic-dynamic-runtime") {
+        &[
+            b"LANG=C",
+            b"LD_LIBRARY_PATH=/apex/com.android.runtime/lib64/bionic:/system/lib64",
+        ]
+    } else {
+        &[b"LANG=C"]
+    };
     bndroid_kernel::linux_abi::initial_stack_with_random(
         output,
         pointer as u64,
-        &[
-            if cfg!(feature = "bionic-runtime") {
-                b"/system/bin/bionic-probe"
-            } else {
-                b"/system/bin/linux-probe"
-            },
-            b"--verify",
-        ],
-        &[b"LANG=C"],
+        arguments,
+        environment,
         &[
             (
                 3,
                 elf.program_header_address()
+                    .ok_or(UserBootError::InvalidImage)?
+                    .checked_add(bias)
                     .ok_or(UserBootError::InvalidImage)?,
             ),
             (4, 56),
             (5, elf.program_header_count() as u64),
             (6, PAGE_SIZE as u64),
             (7, 0),
-            (9, elf.entry()),
+            (
+                9,
+                elf.entry()
+                    .checked_add(bias)
+                    .ok_or(UserBootError::InvalidImage)?,
+            ),
             (11, 10000),
             (12, 10000),
             (13, 10000),
@@ -585,6 +614,11 @@ fn embedded_image(image_id: UserImageId) -> Result<Box<EmbeddedImage<'static>>, 
         return Err(UserBootError::InvalidImage);
     }
 
+    let bias = if linux && cfg!(feature = "bionic-dynamic-runtime") {
+        USER_IMAGE_START as u64
+    } else {
+        0
+    };
     let mut segments = [None; MAX_LOAD_SEGMENTS];
     let mut rx_segments = 0;
     let mut ro_segments = 0;
@@ -600,17 +634,33 @@ fn embedded_image(image_id: UserImageId) -> Result<Box<EmbeddedImage<'static>>, 
     let mut code_end = 0;
 
     for (index, segment) in elf.load_segments().enumerate() {
-        let virtual_start =
-            usize::try_from(segment.virtual_address()).map_err(|_| UserBootError::InvalidImage)?;
+        let virtual_start = usize::try_from(
+            segment
+                .virtual_address()
+                .checked_add(bias)
+                .ok_or(UserBootError::InvalidImage)?,
+        )
+        .map_err(|_| UserBootError::InvalidImage)?;
         let memory_size =
             usize::try_from(segment.memory_size()).map_err(|_| UserBootError::InvalidImage)?;
         let memory_end = virtual_start
             .checked_add(memory_size)
             .ok_or(UserBootError::InvalidImage)?;
         let page_range = segment.page_range();
-        let page_start =
-            usize::try_from(page_range.start).map_err(|_| UserBootError::InvalidImage)?;
-        let page_end = usize::try_from(page_range.end).map_err(|_| UserBootError::InvalidImage)?;
+        let page_start = usize::try_from(
+            page_range
+                .start
+                .checked_add(bias)
+                .ok_or(UserBootError::InvalidImage)?,
+        )
+        .map_err(|_| UserBootError::InvalidImage)?;
+        let page_end = usize::try_from(
+            page_range
+                .end
+                .checked_add(bias)
+                .ok_or(UserBootError::InvalidImage)?,
+        )
+        .map_err(|_| UserBootError::InvalidImage)?;
         if index >= MAX_LOAD_SEGMENTS
             || virtual_start != page_start
             || page_start < USER_IMAGE_START
@@ -667,7 +717,12 @@ fn embedded_image(image_id: UserImageId) -> Result<Box<EmbeddedImage<'static>>, 
         segments[index] = Some(planned);
     }
 
-    let entry = usize::try_from(elf.entry()).map_err(|_| UserBootError::InvalidImage)?;
+    let entry = usize::try_from(
+        elf.entry()
+            .checked_add(bias)
+            .ok_or(UserBootError::InvalidImage)?,
+    )
+    .map_err(|_| UserBootError::InvalidImage)?;
     if rx_segments == 0
         || (!linux
             && (rx_segments != 1
@@ -780,7 +835,7 @@ fn release_unpublished_address_space(address_space: UserAddressSpace) -> Result<
         .map_err(|_| UserBootError::Cleanup)
 }
 
-fn synchronize_instruction_cache(data_alias: usize, bytes: usize) {
+pub(crate) fn synchronize_instruction_cache(data_alias: usize, bytes: usize) {
     let ctr: u64;
     unsafe {
         asm!(

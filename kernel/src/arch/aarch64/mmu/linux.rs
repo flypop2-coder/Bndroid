@@ -1,4 +1,4 @@
-//! Sparse private Linux anonymous mappings. No user-controlled address may
+//! Sparse private Linux anonymous/file mappings. No user-controlled address may
 //! select a shared kernel table or the native image/stack window.
 use super::*;
 use bndroid_kernel::linux_vm::{
@@ -67,7 +67,7 @@ impl LinuxMappings {
             .layout
             .map(args[0], args[1], args[2], args[3], args[5])?;
         let start = change.start;
-        self.apply(l1, asid, change)?;
+        self.apply(l1, asid, change, None)?;
         Ok(start)
     }
 
@@ -87,7 +87,7 @@ impl LinuxMappings {
             };
         }
         let change = self.layout.protect(address, length, protection)?;
-        self.apply(l1, asid, change)?;
+        self.apply(l1, asid, change, None)?;
         Ok(0)
     }
 
@@ -99,18 +99,24 @@ impl LinuxMappings {
         length: u64,
     ) -> Result<u64, i64> {
         let change = self.layout.unmap(address, length)?;
-        self.apply(l1, asid, change)?;
+        self.apply(l1, asid, change, None)?;
         Ok(0)
     }
 
-    fn apply(&mut self, l1: &OwnedFrame, asid: u8, change: Change) -> Result<(), i64> {
+    fn apply(
+        &mut self,
+        l1: &OwnedFrame,
+        asid: u8,
+        change: Change,
+        source: Option<&[u8]>,
+    ) -> Result<(), i64> {
         assert!(crate::arch::aarch64::irq_is_masked());
         let start = change.start as usize;
         let end = change.end as usize;
         let remove = |page: &Page| change.replace && start <= page.address && page.address < end;
         let remaining = self.pages.iter().filter(|page| !remove(page)).count();
         let mut pending = Prepared::default();
-        if change.protection.is_some_and(|p| p != Protection::None) {
+        if change.protection.is_some_and(|p| p != Protection::None) || source.is_some() {
             let count = (end - start) / PAGE_SIZE;
             if count > MAX_PAGES {
                 return Err(ENOMEM);
@@ -121,6 +127,14 @@ impl LinuxMappings {
                 .try_reserve_exact(MAX_TABLES)
                 .map_err(|_| ENOMEM)?;
             for address in (start..end).step_by(PAGE_SIZE) {
+                if change.layout.regions.iter().any(|region| {
+                    region.file_backed
+                        && region.start <= address as u64
+                        && (address as u64) < region.end
+                        && address as u64 >= region.file_page_end
+                }) {
+                    continue;
+                }
                 if !change.replace && self.pages.iter().any(|page| page.address == address) {
                     continue;
                 }
@@ -130,6 +144,19 @@ impl LinuxMappings {
                 let frame = memory::allocate_frame().map_err(|_| ENOMEM)?;
                 unsafe {
                     ptr::write_bytes(frame.start_address() as *mut u8, 0, PAGE_SIZE);
+                }
+                if let Some(bytes) = source {
+                    let offset = address - start;
+                    let count = bytes.len().saturating_sub(offset).min(PAGE_SIZE);
+                    if count != 0 {
+                        unsafe {
+                            ptr::copy_nonoverlapping(
+                                bytes.as_ptr().add(offset),
+                                frame.start_address() as *mut u8,
+                                count,
+                            );
+                        }
+                    }
                 }
                 pending.pages.push(Page {
                     address,
@@ -234,6 +261,12 @@ impl LinuxMappings {
         }
         for page in &self.pages {
             if start <= page.address && page.address < end {
+                if page.protection == Protection::ReadExecute {
+                    crate::userboot::synchronize_instruction_cache(
+                        page.frame.start_address(),
+                        PAGE_SIZE,
+                    );
+                }
                 unsafe {
                     ptr::write_volatile(self.leaf(page.address).unwrap(), page_descriptor(page));
                 }
@@ -279,6 +312,7 @@ impl LinuxMappings {
                 Protection::None => None,
                 Protection::Read => Some(UserPageAccess::ReadOnly),
                 Protection::ReadWrite => Some(UserPageAccess::ReadWrite),
+                Protection::ReadExecute => Some(UserPageAccess::ReadExecute),
             })
     }
 
@@ -366,10 +400,64 @@ fn page_descriptor(page: &Page) -> u64 {
         Protection::None => 0,
         Protection::Read => user_ro_nx_page_descriptor(page.frame.start_address()).unwrap(),
         Protection::ReadWrite => user_rw_nx_page_descriptor(page.frame.start_address()).unwrap(),
+        Protection::ReadExecute => user_ro_x_page_descriptor(page.frame.start_address()).unwrap(),
     }
 }
 
 impl UserAddressSpace {
+    #[cfg(feature = "bionic-dynamic-runtime")]
+    pub fn linux_madvise(&mut self, address: u64, length: u64, advice: u64) -> Result<u64, i64> {
+        if !matches!(advice, 18 | 19) {
+            return Err(EINVAL);
+        }
+        self.linux.layout = self
+            .linux
+            .layout
+            .advise_fork(address, length, advice == 18)?;
+        Ok(0)
+    }
+
+    #[cfg(feature = "bionic-dynamic-runtime")]
+    pub fn linux_executable(&self, address: usize) -> bool {
+        let page = address & !(PAGE_SIZE - 1);
+        self.mappings
+            .pages
+            .iter()
+            .any(|p| p.virtual_address == page && p.access == UserPageAccess::ReadExecute)
+            || self.linux.access(page) == Some(UserPageAccess::ReadExecute)
+    }
+    #[cfg(feature = "bionic-dynamic-runtime")]
+    pub fn linux_mmap_file(&mut self, args: [u64; 6], bytes: &'static [u8]) -> Result<u64, i64> {
+        if args[3] & 0x20 != 0 || args[3] & 3 != 2 || !args[5].is_multiple_of(PAGE_SIZE as u64) {
+            return Err(EINVAL);
+        }
+        let length = linux_vm::rounded_length(args[1])?;
+        let available = (bytes.len() as u64).saturating_sub(args[5]);
+        // Linux permits overmapping EOF. Keep complete pages beyond the file
+        // absent, including on later mprotect, instead of exposing zero pages.
+        // Access is contained as a user fault until SIGBUS delivery exists.
+        let change = self.linux.layout.map_with_backing(
+            args[0],
+            args[1],
+            args[2],
+            args[3] | 0x20,
+            args[5],
+            Some(available),
+        )?;
+        let start = change.start;
+        let count = length.min(available) as usize;
+        self.linux.apply(
+            &self.level_1,
+            self.asid(),
+            change,
+            Some(
+                &bytes[(args[5] as usize).min(bytes.len())
+                    ..(args[5] as usize).min(bytes.len()) + count],
+            ),
+        )?;
+        Ok(start)
+    }
+
     pub fn linux_mmap(&mut self, args: [u64; 6]) -> Result<u64, i64> {
         self.linux.map(&self.level_1, self.asid(), args)
     }

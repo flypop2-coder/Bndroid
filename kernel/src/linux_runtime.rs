@@ -25,6 +25,10 @@ pub fn dispatch(frame: *mut TrapFrame) -> *mut TrapFrame {
     CALLS.fetch_add(1, Ordering::Relaxed);
     // SAFETY: the common SVC path validated this process's saved TrapFrame.
     let registers = unsafe { (*frame).x };
+    #[cfg(feature = "bionic-dynamic-runtime")]
+    if let Some(result) = crate::linux_files::dispatch(&registers) {
+        return complete(frame, result);
+    }
     let result = match registers[8] {
         25 => fcntl(registers[0], registers[1], registers[2]),
         57 => {
@@ -110,6 +114,20 @@ pub fn reject_svc(frame: *mut TrapFrame) -> *mut TrapFrame {
 }
 
 fn complete(frame: *mut TrapFrame, value: u64) -> *mut TrapFrame {
+    #[cfg(feature = "linux-syscall-trace")]
+    unsafe {
+        crate::kprintln!(
+            "LINUX_SYSCALL_TRACE nr={} args={:#x},{:#x},{:#x},{:#x},{:#x},{:#x} result={:#x}",
+            (*frame).x[8],
+            (*frame).x[0],
+            (*frame).x[1],
+            (*frame).x[2],
+            (*frame).x[3],
+            (*frame).x[4],
+            (*frame).x[5],
+            value
+        );
+    }
     // Linux returns just x0. In particular do not clear x1/x2 as native IPC does.
     unsafe {
         (*frame).x[0] = value;
@@ -144,7 +162,7 @@ fn write(descriptor: u64, address: u64, requested: u64) -> u64 {
     count as u64
 }
 
-fn copy_out(address: u64, bytes: &[u8]) -> u64 {
+pub(crate) fn copy_out(address: u64, bytes: &[u8]) -> u64 {
     let address = user_address(address);
     if !crate::process::current_user_range_is_writable(address, bytes.len())
         || usercopy::copy_to_user(address, bytes).is_err()
@@ -203,7 +221,7 @@ fn fcntl(descriptor: u64, command: u64, argument: u64) -> u64 {
     }
 }
 
-fn getrandom(address: u64, requested: u64, flags: u64) -> u64 {
+pub(crate) fn getrandom(address: u64, requested: u64, flags: u64) -> u64 {
     let address = user_address(address);
     if flags & !3 != 0 {
         return errno(EINVAL);
@@ -264,7 +282,13 @@ fn clock_gettime(clock: u64, address: u64) -> u64 {
 fn getrlimit(resource: u64, address: u64) -> u64 {
     let limit = match resource {
         3 => (crate::userboot::USER_STACK_END - crate::userboot::USER_STACK_START) as u64,
-        7 => 3, // The only descriptor slots currently provided are 0, 1, 2.
+        7 => {
+            if cfg!(feature = "bionic-dynamic-runtime") {
+                64
+            } else {
+                3
+            }
+        }
         _ => return errno(EINVAL),
     };
     let mut bytes = [0; 16];
@@ -298,6 +322,16 @@ pub fn monitor() -> ! {
         let syscalls = crate::syscall::snapshot();
         let processes = crate::process::snapshot();
         if syscalls.failure != 0 || crate::scheduler::user_init_fault_snapshot().count != 0 {
+            let memory = aarch64::mmu::linux_memory_snapshot();
+            crate::kprintln!(
+                "LINUX_RUNTIME_FAILURE_CLEANUP live_processes={} faulted={} reaped={} live_pages={} live_tables={} live_files={}",
+                processes.live,
+                processes.terminated_faulted,
+                processes.reaped,
+                memory.pages,
+                memory.tables,
+                bndroid_kernel::linux_fd::live_descriptions()
+            );
             panic!("LINUX_RUNTIME_FAIL init_failure={}", syscalls.failure);
         }
         if syscalls.ready {
@@ -317,8 +351,15 @@ pub fn monitor() -> ! {
             if cfg!(feature = "bionic-runtime") {
                 assert!(memory.peak_pages > 0 && memory.reclaimed_pages >= memory.peak_pages);
                 assert!(crate::linux_entropy::consumed() > 32);
+                #[cfg(feature = "bionic-dynamic-runtime")]
+                assert_eq!(bndroid_kernel::linux_fd::live_descriptions(), 0);
                 crate::kprintln!(
-                    "BIONIC_RUNTIME_OK abi=70 native_processes=2 native_exits=2 native_reaped=2 remaining_processes=1 native_handles=0 linux_calls={} unsupported={} bad_address={} live_anonymous_pages={} live_anonymous_tables={} peak_anonymous_pages={} reclaimed_anonymous_pages={} entropy_bytes={} loader=ndk-static-bionic bionic_startup=1 art=0",
+                    "{} abi=70 native_processes=2 native_exits=2 native_reaped=2 remaining_processes=1 native_handles=0 linux_calls={} unsupported={} bad_address={} live_anonymous_pages={} live_anonymous_tables={} peak_anonymous_pages={} reclaimed_anonymous_pages={} entropy_bytes={} loader={} live_file_descriptions={} bionic_startup=1 art=0",
+                    if cfg!(feature = "bionic-dynamic-runtime") {
+                        "BIONIC_DYNAMIC_RUNTIME_OK"
+                    } else {
+                        "BIONIC_RUNTIME_OK"
+                    },
                     CALLS.load(Ordering::Relaxed),
                     UNKNOWN.load(Ordering::Relaxed),
                     BAD_ADDRESS.load(Ordering::Relaxed),
@@ -326,7 +367,13 @@ pub fn monitor() -> ! {
                     memory.tables,
                     memory.peak_pages,
                     memory.reclaimed_pages,
-                    crate::linux_entropy::consumed()
+                    crate::linux_entropy::consumed(),
+                    if cfg!(feature = "bionic-dynamic-runtime") {
+                        "upstream-android-linker"
+                    } else {
+                        "ndk-static-bionic"
+                    },
+                    bndroid_kernel::linux_fd::live_descriptions()
                 );
                 loop {
                     aarch64::wait_for_interrupt();
@@ -355,4 +402,16 @@ pub fn monitor() -> ! {
         }
         aarch64::wait_for_interrupt();
     }
+}
+
+#[cfg(feature = "bionic-dynamic-runtime")]
+pub(crate) fn copy_in(address: u64, bytes: &mut [u8]) -> Result<(), i64> {
+    let address = user_address(address);
+    if !crate::process::current_user_range_is_readable(address, bytes.len())
+        || usercopy::copy_from_user(bytes, address).is_err()
+    {
+        bad_address();
+        return Err(EFAULT);
+    }
+    Ok(())
 }

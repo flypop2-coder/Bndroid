@@ -271,6 +271,8 @@ struct Process {
     linux_clear_child_tid: u64,
     #[cfg(feature = "linux-abi-runtime")]
     linux_streams: [Option<u64>; 3],
+    #[cfg(feature = "bionic-dynamic-runtime")]
+    linux_files: bndroid_kernel::linux_fd::Table,
     #[cfg(feature = "linux-abi-runtime")]
     linux_tagged_addresses: bool,
 }
@@ -872,6 +874,8 @@ pub fn install_init(prepared: Box<PreparedUserProcess>) {
         linux_clear_child_tid: 0,
         #[cfg(feature = "linux-abi-runtime")]
         linux_streams: [Some(0); 3],
+        #[cfg(feature = "bionic-dynamic-runtime")]
+        linux_files: bndroid_kernel::linux_fd::Table::empty(),
         #[cfg(feature = "linux-abi-runtime")]
         linux_tagged_addresses: false,
     };
@@ -1006,6 +1010,20 @@ fn commit_prepared_spawn(
             return Err(SpawnError::OutOfMemory);
         }
     };
+    #[cfg(feature = "bionic-dynamic-runtime")]
+    let linux_files = if image_id == UserImageId::LinuxApp {
+        match bndroid_kernel::linux_fd::Table::standard() {
+            Ok(files) => files,
+            Err(_) => {
+                drop(pending);
+                let PreparedUserProcess { address_space, .. } = take_box(prepared);
+                destroy_unpublished(address_space);
+                return Err(SpawnError::OutOfMemory);
+            }
+        }
+    } else {
+        bndroid_kernel::linux_fd::Table::empty()
+    };
     let PreparedUserProcess {
         info,
         address_space,
@@ -1037,6 +1055,8 @@ fn commit_prepared_spawn(
         linux_clear_child_tid: 0,
         #[cfg(feature = "linux-abi-runtime")]
         linux_streams: [Some(0); 3],
+        #[cfg(feature = "bionic-dynamic-runtime")]
+        linux_files,
         #[cfg(feature = "linux-abi-runtime")]
         linux_tagged_addresses: false,
     };
@@ -8086,4 +8106,27 @@ fn reset_counters() {
     GRAPHICS_CONSUMER_DEATH_PRODUCER_ORPHANS.store(0, Ordering::Relaxed);
     GRAPHICS_CONSUMER_DEATH_RELEASES.store(0, Ordering::Relaxed);
     GRAPHICS_CONSUMER_DEATH_WAKE_COMPLETIONS.store(0, Ordering::Relaxed);
+}
+
+#[cfg(feature = "bionic-dynamic-runtime")]
+pub fn with_linux_files<R>(operation: impl FnOnce(&mut bndroid_kernel::linux_fd::Table) -> R) -> R {
+    assert!(crate::arch::aarch64::irq_is_masked());
+    let id = scheduler::current_process_id().expect("Linux file operation has a process");
+    let process = lookup_mut(ProcessId(id)).expect("live Linux file owner");
+    assert_eq!(process.image_id, UserImageId::LinuxApp);
+    operation(&mut process.linux_files)
+}
+
+#[cfg(feature = "bionic-dynamic-runtime")]
+pub fn linux_return_pc_is_valid(id: u64, pc: usize) -> Option<bool> {
+    let process = lookup(ProcessId(id))?;
+    if process.image_id != UserImageId::LinuxApp {
+        return None;
+    }
+    Some(
+        process
+            .address_space
+            .as_ref()
+            .is_some_and(|space| space.linux_executable(pc)),
+    )
 }

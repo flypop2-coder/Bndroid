@@ -179,6 +179,10 @@ mod kernel_heap;
 mod limits;
 #[cfg(feature = "linux-abi-runtime")]
 mod linux_entropy;
+#[cfg(feature = "bionic-dynamic-runtime")]
+mod linux_files;
+#[cfg(feature = "bionic-dynamic-runtime")]
+mod linux_rootfs;
 #[cfg(feature = "linux-abi-runtime")]
 mod linux_runtime;
 mod log;
@@ -10804,6 +10808,10 @@ pub extern "C" fn kernel_main(dtb_address: usize, boot_exception_level: u64) -> 
     #[cfg(feature = "bionic-runtime")]
     linux_entropy::init(fw_cfg_mmio_region)
         .unwrap_or_else(|error| fatal_boot_error("Linux entropy initialization failed", error));
+
+    #[cfg(feature = "bionic-dynamic-runtime")]
+    linux_rootfs::init(fw_cfg_mmio_region)
+        .unwrap_or_else(|error| fatal_boot_error("Linux rootfs initialization failed", error));
 
     #[cfg(feature = "androidbox-apk-install0")]
     {

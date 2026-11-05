@@ -2631,9 +2631,15 @@ fn validate_user_kernel_state_or_panic(index: usize, frame: *mut TrapFrame) {
 fn user_return_state_is_valid(index: usize, frame: *mut TrapFrame) -> bool {
     let (elr, sp_el0) = unsafe { ((*frame).elr_el1 as usize, (*frame).sp_el0 as usize) };
     let (code_start, code_end, user_stack_start, user_stack_end) = user_bounds(index);
+    let executable = elr >= code_start && elr < code_end;
+    #[cfg(feature = "bionic-dynamic-runtime")]
+    let executable = crate::process::linux_return_pc_is_valid(
+        CONTEXT_PROCESS_IDS[index].load(Ordering::Relaxed),
+        elr,
+    )
+    .unwrap_or(executable);
     elr.is_multiple_of(4)
-        && elr >= code_start
-        && elr < code_end
+        && executable
         && sp_el0.is_multiple_of(16)
         && sp_el0 >= user_stack_start
         && sp_el0 <= user_stack_end

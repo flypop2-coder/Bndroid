@@ -2,13 +2,21 @@
 
 This page records implemented behavior and validation, with a September 9, 2026 platform baseline and dated updates below. Historical test counts belong to the indicated development runs; they are not a claim that every historical gate was rerun during publication. The [complete original status log](docs/archive/originals/IMPLEMENTATION_STATUS.txt) preserves detailed evidence and earlier milestones. Future tasks belong only in [TODO.md](TODO.md).
 
+## Android dynamic linker update — November 6, 2026
+
+The `bionic-dynamic-runtime` profile executes an ordinary NDK PIE through unmodified Android 16 `linker64`, shared libc/libm/libdl, and a separately built plugin. Both supervised process generations verify `dlopen`/symbols/unload, ELF TLS across timer preemption, constructors/destructors, private file mapping, and POSIX descriptor operations. The immutable runtime root comes from explicitly supplied local SDK files; a tested extraction helper uses an isolated temporary AVD. No upstream binaries enter Git.
+
+The positive QEMU gate recorded 1,014 Linux calls, four bad-address checks, two zero-status exits, and zero remaining sparse page/table owners or file descriptions. An intentional read beyond file EOF is contained and also releases every child resource. The default 1,114 workspace host tests, predecessor static Bionic/raw Linux gates, native kernel boot and EL0 fault containment, mobile UI gate, and dynamic-profile Clippy with warnings denied passed. Nineteen Linux-feature helper tests and four UART parser tests passed; missing/corrupt root archives reject boot before userspace. See [Bionic Dynamic-0](docs/milestones/androidbox/BIONIC_DYNAMIC_0.md) for reproducible commands, frozen input hashes, detailed limits, and remaining syscall gaps.
+
+Native dynamic linking now works in this separate profile. Threads, signal delivery, writable Linux filesystems, JNI/APK native libraries, ART, Binder, Framework, and general Android applications still require implementation.
+
 ## Real static Bionic update — November 6, 2026
 
 The `bionic-runtime` profile now boots an ordinary C program using NDK r27b/API 35 CRT and Bionic libraries without modifying them. Two process generations verify constructors, ELF TLS/errno across preemption, Scudo allocation through 2 MiB, stdio, atexit, and destructors. The kernel adds validated static metadata, saved thread pointers, private sparse anonymous memory, per-process standard streams and tagged-pointer control, and consumed-once host entropy. All anonymous page/table owners are reclaimed after exit.
 
 The gate passes with 220 Linux calls, 12 bad-address results, and explicit `ENOSYS` for missing optional startup interfaces. The 1,104 default workspace tests, original native-entry gate, default kernel boot, mobile UI acceptance gate, four UART proof-parser checks, and Bionic Clippy check passed. Missing entropy rejects boot. See [Bionic Static-0](docs/milestones/androidbox/BIONIC_STATIC_0.md) for exact limits, syscall gaps, reproduction, and local artifact provenance.
 
-This provides real native Bionic execution. Dynamic linking, threads/signals, a general filesystem ABI, JNI, ART, Binder, Framework, and general APK execution remain open.
+This static profile provides real native Bionic execution. Dynamic linking and bounded runtime files are covered by the separate update above; threads/signals, a general writable filesystem ABI, JNI, ART, Binder, Framework, and general APK execution remain open.
 
 ## Native arm64 entry update — November 6, 2026
 

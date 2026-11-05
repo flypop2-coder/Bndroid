@@ -35,23 +35,35 @@ pub const EARLY_RAM_END: usize = 0x8000_0000;
 pub const DYNAMIC_MAP_START: usize = 0x0000_0001_0000_0000;
 pub const DYNAMIC_MAP_END: usize = 0x0000_0002_0000_0000;
 pub const INIT_USER_WINDOW_START: usize = DYNAMIC_MAP_END;
-pub const INIT_USER_WINDOW_END: usize = INIT_USER_WINDOW_START + LEVEL_2_BLOCK_SIZE;
-pub const MAX_USER_LOAD_PAGES: usize = 256;
-#[cfg(feature = "storage-server-runtime")]
+pub const INIT_USER_WINDOW_END: usize = INIT_USER_WINDOW_START
+    + if cfg!(feature = "bionic-dynamic-runtime") {
+        8 * LEVEL_2_BLOCK_SIZE
+    } else {
+        LEVEL_2_BLOCK_SIZE
+    };
+pub const MAX_USER_LOAD_PAGES: usize = if cfg!(feature = "bionic-dynamic-runtime") {
+    1024
+} else {
+    256
+};
+#[cfg(any(feature = "storage-server-runtime", feature = "bionic-dynamic-runtime"))]
 pub const USER_STACK_PAGE_LIMIT: usize = 64;
 #[cfg(all(
     not(feature = "storage-server-runtime"),
+    not(feature = "bionic-dynamic-runtime"),
     feature = "androidbox-interactive0"
 ))]
 pub const USER_STACK_PAGE_LIMIT: usize = 20;
 #[cfg(all(
     not(feature = "storage-server-runtime"),
+    not(feature = "bionic-dynamic-runtime"),
     not(feature = "androidbox-interactive0"),
     any(feature = "androidbox-apk-install0", feature = "androidbox-dex0")
 ))]
 pub const USER_STACK_PAGE_LIMIT: usize = 8;
 #[cfg(all(
     not(feature = "storage-server-runtime"),
+    not(feature = "bionic-dynamic-runtime"),
     not(feature = "androidbox-interactive0"),
     not(feature = "androidbox-apk-install0"),
     not(feature = "androidbox-dex0")
@@ -80,9 +92,17 @@ const USER_LEVEL_3_TABLE_COUNT: usize = 11;
     not(feature = "mobile-ui-runtime"),
     feature = "androidbox-apk-install0"
 ))]
-const USER_LEVEL_3_TABLE_COUNT: usize = 1;
+const USER_LEVEL_3_TABLE_COUNT: usize = if cfg!(feature = "bionic-dynamic-runtime") {
+    8
+} else {
+    1
+};
 pub const USER_GRAPHICS_MAPPING_PAGES: usize = bndr_abi::GRAPHICS_BUFFER_BACKING_BYTES / PAGE_SIZE;
-pub const USER_GRAPHICS_MAP_ADDRESS: usize = bndr_abi::GRAPHICS_BUFFER_MAP_ADDRESS as usize;
+pub const USER_GRAPHICS_MAP_ADDRESS: usize = if cfg!(feature = "bionic-dynamic-runtime") {
+    INIT_USER_WINDOW_START + 8 * 1024 * 1024
+} else {
+    bndr_abi::GRAPHICS_BUFFER_MAP_ADDRESS as usize
+};
 pub const USER_GRAPHICS_MAP_STRIDE: usize = bndr_abi::GRAPHICS_BUFFER_MAP_STRIDE as usize;
 pub const KERNEL_ASID: u8 = 0;
 /// Compatibility value for the first user address space allocated at boot.
@@ -2642,7 +2662,8 @@ const fn valid_user_vma_range(start: usize, end: usize) -> bool {
 const fn same_user_l3_window(address: usize) -> bool {
     (address >> 39) & 0x1ff == (INIT_USER_WINDOW_START >> 39) & 0x1ff
         && (address >> 30) & 0x1ff == (INIT_USER_WINDOW_START >> 30) & 0x1ff
-        && (address >> 21) & 0x1ff == (INIT_USER_WINDOW_START >> 21) & 0x1ff
+        && address >= INIT_USER_WINDOW_START
+        && address < INIT_USER_WINDOW_END
 }
 
 const fn valid_owned_normal_frame(frame: &OwnedFrame) -> bool {

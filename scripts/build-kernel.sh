@@ -45,15 +45,20 @@ KERNEL_FEATURES="${BNDROID_KERNEL_FEATURES:-}"
 USERSPACE_FEATURES="${BNDROID_USERSPACE_FEATURES:-}"
 KERNEL_LINUX_ABI_RUNTIME=0
 USER_LINUX_ABI_RUNTIME=0
-if feature_list_contains "$KERNEL_FEATURES" "linux-abi-runtime" || feature_list_contains "$KERNEL_FEATURES" "bionic-runtime"; then
+if feature_list_contains "$KERNEL_FEATURES" "linux-abi-runtime" || feature_list_contains "$KERNEL_FEATURES" "bionic-runtime" || feature_list_contains "$KERNEL_FEATURES" "bionic-dynamic-runtime" || feature_list_contains "$KERNEL_FEATURES" "linux-syscall-trace"; then
   KERNEL_LINUX_ABI_RUNTIME=1
 fi
-if feature_list_contains "$USERSPACE_FEATURES" "linux-abi-runtime" || feature_list_contains "$USERSPACE_FEATURES" "bionic-runtime"; then
+if feature_list_contains "$USERSPACE_FEATURES" "linux-abi-runtime" || feature_list_contains "$USERSPACE_FEATURES" "bionic-runtime" || feature_list_contains "$USERSPACE_FEATURES" "bionic-dynamic-runtime"; then
   USER_LINUX_ABI_RUNTIME=1
 fi
 if [[ "$KERNEL_LINUX_ABI_RUNTIME" != "$USER_LINUX_ABI_RUNTIME" ]]; then
   echo "linux-abi-runtime must be enabled for both kernel and userspace" >&2
   exit 1
+fi
+if feature_list_contains "$KERNEL_FEATURES" "bionic-dynamic-runtime"; then
+  feature_list_contains "$USERSPACE_FEATURES" "bionic-dynamic-runtime" || { echo "bionic-dynamic-runtime must match kernel and userspace" >&2; exit 1; }
+elif feature_list_contains "$USERSPACE_FEATURES" "bionic-dynamic-runtime"; then
+  echo "bionic-dynamic-runtime must match kernel and userspace" >&2; exit 1
 fi
 KERNEL_MOBILE_UI_RUNTIME=0
 KERNEL_ANDROIDBOX_DEX0=0

@@ -30,6 +30,8 @@ pub const MAX_ELF_FILE_SIZE: usize = 2 * 1024 * 1024;
 pub const MAX_PROGRAM_HEADERS: usize = 8;
 pub const MAX_BIONIC_PROGRAM_HEADERS: usize = 16;
 pub const MAX_LOAD_PAGES: usize = 256;
+pub const MAX_LINKER_FILE_SIZE: usize = 4 * 1024 * 1024;
+pub const MAX_LINKER_LOAD_PAGES: usize = 1024;
 pub const ELF_PAGE_SIZE: u64 = 4096;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -173,24 +175,41 @@ pub struct ElfImage<'a> {
 
 impl<'a> ElfImage<'a> {
     pub fn parse(bytes: &'a [u8]) -> Result<Self, ElfError> {
-        Self::parse_profile(bytes, false, false)
+        Self::parse_profile(bytes, false, false, false)
     }
 
     /// Static Linux ELF entry support, including a validated, mapped PHDR.
     /// Dynamic linking, TLS and ET_DYN still require separate implementation.
     pub fn parse_linux_static(bytes: &'a [u8]) -> Result<Self, ElfError> {
-        Self::parse_profile(bytes, true, false)
+        Self::parse_profile(bytes, true, false, false)
     }
 
     /// Static Bionic initializes TLS and protects RELRO from its own startup.
     /// Admit only metadata backed by validated LOAD mappings; dynamic ELF and
     /// executable stacks remain unsupported.
     pub fn parse_bionic_static(bytes: &'a [u8]) -> Result<Self, ElfError> {
-        Self::parse_profile(bytes, true, true)
+        Self::parse_profile(bytes, true, true, false)
     }
 
-    fn parse_profile(bytes: &'a [u8], linux: bool, bionic: bool) -> Result<Self, ElfError> {
-        if bytes.len() > MAX_ELF_FILE_SIZE {
+    /// Self-contained ET_DYN interpreter. Relocation is performed by the
+    /// upstream linker at EL0; the kernel only validates and rebases its LOADs.
+    pub fn parse_bionic_linker(bytes: &'a [u8]) -> Result<Self, ElfError> {
+        Self::parse_profile(bytes, true, true, true)
+    }
+
+    fn parse_profile(
+        bytes: &'a [u8],
+        linux: bool,
+        bionic: bool,
+        linker: bool,
+    ) -> Result<Self, ElfError> {
+        if bytes.len()
+            > if linker {
+                MAX_LINKER_FILE_SIZE
+            } else {
+                MAX_ELF_FILE_SIZE
+            }
+        {
             return Err(ElfError::FileTooLarge);
         }
         if bytes.len() < ELF_HEADER_SIZE {
@@ -217,7 +236,7 @@ impl<'a> ElfImage<'a> {
         if bytes[9..16].iter().any(|byte| *byte != 0) {
             return Err(ElfError::InvalidIdentPadding);
         }
-        if read_u16(bytes, 16) != Some(ELF_TYPE_EXECUTABLE) {
+        if read_u16(bytes, 16) != Some(if linker { 3 } else { ELF_TYPE_EXECUTABLE }) {
             return Err(ElfError::UnsupportedType);
         }
         if read_u16(bytes, 18) != Some(ELF_MACHINE_AARCH64) {
@@ -275,6 +294,7 @@ impl<'a> ElfImage<'a> {
         let mut saw_gnu_stack = false;
         let mut phdr_segment = None;
         let mut metadata_kinds = 0_u8;
+        let mut dynamic = None;
         for index in 0..program_header_count {
             let header = program_header_at(program_header_offset, index)?;
             let program_type =
@@ -314,6 +334,12 @@ impl<'a> ElfImage<'a> {
                     saw_gnu_stack = true;
                     continue;
                 }
+                PROGRAM_TYPE_DYNAMIC if linker => {
+                    if dynamic.replace(header).is_some() {
+                        return Err(ElfError::DuplicateMetadataSegment);
+                    }
+                    continue;
+                }
                 PROGRAM_TYPE_DYNAMIC => return Err(ElfError::DynamicSegmentUnsupported),
                 PROGRAM_TYPE_INTERPRETER => return Err(ElfError::InterpreterUnsupported),
                 PROGRAM_TYPE_TLS => return Err(ElfError::TlsUnsupported),
@@ -328,7 +354,13 @@ impl<'a> ElfImage<'a> {
             load_page_count = load_page_count
                 .checked_add(segment_pages)
                 .ok_or(ElfError::TooManyLoadPages)?;
-            if load_page_count > MAX_LOAD_PAGES {
+            if load_page_count
+                > if linker {
+                    MAX_LINKER_LOAD_PAGES
+                } else {
+                    MAX_LOAD_PAGES
+                }
+            {
                 return Err(ElfError::TooManyLoadPages);
             }
             if segment.flags.executable() && segment.file_backed_virtual_range().contains(&entry) {
@@ -374,6 +406,21 @@ impl<'a> ElfImage<'a> {
                 return Err(ElfError::InvalidProgramHeaderSegment);
             }
         }
+        if linker {
+            let header = dynamic.ok_or(ElfError::InvalidMetadataSegment)?;
+            image.validate_metadata_segment(header, PROGRAM_TYPE_DYNAMIC)?;
+            let offset = read_u64(bytes, header + 8).unwrap() as usize;
+            let length = read_u64(bytes, header + 32).unwrap() as usize;
+            if !length.is_multiple_of(16)
+                || length < 16
+                || read_u64(bytes, offset + length - 16) != Some(0)
+                || bytes[offset..offset + length]
+                    .chunks_exact(16)
+                    .any(|entry| u64::from_le_bytes(entry[..8].try_into().unwrap()) == 1)
+            {
+                return Err(ElfError::InvalidMetadataSegment);
+            }
+        }
         if bionic {
             for index in 0..program_header_count {
                 let header = program_header_at(program_header_offset, index)?;
@@ -400,15 +447,22 @@ impl<'a> ElfImage<'a> {
         let file_size = read_u64(self.bytes, header + 32).ok_or(bad)?;
         let memory_size = read_u64(self.bytes, header + 40).ok_or(bad)?;
         let alignment = read_u64(self.bytes, header + 48).ok_or(bad)?;
-        if flags != PROGRAM_FLAG_READ
+        if flags
+            != if kind == PROGRAM_TYPE_DYNAMIC {
+                PROGRAM_FLAG_READ | PROGRAM_FLAG_WRITE
+            } else {
+                PROGRAM_FLAG_READ
+            }
             || file_size > memory_size
             || memory_size == 0
             || alignment == 0
             || !alignment.is_power_of_two()
             || alignment > MAX_ELF_FILE_SIZE as u64
             || address % alignment != offset % alignment
-            || (matches!(kind, PROGRAM_TYPE_NOTE | PROGRAM_TYPE_GNU_EH_FRAME)
-                && file_size != memory_size)
+            || (matches!(
+                kind,
+                PROGRAM_TYPE_NOTE | PROGRAM_TYPE_GNU_EH_FRAME | PROGRAM_TYPE_DYNAMIC
+            ) && file_size != memory_size)
         {
             return Err(bad);
         }
@@ -432,8 +486,10 @@ impl<'a> ElfImage<'a> {
                 && base <= offset
                 && file_end <= base.checked_add(file).ok_or(bad)?
                 && address - start == offset - base
-                && (!matches!(kind, PROGRAM_TYPE_TLS | PROGRAM_TYPE_GNU_RELRO)
-                    || load_flags == PROGRAM_FLAG_READ | PROGRAM_FLAG_WRITE)
+                && (!matches!(
+                    kind,
+                    PROGRAM_TYPE_TLS | PROGRAM_TYPE_GNU_RELRO | PROGRAM_TYPE_DYNAMIC
+                ) || load_flags == PROGRAM_FLAG_READ | PROGRAM_FLAG_WRITE)
             {
                 return Ok(());
             }
@@ -771,6 +827,56 @@ mod tests {
             }
         }
         bytes
+    }
+
+    #[test]
+    fn interpreter_profile_requires_one_self_contained_dynamic_table() {
+        let mut bytes = linux_elf();
+        bytes.resize(0x3020, 0);
+        bytes[0x3000..].fill(0);
+        write_u16(&mut bytes, 16, 3);
+        write_u16(&mut bytes, 56, 5);
+        write_u64(&mut bytes, 96, 5 * 56);
+        write_u64(&mut bytes, 104, 5 * 56);
+        write_u64(&mut bytes, 64 + 3 * 56 + 32, 32);
+        let header = 64 + 4 * 56;
+        write_u32(&mut bytes, header, super::PROGRAM_TYPE_DYNAMIC);
+        write_u32(&mut bytes, header + 4, 6);
+        for (field, value) in [
+            (8, 0x3000),
+            (16, TEXT_VA + 0x2000),
+            (32, 32),
+            (40, 32),
+            (48, 8),
+        ] {
+            write_u64(&mut bytes, header + field, value);
+        }
+        assert!(ElfImage::parse_bionic_linker(&bytes).is_ok());
+        assert_eq!(
+            ElfImage::parse_bionic_static(&bytes).err(),
+            Some(ElfError::UnsupportedType)
+        );
+        let mut malformed = bytes.clone();
+        write_u64(&mut malformed, 0x3000, 1); // Interpreter cannot depend on another library.
+        assert_eq!(
+            ElfImage::parse_bionic_linker(&malformed).err(),
+            Some(ElfError::InvalidMetadataSegment)
+        );
+        for (offset, value) in [
+            (header + 4, 4),
+            (header + 8, 0x4000),
+            (header + 32, 31),
+            (0x3010, 2),
+        ] {
+            let mut malformed = bytes.clone();
+            write_u64(&mut malformed, offset, value);
+            assert!(ElfImage::parse_bionic_linker(&malformed).is_err());
+        }
+        write_u32(&mut bytes, header, 0);
+        assert_eq!(
+            ElfImage::parse_bionic_linker(&bytes).err(),
+            Some(ElfError::InvalidMetadataSegment)
+        );
     }
 
     #[test]
