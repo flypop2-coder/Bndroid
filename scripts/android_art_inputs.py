@@ -24,7 +24,10 @@ def extract_art(command, output, sdk, bionic_receipt):
                       "/apex/com.android.runtime/lib64/bionic", "/apex/com.android.os.statsd/lib64",
                       "/apex/com.android.adbd/lib64", "/system/lib64"):
         try:
-            listing = command("shell", "find", directory, "-type", "f", timeout=30)
+            # Release APEXes can deduplicate native dependencies through
+            # symlinks into sharedlibs. Inventory those names too; otherwise
+            # namespace-local libbase/libc++ are incorrectly resolved globally.
+            listing = command("shell", "find", directory, "-type", "f", "-o", "-type", "l", timeout=30)
         except subprocess.CalledProcessError as error:
             # A release image can hide unrelated files even inside an APEX.
             # Preserve diagnostics; required dependencies must still resolve.
@@ -38,8 +41,13 @@ def extract_art(command, output, sdk, bionic_receipt):
     for variable in ("BOOTCLASSPATH", "DEX2OATBOOTCLASSPATH", "ANDROID_ROOT", "ANDROID_ART_ROOT", "ANDROID_I18N_ROOT", "ANDROID_TZDATA_ROOT"):
         metadata[variable] = command("shell", "printenv", variable)
     (output / "art-environment.json").write_text(json.dumps(metadata, indent=2) + "\n")
-    for remote, name in (("/linkerconfig/ld.config.txt", "ld.config.txt"), ("/apex/apex-info-list.xml", "apex-info-list.xml")):
+    metadata_files = {}
+    for remote, name in (("/linkerconfig/ld.config.txt", "ld.config.txt"),
+                         ("/linkerconfig/com.android.art/ld.config.txt", "ld.art.config.txt"),
+                         ("/apex/apex-info-list.xml", "apex-info-list.xml")):
         command("pull", remote, str(output / name), timeout=30)
+        data = (output / name).read_bytes()
+        metadata_files[name] = {"path": remote, "size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
     files = {}
     total = 0
 
@@ -54,12 +62,15 @@ def extract_art(command, output, sdk, bionic_receipt):
             raise RuntimeError("ART inputs exceed the 512 MiB acquisition budget")
         target = root / path.lstrip("/")
         target.parent.mkdir(parents=True, exist_ok=True)
-        command("pull", path, str(target), timeout=60)
+        source = command("shell", "readlink", "-f", path)
+        if not re.fullmatch(r"/(apex|system)/[A-Za-z0-9_./@+-]+", source):
+            raise RuntimeError(f"Unexpected runtime dependency target: {path} -> {source}")
+        command("pull", source, str(target), timeout=60)
         data = target.read_bytes()
         if len(data) != size:
             raise RuntimeError(f"Source size changed during extraction: {path}")
         total += size
-        files[path] = {"size": size, "sha256": hashlib.sha256(data).hexdigest()}
+        files[path] = {"size": size, "sha256": hashlib.sha256(data).hexdigest(), "source_path": source}
         return target
 
     # Freeze dependencies from the runtime APEX, with only its platform shared
@@ -100,6 +111,7 @@ def extract_art(command, output, sdk, bionic_receipt):
             pull(path)
     receipt = {"source": bionic_receipt, "environment": metadata, "files": files,
                "dependencies": dependencies, "total_bytes": total, "inventory_warnings": inventory_warnings,
+               "metadata_files": metadata_files,
                "dependency_search_paths": list(search), "acquisition_limit_bytes": LIMIT,
                "note": "Local integration inputs; namespace configuration retained; no redistribution grant."}
     (output / "art-provenance.json").write_text(json.dumps(receipt, indent=2) + "\n")

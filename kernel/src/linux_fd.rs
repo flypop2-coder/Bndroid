@@ -3,10 +3,11 @@
 //! dup/close and are released automatically when the owning table is dropped.
 use crate::linux_fs::{Kind, Node};
 use alloc::alloc::{alloc, dealloc};
+use alloc::vec::Vec;
 use core::{
     alloc::Layout,
     ptr::NonNull,
-    sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering, fence},
+    sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering, fence},
 };
 
 pub const CAPACITY: usize = 64;
@@ -23,6 +24,8 @@ pub enum Target {
     Console,
     Random,
     Node(Node<'static>),
+    Snapshot { path: &'static str, inode: u64 },
+    UnixDatagram,
 }
 
 struct Description {
@@ -30,13 +33,26 @@ struct Description {
     position: AtomicU64,
     flags: AtomicU32,
     target: Target,
+    snapshot: Option<Vec<u8>>,
+    log_connected: AtomicBool,
 }
 pub struct FileRef(NonNull<Description>);
-// Descriptions contain only immutable static bytes and atomic shared state.
+// Descriptions contain immutable owned/static bytes and atomic shared state.
 unsafe impl Send for FileRef {}
 unsafe impl Sync for FileRef {}
 impl FileRef {
     pub fn try_new(target: Target, flags: u32) -> Result<Self, i64> {
+        Self::create(target, flags, None)
+    }
+    pub fn try_snapshot(
+        path: &'static str,
+        inode: u64,
+        flags: u32,
+        bytes: Vec<u8>,
+    ) -> Result<Self, i64> {
+        Self::create(Target::Snapshot { path, inode }, flags, Some(bytes))
+    }
+    fn create(target: Target, flags: u32, snapshot: Option<Vec<u8>>) -> Result<Self, i64> {
         let pointer =
             NonNull::new(unsafe { alloc(Layout::new::<Description>()) }.cast::<Description>())
                 .ok_or(ENOMEM)?;
@@ -46,6 +62,8 @@ impl FileRef {
                 position: AtomicU64::new(0),
                 flags: AtomicU32::new(flags),
                 target,
+                snapshot,
+                log_connected: AtomicBool::new(false),
             });
         }
         LIVE_DESCRIPTIONS.fetch_add(1, Ordering::Relaxed);
@@ -56,6 +74,19 @@ impl FileRef {
     }
     pub fn target(&self) -> Target {
         self.inner().target
+    }
+    pub fn snapshot(&self) -> Option<&[u8]> {
+        self.inner().snapshot.as_deref()
+    }
+    pub fn connect_log(&self) -> Result<(), i64> {
+        if !matches!(self.target(), Target::UnixDatagram) {
+            return Err(88);
+        }
+        self.inner().log_connected.store(true, Ordering::Release);
+        Ok(())
+    }
+    pub fn log_connected(&self) -> bool {
+        self.inner().log_connected.load(Ordering::Acquire)
     }
     pub fn flags(&self) -> u32 {
         self.inner().flags.load(Ordering::Acquire)
@@ -85,16 +116,19 @@ impl FileRef {
         matches!(self.flags() & 3, 1 | 2) && self.flags() & 0x200000 == 0
     }
     pub fn seek(&self, offset: i64, whence: u64) -> Result<u64, i64> {
-        let Target::Node(node) = self.target() else {
-            return Err(ESPIPE);
-        };
-        if node.kind != Kind::File || self.flags() & 0x200000 != 0 {
+        if self.flags() & 0x200000 != 0 {
             return Err(EBADF);
         }
+        let end = match self.target() {
+            Target::Node(node) if node.kind == Kind::File => Some(node.data.len() as u64),
+            Target::Node(_) => return Err(EBADF),
+            Target::Snapshot { .. } => None, // proc seq-file: SEEK_SET/CUR only.
+            _ => return Err(ESPIPE),
+        };
         let base = match whence {
             0 => 0,
             1 => self.position(),
-            2 => node.data.len() as u64,
+            2 => end.ok_or(EINVAL)?,
             _ => return Err(EINVAL),
         };
         let position = base
@@ -234,6 +268,29 @@ pub fn live_descriptions() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn snapshots_survive_dup_and_original_close_without_becoming_static() {
+        let mut table = Table::empty();
+        let opened = FileRef::try_snapshot("proc/self/stat", 10, 0, b"first".to_vec()).unwrap();
+        let original = table.insert(opened, 0, false).unwrap();
+        let duplicate = table.duplicate(original, 0, true).unwrap();
+        table.file(original).unwrap().seek(2, 0).unwrap();
+        table.close(original).unwrap();
+        let kept = table.file(duplicate).unwrap();
+        assert_eq!(kept.snapshot(), Some(b"first".as_slice()));
+        assert_eq!(kept.position(), 2);
+        assert_eq!(kept.seek(0, 2), Err(EINVAL));
+        let fresh = FileRef::try_snapshot("proc/self/stat", 10, 0, b"new".to_vec()).unwrap();
+        assert_eq!(fresh.snapshot(), Some(b"new".as_slice()));
+        assert_eq!(kept.snapshot(), Some(b"first".as_slice()));
+        let socket = FileRef::try_new(Target::UnixDatagram, 2).unwrap();
+        let cloned = socket.clone();
+        assert!(!cloned.log_connected());
+        socket.connect_log().unwrap();
+        drop(socket);
+        assert!(cloned.log_connected());
+        assert_eq!(kept.connect_log(), Err(88));
+    }
     fn file() -> FileRef {
         FileRef::try_new(
             Target::Node(Node {

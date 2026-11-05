@@ -275,6 +275,10 @@ struct Process {
     linux_files: bndroid_kernel::linux_fd::Table,
     #[cfg(feature = "linux-abi-runtime")]
     linux_tagged_addresses: bool,
+    #[cfg(feature = "art-runtime")]
+    linux_started_counter: u64,
+    #[cfg(feature = "art-runtime")]
+    linux_parent: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -878,6 +882,10 @@ pub fn install_init(prepared: Box<PreparedUserProcess>) {
         linux_files: bndroid_kernel::linux_fd::Table::empty(),
         #[cfg(feature = "linux-abi-runtime")]
         linux_tagged_addresses: false,
+        #[cfg(feature = "art-runtime")]
+        linux_started_counter: crate::arch::aarch64::timer::counter_value(),
+        #[cfg(feature = "art-runtime")]
+        linux_parent: 0,
     };
     slot.process = Some(
         try_box(process).unwrap_or_else(|_| panic!("kernel heap could not allocate init Process")),
@@ -1059,6 +1067,10 @@ fn commit_prepared_spawn(
         linux_files,
         #[cfg(feature = "linux-abi-runtime")]
         linux_tagged_addresses: false,
+        #[cfg(feature = "art-runtime")]
+        linux_started_counter: crate::arch::aarch64::timer::counter_value(),
+        #[cfg(feature = "art-runtime")]
+        linux_parent: current_live_user_process_id().unwrap() as u32,
     };
     let mut process = match try_box(process) {
         Ok(process) => process,
@@ -8117,6 +8129,23 @@ pub fn with_linux_files<R>(operation: impl FnOnce(&mut bndroid_kernel::linux_fd:
     let process = lookup_mut(ProcessId(id)).expect("live Linux file owner");
     assert_eq!(process.image_id, UserImageId::LinuxApp);
     operation(&mut process.linux_files)
+}
+
+#[cfg(feature = "art-runtime")]
+pub fn linux_proc_snapshot(maps: bool) -> Result<alloc::vec::Vec<u8>, i64> {
+    assert!(crate::arch::aarch64::irq_is_masked());
+    let id = current_live_user_process_id().ok_or(3)?;
+    let process = lookup(ProcessId(id)).ok_or(3)?;
+    let mut stat = scheduler::linux_threads::proc_stat(
+        id,
+        process.linux_parent,
+        process.linux_started_counter,
+    );
+    process
+        .address_space
+        .as_ref()
+        .ok_or(3)?
+        .linux_proc_snapshot(&mut stat, maps)
 }
 
 #[cfg(feature = "bionic-dynamic-runtime")]

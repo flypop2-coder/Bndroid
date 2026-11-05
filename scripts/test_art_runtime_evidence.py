@@ -5,6 +5,9 @@ from art_runtime_evidence import completion_status
 
 HELP = "dalvikvm: [options] class [argument ...]\nThe following ART arguments are supported:\n"
 MEMORY = "ART_MEMORY_OK low_64m=1 protections=1 holes=1 shared_threads=1 kernel_isolation=1\n"
+MEMORY += "ART_PROC_OK stack=1 maps=1 counters=1 snapshots=1 large_read=1 shared_ro=1 mremap=1 log=1\n"
+LOG = "ANDROID_LOG pid={} buffer=0 priority=4 tag=bndroid-probe message=PROC_LOG_TRANSPORT_OK\n"
+LOGS = LOG.format(4294967298) + LOG.format(8589934594)
 JAVA = "ART_JAVA_CORE_OK sum=4950 exceptions=1 collections=1\n"
 PROOF = "BIONIC_DYNAMIC_RUNTIME_OK abi=70 native_processes=2 native_exits=2 native_reaped=2 remaining_processes=1 native_handles=0 live_anonymous_pages=0 live_anonymous_tables=0 live_file_descriptions=0 loader=upstream-android-linker peak_anonymous_pages=17000 reclaimed_anonymous_pages=34000\n"
 PROCESS = "LINUX_PROCESS_EXIT pid=4294967298 code=0 native_handles=0\nLINUX_PROCESS_EXIT pid=8589934594 code=0 native_handles=0\nLINUX_THREADS_OK created=2 reaped=2 live=0 waiting=0\n"
@@ -18,7 +21,7 @@ class EvidenceTests(unittest.TestCase):
 
     def test_managed_and_memory_results_need_their_own_markers(self):
         for mode, marker in (("java", JAVA), ("memory", MEMORY)):
-            self.assertEqual(completion_status(marker * 2 + PROCESS + PROOF, mode), mode + "-passed")
+            self.assertEqual(completion_status(marker * 2 + LOGS + PROCESS + PROOF, mode), mode + "-passed")
             self.assertNotEqual(completion_status(marker + PROCESS + PROOF, mode), mode + "-passed")
 
     def test_incomplete_or_duplicate_uart_record_is_not_success(self):
@@ -34,7 +37,11 @@ class EvidenceTests(unittest.TestCase):
 
     def test_repeated_pid_or_insufficient_memory_coverage_is_rejected(self):
         self.assertEqual(completion_status(HELP * 2 + PROCESS.replace("8589934594", "4294967298") + PROOF, "help"), "invalid-process-proof")
-        self.assertEqual(completion_status(MEMORY * 2 + PROCESS + PROOF.replace("17000", "100"), "memory"), "invalid-memory-proof")
+        self.assertEqual(completion_status(MEMORY * 2 + LOGS + PROCESS + PROOF.replace("17000", "100"), "memory"), "invalid-memory-proof")
+
+    def test_prefixed_markers_and_misattributed_logs_cannot_claim_success(self):
+        self.assertEqual(completion_status(("ANDROID_LOG message=" + JAVA) * 2 + PROCESS + PROOF, "java"), "exited-without-expected-proof")
+        self.assertEqual(completion_status(MEMORY * 2 + LOGS.replace("8589934594", "4294967298") + PROCESS + PROOF, "memory"), "missing-log-proof")
 
 
 if __name__ == "__main__":

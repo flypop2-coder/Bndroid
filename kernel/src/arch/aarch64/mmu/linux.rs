@@ -56,6 +56,15 @@ struct Prepared {
     pages: Vec<Page>,
     tables: Vec<Table>,
 }
+#[derive(Clone, Copy)]
+enum Source<'a> {
+    File(&'a [u8]),
+    #[cfg(feature = "art-runtime")]
+    Move {
+        start: usize,
+        end: usize,
+    },
+}
 impl Drop for Prepared {
     fn drop(&mut self) {
         for page in self.pages.drain(..) {
@@ -68,6 +77,86 @@ impl Drop for Prepared {
 }
 
 impl LinuxMappings {
+    #[cfg(feature = "art-runtime")]
+    fn remap(
+        &mut self,
+        l1: &OwnedFrame,
+        asid: u8,
+        address: u64,
+        old_length: u64,
+        new_length: u64,
+        flags: u64,
+    ) -> Result<u64, i64> {
+        if flags & !7 != 0 {
+            return Err(EINVAL);
+        }
+        if flags & !1 != 0 {
+            return Err(38);
+        } // FIXED/DONTUNMAP need alias semantics.
+        let old = linux_vm::rounded_length(old_length)?;
+        let new = linux_vm::rounded_length(new_length)?;
+        let old_end = linux_vm::checked_range(address, old)?;
+        let region = *self
+            .layout
+            .regions
+            .iter()
+            .find(|r| r.start <= address && old_end <= r.end)
+            .ok_or(EINVAL)?;
+        if region.file_backed || region.shared {
+            return Err(38);
+        }
+        if old == new {
+            return Ok(address);
+        }
+        if new < old {
+            let change = self.layout.unmap(address + new, old - new)?;
+            self.apply(l1, asid, change, None)?;
+            return Ok(address);
+        }
+        let protection = match region.protection {
+            Protection::None => 0,
+            Protection::Read => 1,
+            Protection::ReadWrite => 3,
+            Protection::ReadExecute => 5,
+        };
+        let mut growth = self.layout.map(old_end, new - old, protection, 0x100022, 0);
+        if let Ok(change) = growth.as_mut()
+            && region.wipe_on_fork
+        {
+            change.layout = change.layout.advise_fork(old_end, new - old, true)?;
+        }
+        if let Ok(change) = growth {
+            self.apply(l1, asid, change, None)?;
+            return Ok(address);
+        }
+        if flags & 1 == 0 {
+            return Err(ENOMEM);
+        }
+        let hint = if address < linux_vm::LOW_END {
+            linux_vm::LOW_START
+        } else {
+            0
+        };
+        let mut change = self.layout.map(hint, new, protection, 0x22, 0)?;
+        let result = change.start;
+        change.layout = change.layout.unmap(address, old)?.layout;
+        if region.wipe_on_fork {
+            change.layout = change.layout.advise_fork(result, new, true)?;
+        }
+        // Both layout changes, all destination pages/copies and metadata are
+        // prepared before either address changes. Allocation failure leaves
+        // the old mapping and contents intact; no rollback allocation occurs.
+        self.apply(
+            l1,
+            asid,
+            change,
+            Some(Source::Move {
+                start: address as usize,
+                end: old_end as usize,
+            }),
+        )?;
+        Ok(result)
+    }
     pub(super) fn map(&mut self, l1: &OwnedFrame, asid: u8, args: [u64; 6]) -> Result<u64, i64> {
         let change = self
             .layout
@@ -114,12 +203,22 @@ impl LinuxMappings {
         l1: &OwnedFrame,
         asid: u8,
         change: Change,
-        source: Option<&[u8]>,
+        source: Option<Source<'_>>,
     ) -> Result<(), i64> {
         assert!(crate::arch::aarch64::irq_is_masked());
         let start = change.start as usize;
         let end = change.end as usize;
-        let remove = |page: &Page| change.replace && start <= page.address && page.address < end;
+        let moving = |address: usize| {
+            #[cfg(feature = "art-runtime")]
+            if let Some(Source::Move { start, end }) = source {
+                return start <= address && address < end;
+            }
+            let _ = address;
+            false
+        };
+        let remove = |page: &Page| {
+            change.replace && start <= page.address && page.address < end || moving(page.address)
+        };
         let remaining = self.pages.iter().filter(|page| !remove(page)).count();
         let mut pending = Prepared::default();
         if change.protection.is_some_and(|p| p != Protection::None) || source.is_some() {
@@ -144,6 +243,28 @@ impl LinuxMappings {
                 if !change.replace && self.pages.iter().any(|page| page.address == address) {
                     continue;
                 }
+                #[cfg(feature = "art-runtime")]
+                let previous = match source {
+                    Some(Source::Move {
+                        start: from,
+                        end: until,
+                    }) => {
+                        let old = from + address - start;
+                        if old < until {
+                            self.pages.iter().find(|page| page.address == old)
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                };
+                #[cfg(feature = "art-runtime")]
+                if matches!(source, Some(Source::Move { .. }))
+                    && previous.is_none()
+                    && change.protection == Some(Protection::None)
+                {
+                    continue;
+                }
                 if remaining + pending.pages.len() >= MAX_PAGES {
                     return Err(ENOMEM);
                 }
@@ -151,7 +272,7 @@ impl LinuxMappings {
                 unsafe {
                     ptr::write_bytes(frame.start_address() as *mut u8, 0, PAGE_SIZE);
                 }
-                if let Some(bytes) = source {
+                if let Some(Source::File(bytes)) = source {
                     let offset = address - start;
                     let count = bytes.len().saturating_sub(offset).min(PAGE_SIZE);
                     if count != 0 {
@@ -162,6 +283,16 @@ impl LinuxMappings {
                                 count,
                             );
                         }
+                    }
+                }
+                #[cfg(feature = "art-runtime")]
+                if let Some(old) = previous {
+                    unsafe {
+                        ptr::copy_nonoverlapping(
+                            old.frame.start_address() as *const u8,
+                            frame.start_address() as *mut u8,
+                            PAGE_SIZE,
+                        );
                     }
                 }
                 pending.pages.push(Page {
@@ -204,7 +335,7 @@ impl LinuxMappings {
         let added_pages = pending.pages.len() as u64;
         let added_tables = pending.tables.len() as u64;
         for page in &self.pages {
-            if start <= page.address && page.address < end {
+            if start <= page.address && page.address < end || moving(page.address) {
                 assert_eq!(
                     unsafe { ptr::read_volatile(self.leaf(page.address).unwrap()) },
                     page_descriptor(page)
@@ -213,7 +344,7 @@ impl LinuxMappings {
         }
         // Break old mappings before releasing/reusing frames or rights.
         for page in &self.pages {
-            if start <= page.address && page.address < end {
+            if start <= page.address && page.address < end || moving(page.address) {
                 unsafe {
                     ptr::write_volatile(self.leaf(page.address).unwrap(), 0);
                 }
@@ -412,9 +543,109 @@ fn page_descriptor(page: &Page) -> u64 {
 
 impl UserAddressSpace {
     #[cfg(feature = "art-runtime")]
+    pub fn linux_mremap(&mut self, r: &[u64; 31]) -> Result<u64, i64> {
+        self.linux
+            .remap(&self.level_1, self.asid(), r[0], r[1], r[2], r[3])
+    }
+    #[cfg(feature = "art-runtime")]
+    pub fn linux_proc_snapshot(
+        &self,
+        stat: &mut bndroid_kernel::linux_proc::Stat,
+        maps: bool,
+    ) -> Result<Vec<u8>, i64> {
+        use bndroid_kernel::linux_proc::{Map, Text};
+        let mut rows: Vec<Map> = Vec::new();
+        rows.try_reserve_exact(self.mappings.pages.len() + self.linux.layout.regions.len())
+            .map_err(|_| ENOMEM)?;
+        let layout = &self.mappings.metadata.layout;
+        stat.resident_pages = (self.mappings.pages.len() + self.linux.pages.len()) as u64;
+        stat.resident_limit = ((MAX_PAGES + self.mappings.pages.len()) * PAGE_SIZE) as u64;
+        for page in &self.mappings.pages {
+            let start = page.virtual_address as u64;
+            let end = start + PAGE_SIZE as u64;
+            if page.access == UserPageAccess::ReadExecute {
+                stat.code_start = if stat.code_start == 0 {
+                    start
+                } else {
+                    stat.code_start.min(start)
+                };
+                stat.code_end = stat.code_end.max(end);
+            }
+            rows.push(Map {
+                start,
+                end,
+                read: page.access != UserPageAccess::NoAccess,
+                write: page.access == UserPageAccess::ReadWrite,
+                execute: page.access == UserPageAccess::ReadExecute,
+                shared: false,
+                offset: 0,
+                inode: 0,
+                name: if page.virtual_address >= layout.stack_start
+                    && page.virtual_address < layout.stack_end
+                {
+                    "[stack]"
+                } else {
+                    "[bndroid-loader]"
+                },
+            });
+        }
+        for region in &self.linux.layout.regions {
+            let (offset, inode, name) = region.file.map_or((0, 0, ""), |file| {
+                (
+                    file.offset + region.start - region.file_origin,
+                    file.inode,
+                    file.path,
+                )
+            });
+            rows.push(Map {
+                start: region.start,
+                end: region.end,
+                read: region.protection != Protection::None,
+                write: region.protection == Protection::ReadWrite,
+                execute: region.protection == Protection::ReadExecute,
+                shared: region.shared,
+                offset,
+                inode,
+                name,
+            });
+        }
+        rows.sort_unstable_by_key(|row| row.start);
+        stat.virtual_bytes = rows.iter().map(|row| row.end - row.start).sum();
+        if !maps {
+            return stat.text();
+        }
+        // Merge adjacent native pages only when their effective rights/name
+        // agree. Sparse mappings already retain their file offset identity.
+        let mut text = Text::new();
+        let mut previous: Option<Map> = None;
+        for row in rows {
+            if let Some(p) = previous.as_mut() {
+                if p.end == row.start
+                    && p.read == row.read
+                    && p.write == row.write
+                    && p.execute == row.execute
+                    && p.shared == row.shared
+                    && p.name == row.name
+                    && p.inode == row.inode
+                    && ((p.inode == 0 && p.offset == row.offset)
+                        || p.offset.checked_add(p.end - p.start) == Some(row.offset))
+                {
+                    p.end = row.end;
+                    continue;
+                }
+                p.append(&mut text)?;
+            }
+            previous = Some(row);
+        }
+        if let Some(row) = previous {
+            row.append(&mut text)?;
+        }
+        Ok(text.finish())
+    }
+    #[cfg(feature = "art-runtime")]
     pub fn linux_msync(&self, address: u64, length: u64, flags: u64) -> Result<u64, i64> {
-        // Supported file mappings are private and cannot dirty their source;
-        // shared anonymous pages have no persistent backing. Reject holes and
+        // Private files cannot dirty their source; shared files are immutable
+        // and shared anonymous pages have no persistent backing. Reject holes and
         // privileged identity mappings despite their visibility to the kernel.
         let result = self.linux.layout.msync(address, length, flags);
         if result != Err(ENOMEM) {
@@ -440,6 +671,14 @@ impl UserAddressSpace {
     }
     #[cfg(feature = "bionic-dynamic-runtime")]
     pub fn linux_madvise(&mut self, address: u64, length: u64, advice: u64) -> Result<u64, i64> {
+        #[cfg(feature = "art-runtime")]
+        if matches!(advice, 0..=2) {
+            // NORMAL/RANDOM/SEQUENTIAL are access-pattern hints. This profile
+            // already populates pages eagerly and performs no speculative
+            // read-ahead or eviction; all three retain the resident contents.
+            // Validate the whole user-owned range, including inaccessible VMAs.
+            return self.linux_msync(address, length, 0);
+        }
         if !matches!(advice, 18 | 19) {
             return Err(EINVAL);
         }
@@ -460,9 +699,24 @@ impl UserAddressSpace {
             || self.linux.access(page) == Some(UserPageAccess::ReadExecute)
     }
     #[cfg(feature = "bionic-dynamic-runtime")]
-    pub fn linux_mmap_file(&mut self, args: [u64; 6], bytes: &'static [u8]) -> Result<u64, i64> {
-        if args[3] & 0x20 != 0 || args[3] & 3 != 2 || !args[5].is_multiple_of(PAGE_SIZE as u64) {
+    pub fn linux_mmap_file(
+        &mut self,
+        args: [u64; 6],
+        node: bndroid_kernel::linux_fs::Node<'static>,
+    ) -> Result<u64, i64> {
+        let bytes = node.data;
+        if args[5] > i64::MAX as u64 {
             return Err(EINVAL);
+        }
+        let shared = cfg!(feature = "art-runtime") && args[3] & 3 == 1;
+        if args[3] & 0x20 != 0
+            || (args[3] & 3 != 2 && !shared)
+            || !args[5].is_multiple_of(PAGE_SIZE as u64)
+        {
+            return Err(EINVAL);
+        }
+        if shared && args[2] & 2 != 0 {
+            return Err(EACCES);
         }
         let length = linux_vm::rounded_length(args[1])?;
         let available = (bytes.len() as u64).saturating_sub(args[5]);
@@ -475,7 +729,12 @@ impl UserAddressSpace {
             args[2],
             args[3] | 0x20,
             args[5],
-            Some(available),
+            Some(linux_vm::FileBacking {
+                available,
+                offset: args[5],
+                path: node.path,
+                inode: node.inode,
+            }),
         )?;
         let start = change.start;
         let count = length.min(available) as usize;
@@ -483,10 +742,10 @@ impl UserAddressSpace {
             &self.level_1,
             self.asid(),
             change,
-            Some(
+            Some(Source::File(
                 &bytes[(args[5] as usize).min(bytes.len())
                     ..(args[5] as usize).min(bytes.len()) + count],
-            ),
+            )),
         )?;
         Ok(start)
     }
@@ -510,9 +769,11 @@ impl UserAddressSpace {
                 .protect(&self.level_1, self.asid(), address, length, protection);
         }
         // Bionic protects RELRO and temporarily unlocks its mutable globals.
-        // Only originally writable LOAD pages may switch between R and RW;
-        // original code/rodata never acquire write permission.
-        if !matches!(protection, 1 | 3) || !address.is_multiple_of(PAGE_SIZE as u64) {
+        // ART also installs a real inaccessible guard inside its initial stack.
+        // Only originally writable pages can change; code/rodata stay immutable.
+        if !(matches!(protection, 1 | 3) || cfg!(feature = "art-runtime") && protection == 0)
+            || !address.is_multiple_of(PAGE_SIZE as u64)
+        {
             return Err(EACCES);
         }
         let size = linux_vm::rounded_length(length)?;
@@ -526,7 +787,8 @@ impl UserAddressSpace {
                 .iter()
                 .flatten()
                 .any(|vma| {
-                    vma.kind == UserVmaKind::Load
+                    (vma.kind == UserVmaKind::Load
+                        || cfg!(feature = "art-runtime") && vma.kind == UserVmaKind::Stack)
                         && vma.access == UserPageAccess::ReadWrite
                         && vma.start as u64 <= page
                         && page < vma.end as u64
@@ -560,10 +822,11 @@ impl UserAddressSpace {
         }
         for page in &mut self.mappings.pages {
             if address <= page.virtual_address as u64 && (page.virtual_address as u64) < end {
-                page.access = if protection == 1 {
-                    UserPageAccess::ReadOnly
-                } else {
-                    UserPageAccess::ReadWrite
+                page.access = match protection {
+                    #[cfg(feature = "art-runtime")]
+                    0 => UserPageAccess::NoAccess,
+                    1 => UserPageAccess::ReadOnly,
+                    _ => UserPageAccess::ReadWrite,
                 };
                 let table =
                     user_level_3_table_mut(&self.user_level_3, page.virtual_address).unwrap();

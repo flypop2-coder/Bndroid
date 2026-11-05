@@ -7,6 +7,10 @@ publish = false
 [lib]
 path = "src/lib.rs"
 
+[[example]]
+name = "apk_activity_probe"
+required-features = ["androidbox-activity-fields10"]
+
 [features]
 default = []
 androidbox-multiaction3 = []

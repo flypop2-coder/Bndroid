@@ -14,6 +14,10 @@ import time
 from linux_runtime_evidence import parse_marker
 
 
+def complete_lines(text, line):
+    return len(re.findall("^" + re.escape(line + "\n"), text, re.MULTILINE))
+
+
 def completion_status(text, mode):
     try:
         proof = parse_marker(text, "BIONIC_DYNAMIC_RUNTIME_OK")
@@ -27,7 +31,7 @@ def completion_status(text, mode):
         "help": "dalvikvm: [options] class [argument ...]\n",
         "java": "ART_JAVA_CORE_OK sum=4950 exceptions=1 collections=1\n",
     }[mode]
-    if text.count(expected) != 2 or (mode == "help" and text.count("The following ART arguments are supported:\n") != 2):
+    if complete_lines(text, expected.rstrip("\n")) != 2 or (mode == "help" and complete_lines(text, "The following ART arguments are supported:") != 2):
         return "exited-without-expected-proof"
     required = {"abi": "70", "native_processes": "2", "native_exits": "2", "native_reaped": "2",
                 "remaining_processes": "1", "native_handles": "0", "live_anonymous_pages": "0",
@@ -40,6 +44,11 @@ def completion_status(text, mode):
     if not threads.get("created") or threads["created"] != threads.get("reaped"):
         return "invalid-thread-proof"
     if mode == "memory":
+        if complete_lines(text, "ART_PROC_OK stack=1 maps=1 counters=1 snapshots=1 large_read=1 shared_ro=1 mremap=1 log=1") != 2:
+            return "missing-proc-proof"
+        logged = re.findall(r"^ANDROID_LOG pid=(\d+) buffer=0 priority=4 tag=bndroid-probe message=PROC_LOG_TRANSPORT_OK\n", text, re.MULTILINE)
+        if len(logged) != 2 or set(logged) != set(exits):
+            return "missing-log-proof"
         try:
             if int(proof["peak_anonymous_pages"]) < 16384 or int(proof["reclaimed_anonymous_pages"]) < 32768:
                 return "invalid-memory-proof"
@@ -101,6 +110,7 @@ def main():
                "art_frontend_verified": mode == "help" and status == "help-passed",
                "managed_java_verified": mode == "java" and status == "java-passed",
                "abort_messages": re.findall(r"^LINUX_ABORT_MESSAGE pid=\d+ message=(.*)$", text, re.MULTILINE),
+               "android_errors": re.findall(r"^ANDROID_LOG pid=\d+ buffer=\d+ priority=[67] tag=(.*)\n", text, re.MULTILINE)[-16:],
                "unsupported_syscalls": sorted(set(map(int, re.findall(r"LINUX_SYSCALL_UNSUPPORTED pid=\d+ number=(\d+)", text)))),
                "fault": diagnostic_record(text, "LINUX_USER_FAULT"),
                "cleanup": diagnostic_record(text, "LINUX_RUNTIME_FAILURE_CLEANUP"),

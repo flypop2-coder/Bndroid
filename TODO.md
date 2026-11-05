@@ -154,7 +154,9 @@ Tasks follow dependencies, not optimistic calendar dates. Each stage requires co
 - [x] Run real Bionic pthreads with shared process ownership, private TLS, futex synchronization, join/detach, timed waits, leader-first exit, worker group exit, and worker-fault cleanup. Signal delivery, advanced futex modes, and ART remain open.
 - [x] Record the initial local-prebuilt baseline, source strategy, provenance/distribution boundaries, update gates, and resource envelope in [ADR 0001](docs/decisions/0001-android-runtime-baseline.md). No AOSP download or repository binary import is part of this decision.
 - [ ] Boot minimal ART/Bionic userspace and test a restricted Linux ABI personality.
-- [x] Load unmodified local ART through its own `dalvikvm64` frontend, verify two normal help/cleanup cycles, and validate low-address/shared memory prerequisites. Managed VM startup still fails on missing `/proc/self/stat`; this does not complete A1.
+- [x] Load unmodified local ART through its own `dalvikvm64` frontend, verify two normal help/cleanup cycles, and validate low-address/shared memory prerequisites. This does not complete A1.
+- [x] Supply real process/VM snapshots and accounting, stack guards, large reads, shared read-only runtime files, private anonymous remapping and bounded log transport; load ICU/core/OpenJDK native libraries using verified Android linker namespaces.
+- [ ] Implement signal actions, alternate stacks, handler delivery and safe return; resolve the current managed initialization failure at `rt_sigaction` and pass the unchanged Java gate with complete cleanup.
 - [ ] Implement Binder identity, transaction/reply/death, and capability mapping.
 - [ ] Run a non-customized managed APK through ActivityThread and Framework.
 - [ ] Run a JNI/native-library APK with W^X, RELRO, ASLR, and crash-isolation checks.

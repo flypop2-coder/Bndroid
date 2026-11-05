@@ -94,6 +94,25 @@ pub fn init(region: Option<FwCfgMmioRegion>) -> Result<(), &'static str> {
             })
             .map_err(|_| "reserved device path")?;
     }
+    #[cfg(feature = "art-runtime")]
+    for (index, path) in ["proc", "proc/self", "proc/self/stat", "proc/self/maps"]
+        .into_iter()
+        .enumerate()
+    {
+        catalog
+            .insert(Node {
+                path,
+                data: &[],
+                kind: if index < 2 {
+                    Kind::Directory
+                } else {
+                    Kind::File
+                },
+                mode: if index < 2 { 0o555 } else { 0o444 },
+                inode: 0x10000 + index as u64,
+            })
+            .map_err(|_| "reserved proc path")?;
+    }
     let files = catalog.len();
     unsafe {
         *CATALOG.0.get() = Some(catalog);

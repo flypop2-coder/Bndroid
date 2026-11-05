@@ -15,7 +15,7 @@ global_asm!(
     include_str!("boot.S"),
     monitor_stack_bytes = const MONITOR_STACK_BYTES,
 );
-global_asm!(include_str!("exceptions.S"));
+global_asm!(include_str!("exceptions.S"), accounting = const cfg!(feature = "art-runtime") as u8);
 global_asm!(include_str!("threads.S"));
 global_asm!(include_str!("usercopy.S"));
 #[cfg(feature = "el0-fault-containment-self-test")]

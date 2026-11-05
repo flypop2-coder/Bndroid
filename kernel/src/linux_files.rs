@@ -16,6 +16,92 @@ const O_NOFOLLOW: u32 = 0x8000;
 const O_LARGEFILE: u32 = 0x20000;
 const O_PATH: u32 = 0x200000;
 
+#[cfg(feature = "art-runtime")]
+fn unix_socket(domain: u64, kind: u64, protocol: u64) -> Result<u64, i64> {
+    if domain != 1 {
+        return Err(97);
+    }
+    if kind & !(0x80000 | 0x800) != 2 {
+        return Err(94);
+    }
+    if protocol != 0 {
+        return Err(93);
+    }
+    let socket = FileRef::try_new(Target::UnixDatagram, 2 | (kind as u32 & 0x800))?;
+    process::with_linux_files(|table| table.insert(socket, 0, kind & 0x80000 != 0))
+}
+#[cfg(feature = "art-runtime")]
+fn unix_connect(fd: u64, address: u64, length: u64) -> Result<u64, i64> {
+    let socket = file(fd)?;
+    if !matches!(socket.target(), Target::UnixDatagram) {
+        return Err(88);
+    }
+    if !(3..=110).contains(&length) {
+        return Err(EINVAL);
+    }
+    let mut bytes = [0; 110];
+    input(address, &mut bytes[..length as usize])?;
+    if u16::from_le_bytes(bytes[..2].try_into().unwrap()) != 1 {
+        return Err(97);
+    }
+    let path = &bytes[2..length as usize];
+    let end = path
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(path.len());
+    // A registered Bndroid log endpoint. Other Unix endpoints remain absent;
+    // this is not an implementation of arbitrary Unix-domain IPC/networking.
+    if &path[..end] != b"/dev/socket/logdw" {
+        return Err(2);
+    }
+    socket.connect_log()?;
+    Ok(0)
+}
+#[cfg(feature = "art-runtime")]
+fn log_datagram(bytes: &[u8]) -> Result<u64, i64> {
+    // android_log_header_t is packed: id/u16 tid/u32 seconds/u32 nanoseconds.
+    // Attribute records to the authenticated process, not user-supplied IDs.
+    if bytes.len() < 11 {
+        return Err(EINVAL);
+    }
+    let pid = process::current_live_user_process_id().unwrap();
+    let id = bytes[0];
+    if matches!(id, 0 | 1 | 3 | 4 | 7) && bytes.len() > 12 {
+        let priority = bytes[11];
+        let payload = &bytes[12..];
+        let tag_end = payload.iter().position(|byte| *byte == 0).ok_or(EINVAL)?;
+        let message = &payload[tag_end + 1..];
+        crate::kprint!(
+            "ANDROID_LOG pid={} buffer={} priority={} tag=",
+            pid,
+            id,
+            priority
+        );
+        for part in [&payload[..tag_end], b" message=", message] {
+            for &byte in part {
+                if byte == 0 {
+                    break;
+                }
+                // Preserve message text while preventing forged proof lines.
+                crate::uart::Uart.write_bytes(&[if matches!(byte, b'\n' | b'\r') {
+                    b' '
+                } else {
+                    byte
+                }]);
+            }
+        }
+        crate::kprintln!();
+    } else {
+        crate::kprintln!(
+            "ANDROID_LOG_BINARY pid={} buffer={} bytes={}",
+            pid,
+            id,
+            bytes.len() - 11
+        );
+    }
+    Ok(bytes.len() as u64)
+}
+
 pub fn dispatch(r: &[u64; 31]) -> Option<u64> {
     let result = match r[8] {
         17 => {
@@ -49,6 +135,10 @@ pub fn dispatch(r: &[u64; 31]) -> Option<u64> {
         78 => readlink(r[0], r[1], r[2], r[3]),
         79 => statat(r[0], r[1], r[2], r[3]),
         80 => file(r[0]).and_then(|f| stat(f.target(), r[1])),
+        #[cfg(feature = "art-runtime")]
+        198 => unix_socket(r[0], r[1], r[2]),
+        #[cfg(feature = "art-runtime")]
+        203 => unix_connect(r[0], r[1], r[2]),
         222 if r[3] & 0x20 == 0 => mmap_file(r[..6].try_into().unwrap()),
         233 => {
             process::with_current_linux_address_space(|space| space.linux_madvise(r[0], r[1], r[2]))
@@ -177,6 +267,18 @@ fn open(dir: u64, address: u64, raw_flags: u64) -> Result<u64, i64> {
     } else {
         flags & !0x80000
     };
+    #[cfg(feature = "art-runtime")]
+    let file = if matches!(node.path, "proc/self/stat" | "proc/self/maps") {
+        FileRef::try_snapshot(
+            node.path,
+            node.inode,
+            stored,
+            process::linux_proc_snapshot(node.path == "proc/self/maps")?,
+        )?
+    } else {
+        FileRef::try_new(target, stored)?
+    };
+    #[cfg(not(feature = "art-runtime"))]
     let file = FileRef::try_new(target, stored)?;
     process::with_linux_files(|table| table.insert(file, 0, flags & 0x80000 != 0))
 }
@@ -202,7 +304,10 @@ fn read(fd: u64, address: u64, count: u64, offset: Option<u64>) -> Result<u64, i
     if position > i64::MAX as u64 {
         return Err(EINVAL);
     }
-    let limit = count.min(65536) as usize;
+    // Regular immutable files can satisfy a full read up to EOF. Android's
+    // ZIP reader expects its central-directory window in one pread operation.
+    // The catalog and caller's owned mappings bound the actual copy length.
+    let limit = count.min(0x7ffff000) as usize;
     let bytes = match file.target() {
         Target::Null if offset.is_none() => return Ok(0),
         Target::Random if offset.is_none() => {
@@ -214,6 +319,7 @@ fn read(fd: u64, address: u64, count: u64, offset: Option<u64>) -> Result<u64, i
             };
         }
         Target::Node(node) if node.kind == Kind::File => node.data,
+        Target::Snapshot { .. } => file.snapshot().ok_or(EBADF)?,
         Target::Node(node) if node.kind == Kind::Directory => return Err(21),
         _ => return Err(29),
     };
@@ -231,6 +337,18 @@ fn write(fd: u64, address: u64, count: u64) -> Result<u64, i64> {
         return Err(EBADF);
     }
     match file.target() {
+        #[cfg(feature = "art-runtime")]
+        Target::UnixDatagram => {
+            if !file.log_connected() {
+                return Err(107);
+            }
+            if count > 4096 {
+                return Err(90);
+            }
+            let mut bytes = [0; 4096];
+            input(address, &mut bytes[..count as usize])?;
+            log_datagram(&bytes[..count as usize])
+        }
         Target::Null => Ok(count.min(0x7ffff000)),
         Target::Console => {
             let count = count.min(256) as usize;
@@ -243,6 +361,30 @@ fn write(fd: u64, address: u64, count: u64) -> Result<u64, i64> {
     }
 }
 fn writev(fd: u64, address: u64, count: u64) -> Result<u64, i64> {
+    #[cfg(feature = "art-runtime")]
+    if matches!(file(fd)?.target(), Target::UnixDatagram) {
+        if !file(fd)?.log_connected() {
+            return Err(107);
+        }
+        if count > 64 {
+            return Err(EINVAL);
+        }
+        let mut packet = [0; 4096];
+        let mut length = 0usize;
+        for index in 0..count {
+            let mut vector = [0; 16];
+            input(address.checked_add(index * 16).ok_or(14)?, &mut vector)?;
+            let base = u64::from_le_bytes(vector[..8].try_into().unwrap());
+            let requested = u64::from_le_bytes(vector[8..].try_into().unwrap());
+            if requested > (packet.len() - length) as u64 {
+                return Err(90);
+            }
+            let end = length + requested as usize;
+            input(base, &mut packet[length..end])?;
+            length = end;
+        }
+        return log_datagram(&packet[..length]);
+    }
     if !file(fd)?.writable() {
         return Err(EBADF);
     }
@@ -285,6 +427,8 @@ fn stat(target: Target, address: u64) -> Result<u64, i64> {
         Target::Null => (3, 0o020666, 0, 0x103),
         Target::Random => (4, 0o020444, 0, 0x109),
         Target::Console => (6, 0o020222, 0, 0),
+        Target::Snapshot { inode, .. } => (inode, 0o100444, 0, 0),
+        Target::UnixDatagram => (0, 0o140777, 0, 0),
     };
     bytes[..8].copy_from_slice(&1_u64.to_le_bytes());
     bytes[8..16].copy_from_slice(&inode.to_le_bytes());
@@ -333,13 +477,15 @@ fn readlink(dir: u64, pathname: u64, output: u64, capacity: u64) -> Result<u64, 
     if let Some(number) = path.as_str().strip_prefix("proc/self/fd/") {
         let fd = number.parse::<u64>().map_err(|_| 2)?;
         let opened = file(fd).map_err(|_| 2)?;
-        let Target::Node(node) = opened.target() else {
-            return Err(2);
+        let path = match opened.target() {
+            Target::Node(node) => node.path,
+            Target::Snapshot { path, .. } => path,
+            _ => return Err(2),
         };
         let mut absolute = [0; PATH_MAX + 1];
         absolute[0] = b'/';
-        absolute[1..1 + node.path.len()].copy_from_slice(node.path.as_bytes());
-        let length = (node.path.len() + 1).min(capacity as usize);
+        absolute[1..1 + path.len()].copy_from_slice(path.as_bytes());
+        let length = (path.len() + 1).min(capacity as usize);
         return out(output, &absolute[..length]).map(|_| length as u64);
     }
     let node = node(dir, value, false)?;
@@ -363,5 +509,5 @@ fn mmap_file(args: [u64; 6]) -> Result<u64, i64> {
     if args[2] & 4 != 0 && node.mode & 0o111 == 0 {
         return Err(13);
     }
-    process::with_current_linux_address_space(|space| space.linux_mmap_file(args, node.data))
+    process::with_current_linux_address_space(|space| space.linux_mmap_file(args, node))
 }

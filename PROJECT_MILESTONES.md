@@ -43,6 +43,10 @@ This index follows the milestone locations established on GitHub. English pages 
 | [Layout Mixed-19](docs/milestones/androidbox/ANDROIDBOX_LAYOUT_MIXED_19.md) | Fixed-and-weighted horizontal Buttons, ABI 69 |
 | [Linux arm64 entry](docs/milestones/androidbox/LINUX_ARM64_ENTRY.md) | NDK static ELF, Linux startup/syscall subset, native process cleanup, ABI 70; no Bionic or ART startup |
 | [Bionic Static-0](docs/milestones/androidbox/BIONIC_STATIC_0.md) | Unmodified NDK Bionic startup, ELF TLS, Scudo, sparse memory, stdio and exit handlers; no ART or general APK execution |
+| [Bionic Dynamic-0](docs/milestones/androidbox/BIONIC_DYNAMIC_0.md) | Upstream Android linker, shared Bionic, plugin loading and immutable runtime files |
+| [Bionic Threads-0](docs/milestones/androidbox/BIONIC_THREADS_0.md) | Real pthreads, futexes, shared ownership and thread-group cleanup |
+| [ART Frontend-0](docs/milestones/androidbox/ART_FRONTEND_0.md) | Unmodified ART frontend and low-address memory prerequisites |
+| [ART Process-0](docs/milestones/androidbox/ART_PROCESS_0.md) | Process/VM metadata, stack guards, remapping, runtime files and namespace-based native initialization; managed startup still incomplete |
 
 ## Historical OS design records
 

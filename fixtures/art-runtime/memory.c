@@ -13,8 +13,10 @@ static void *worker(void *argument) {
     *shared = 0x1234abcd;
     return argument;
 }
+int art_proc_checks(void);
 
 int main(void) {
+    CHECK(art_proc_checks() == 0);
     const size_t page = 4096, size = 64 * 1024 * 1024;
     unsigned char *low = mmap((void *)0x02000000, size, PROT_READ | PROT_WRITE,
                              MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);

@@ -535,6 +535,8 @@ fn verify_leaf(
         .page_physical(virtual_address)
         .ok_or(UserBootError::PermissionMismatch)?;
     let expected = match access {
+        #[cfg(feature = "art-runtime")]
+        UserPageAccess::NoAccess => return Err(UserBootError::InvalidImage),
         UserPageAccess::ReadExecute => user_ro_x_page_descriptor(physical),
         UserPageAccess::ReadOnly => user_ro_nx_page_descriptor(physical),
         UserPageAccess::ReadWrite => user_rw_nx_page_descriptor(physical),
@@ -680,6 +682,8 @@ fn embedded_image(image_id: UserImageId) -> Result<Box<EmbeddedImage<'static>>, 
         };
         let pages = planned.page_count();
         match access {
+            #[cfg(feature = "art-runtime")]
+            UserPageAccess::NoAccess => return Err(UserBootError::InvalidImage),
             UserPageAccess::ReadExecute => {
                 rx_segments += 1;
                 rx_pages += pages;

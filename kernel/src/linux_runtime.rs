@@ -61,6 +61,11 @@ pub fn dispatch(frame: *mut TrapFrame) -> *mut TrapFrame {
         96 => crate::process::linux_set_tid_address(user_address(registers[0])),
         278 => getrandom(registers[0], registers[1], registers[2]),
         #[cfg(feature = "art-runtime")]
+        216 => {
+            crate::process::with_current_linux_address_space(|space| space.linux_mremap(&registers))
+                .unwrap_or_else(errno)
+        }
+        #[cfg(feature = "art-runtime")]
         227 => crate::process::with_current_linux_address_space(|space| {
             space.linux_msync(registers[0], registers[1], registers[2])
         })
@@ -221,10 +226,21 @@ fn write(descriptor: u64, address: u64, requested: u64) -> u64 {
 
 pub(crate) fn copy_out(address: u64, bytes: &[u8]) -> u64 {
     let address = user_address(address);
-    if !crate::process::current_user_range_is_writable(address, bytes.len())
-        || usercopy::copy_to_user(address, bytes).is_err()
-    {
+    if !crate::process::current_user_range_is_writable(address, bytes.len()) {
         return bad_address();
+    }
+    // Linux regular-file reads can exceed the native IPC copy bound. Keep the
+    // low-level fault-recoverable copy contract and validate the whole target
+    // before copying it in bounded chunks under this IRQ-masked syscall.
+    for (index, chunk) in bytes.chunks(usercopy::MAX_USER_COPY_BYTES).enumerate() {
+        if usercopy::copy_to_user(
+            address + (index * usercopy::MAX_USER_COPY_BYTES) as u64,
+            chunk,
+        )
+        .is_err()
+        {
+            return bad_address();
+        }
     }
     0
 }

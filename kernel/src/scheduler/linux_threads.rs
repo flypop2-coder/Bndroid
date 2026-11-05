@@ -13,6 +13,12 @@ struct Local {
     leader_exited: bool,
     timeout_result: u64,
     name: [u8; 16],
+    #[cfg(feature = "art-runtime")]
+    user_counter: u64,
+    #[cfg(feature = "art-runtime")]
+    kernel_counter: u64,
+    #[cfg(feature = "art-runtime")]
+    resumed_counter: u64,
 }
 impl Local {
     const EMPTY: Self = Self {
@@ -22,6 +28,12 @@ impl Local {
         leader_exited: false,
         timeout_result: 0,
         name: [0; 16],
+        #[cfg(feature = "art-runtime")]
+        user_counter: 0,
+        #[cfg(feature = "art-runtime")]
+        kernel_counter: 0,
+        #[cfg(feature = "art-runtime")]
+        resumed_counter: 0,
     };
 }
 struct Locals(UnsafeCell<[Local; CONTEXT_COUNT]>);
@@ -45,6 +57,112 @@ static SLEEP_COMPLETIONS: AtomicU64 = AtomicU64::new(0);
 fn local(context: usize) -> &'static mut Local {
     assert!(crate::arch::aarch64::irq_is_masked());
     unsafe { &mut (*LOCALS.0.get())[context] }
+}
+
+#[cfg(feature = "art-runtime")]
+static ACCOUNT_DEPTH: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "art-runtime")]
+static ACCOUNT_CONTEXT: AtomicU64 = AtomicU64::new(CONTEXT_COUNT as u64);
+#[cfg(feature = "art-runtime")]
+static ACCOUNT_START: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(feature = "art-runtime")]
+#[unsafe(no_mangle)]
+extern "C" fn linux_account_enter(frame: *mut TrapFrame) -> *mut TrapFrame {
+    // Nested EL1 usercopy fixups must not finish the outer syscall's charge.
+    if ACCOUNT_DEPTH.fetch_add(1, Ordering::Relaxed) != 0 {
+        return frame;
+    }
+    ACCOUNT_CONTEXT.store(CONTEXT_COUNT as u64, Ordering::Relaxed);
+    if unsafe { (*frame).spsr_el1 & 0x1f } == 0
+        && current_process_id().is_some_and(crate::process::is_linux_process)
+    {
+        let now = crate::arch::aarch64::timer::counter_value();
+        let context = current_running_context();
+        let entry = local(context);
+        entry.user_counter = entry
+            .user_counter
+            .saturating_add(now.wrapping_sub(entry.resumed_counter));
+        ACCOUNT_CONTEXT.store(context as u64, Ordering::Relaxed);
+        ACCOUNT_START.store(now, Ordering::Relaxed);
+    }
+    frame
+}
+#[cfg(feature = "art-runtime")]
+#[unsafe(no_mangle)]
+extern "C" fn linux_account_leave(frame: *mut TrapFrame) -> *mut TrapFrame {
+    if ACCOUNT_DEPTH.fetch_sub(1, Ordering::Relaxed) != 1 {
+        return frame;
+    }
+    let now = crate::arch::aarch64::timer::counter_value();
+    let context = ACCOUNT_CONTEXT.swap(CONTEXT_COUNT as u64, Ordering::Relaxed) as usize;
+    if context < CONTEXT_COUNT {
+        let delta = now.wrapping_sub(ACCOUNT_START.load(Ordering::Relaxed));
+        local(context).kernel_counter = local(context).kernel_counter.saturating_add(delta);
+    }
+    if unsafe { (*frame).spsr_el1 & 0x1f } == 0
+        && current_process_id().is_some_and(crate::process::is_linux_process)
+    {
+        local(current_running_context()).resumed_counter = now;
+    }
+    frame
+}
+
+#[cfg(feature = "art-runtime")]
+pub fn proc_stat(process: u64, parent: u32, started: u64) -> bndroid_kernel::linux_proc::Stat {
+    let main = leader(process);
+    let mut name = local(main).name;
+    if name[0] == 0 {
+        name[..8].copy_from_slice(b"linker64");
+    }
+    let mut user = 0u64;
+    let mut kernel = 0u64;
+    let mut threads = 0;
+    for (context, state) in CONTEXTS.iter().enumerate().skip(DYNAMIC_USER_CONTEXT_START) {
+        if owner(context) != process {
+            continue;
+        }
+        user = user.saturating_add(local(context).user_counter);
+        kernel = kernel.saturating_add(local(context).kernel_counter);
+        if matches!(
+            state.state.load(Ordering::Relaxed),
+            STATE_RUNNING | STATE_RUNNABLE | STATE_WAITING
+        ) && !local(context).leader_exited
+        {
+            threads += 1;
+        }
+    }
+    let active = ACCOUNT_CONTEXT.load(Ordering::Relaxed) as usize;
+    if active < CONTEXT_COUNT && owner(active) == process {
+        kernel = kernel.saturating_add(
+            crate::arch::aarch64::timer::counter_value()
+                .wrapping_sub(ACCOUNT_START.load(Ordering::Relaxed)),
+        );
+    }
+    let ticks = |counter: u64| {
+        (u128::from(counter) * 100 / u128::from(crate::arch::aarch64::timer::frequency_hz())) as u64
+    };
+    bndroid_kernel::linux_proc::Stat {
+        pid: process as u32,
+        parent,
+        name,
+        state: if CONTEXTS[main].state.load(Ordering::Relaxed) == STATE_WAITING {
+            'S'
+        } else {
+            'R'
+        },
+        user_ticks: ticks(user),
+        kernel_ticks: ticks(kernel),
+        threads,
+        start_ticks: ticks(started),
+        virtual_bytes: 0,
+        resident_pages: 0,
+        resident_limit: 0,
+        code_start: 0,
+        code_end: 0,
+        stack_start: (crate::userboot::USER_STACK_END - 4096) as u64,
+        blocked_signals: local(main).signal_mask,
+    }
 }
 fn queue() -> &'static mut FutexQueue<CONTEXT_COUNT> {
     assert!(crate::arch::aarch64::irq_is_masked());
@@ -89,6 +207,31 @@ pub fn dispatch(frame: *mut TrapFrame, r: &[u64; 31]) -> Option<*mut TrapFrame> 
             return Some(block(frame, ThreadState::Runnable));
         }
         135 => signal_mask(r),
+        #[cfg(feature = "art-runtime")]
+        141 => {
+            if r[0] != 0 {
+                Err(22)
+            } else {
+                let pid = owner(current_running_context());
+                let wanted = r[1] as u32;
+                let found = wanted == 0
+                    || (DYNAMIC_USER_CONTEXT_START..CONTEXT_COUNT).any(|context| {
+                        owner(context) == pid
+                            && matches!(
+                                CONTEXTS[context].state.load(Ordering::Relaxed),
+                                STATE_RUNNING | STATE_RUNNABLE | STATE_WAITING
+                            )
+                            && if local(context).tid == 0 {
+                                pid as u32 == wanted
+                            } else {
+                                local(context).tid == wanted
+                            }
+                    });
+                // Linux getpriority returns 20 - nice. Every current Linux
+                // thread uses SCHED_OTHER/normal priority; changes unsupported.
+                if found { Ok(20) } else { Err(3) }
+            }
+        }
         167 if matches!(r[0], 15 | 16) => thread_name(r),
         178 => Ok(current_tid()),
         220 => clone_thread(frame, r),
@@ -498,6 +641,17 @@ pub fn reap() {
         let allocated = stack(context)
             .take()
             .expect("retired thread owns its kernel stack");
+        #[cfg(feature = "art-runtime")]
+        {
+            let main = leader(owner(context));
+            let retired = *local(context);
+            local(main).user_counter = local(main)
+                .user_counter
+                .saturating_add(retired.user_counter);
+            local(main).kernel_counter = local(main)
+                .kernel_counter
+                .saturating_add(retired.kernel_counter);
+        }
         transition_state(context, ThreadState::Zombie, ThreadState::Inactive);
         CONTEXTS[context]
             .saved_frame

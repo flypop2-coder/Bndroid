@@ -41,12 +41,21 @@ impl Protection {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FileBacking {
+    pub available: u64,
+    pub offset: u64,
+    pub inode: u64,
+    pub path: &'static str,
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Region {
     pub start: u64,
     pub end: u64,
     pub protection: Protection,
     pub file_backed: bool,
-    pub shared_anonymous: bool,
+    pub file: Option<FileBacking>,
+    pub file_origin: u64,
+    pub shared: bool,
     pub file_page_end: u64,
     pub wipe_on_fork: bool,
 }
@@ -93,19 +102,14 @@ impl Layout {
         prot: u64,
         flags: u64,
         offset: u64,
-        file_bytes: Option<u64>,
+        file_bytes: Option<FileBacking>,
     ) -> Result<Change, i64> {
         const PRIVATE_ANONYMOUS: u64 = 0x22;
         const FIXED: u64 = 0x10;
         const NOREPLACE: u64 = 0x100000;
         const HINTS: u64 = 0x4000 | 0x20000; // NORESERVE, STACK
-        let shared_anonymous =
-            cfg!(feature = "art-runtime") && flags & 3 == 1 && file_bytes.is_none();
-        let kind = if shared_anonymous {
-            0x21
-        } else {
-            PRIVATE_ANONYMOUS
-        };
+        let shared = cfg!(feature = "art-runtime") && flags & 3 == 1;
+        let kind = if shared { 0x21 } else { PRIVATE_ANONYMOUS };
         if flags & kind != kind
             || flags & !(kind | FIXED | NOREPLACE | HINTS) != 0
             || !offset.is_multiple_of(PAGE)
@@ -113,6 +117,9 @@ impl Layout {
             return Err(EINVAL);
         }
         let protection = Protection::from_linux(prot)?;
+        if shared && file_bytes.is_some() && protection == Protection::ReadWrite {
+            return Err(EACCES);
+        }
         let size = rounded_length(length)?;
         let fixed = flags & (FIXED | NOREPLACE) != 0;
         let start = if fixed {
@@ -135,20 +142,21 @@ impl Layout {
                 self.first_fit(size)?
             }
         };
-        self.change(
-            start,
-            size,
-            Some(protection),
-            true,
-            file_bytes,
-            shared_anonymous,
-        )
+        self.change(start, size, Some(protection), true, file_bytes, shared)
     }
 
     pub fn protect(&self, address: u64, length: u64, prot: u64) -> Result<Change, i64> {
         let protection = Protection::from_linux(prot)?;
         let size = rounded_length(length)?;
         let end = checked_range(address, size)?;
+        if protection == Protection::ReadWrite
+            && self
+                .regions
+                .iter()
+                .any(|r| r.start < end && address < r.end && r.shared && r.file_backed)
+        {
+            return Err(EACCES);
+        }
         let mut cursor = address;
         for region in &self.regions {
             if region.start > cursor {
@@ -187,7 +195,7 @@ impl Layout {
             if r.start > cursor {
                 return Err(ENOMEM);
             }
-            if wipe && (r.file_backed || r.shared_anonymous) {
+            if wipe && (r.file_backed || r.shared) {
                 return Err(EINVAL);
             }
             if r.start < address {
@@ -278,8 +286,8 @@ impl Layout {
         size: u64,
         protection: Option<Protection>,
         replace: bool,
-        file_bytes: Option<u64>,
-        shared_anonymous: bool,
+        file_bytes: Option<FileBacking>,
+        shared: bool,
     ) -> Result<Change, i64> {
         let end = checked_range(start, size)?;
         let mut regions = Vec::new();
@@ -312,8 +320,10 @@ impl Layout {
                 end,
                 protection,
                 file_backed: file_bytes.is_some(),
-                shared_anonymous,
-                file_page_end: match file_bytes {
+                file: file_bytes,
+                file_origin: if file_bytes.is_some() { start } else { 0 },
+                shared,
+                file_page_end: match file_bytes.map(|file| file.available) {
                     Some(0) => start,
                     Some(bytes) => start.checked_add(rounded_length(bytes)?).ok_or(ENOMEM)?,
                     None => 0,
@@ -327,7 +337,9 @@ impl Layout {
             if regions[index - 1].end == regions[index].start
                 && regions[index - 1].protection == regions[index].protection
                 && regions[index - 1].file_backed == regions[index].file_backed
-                && regions[index - 1].shared_anonymous == regions[index].shared_anonymous
+                && regions[index - 1].file == regions[index].file
+                && regions[index - 1].file_origin == regions[index].file_origin
+                && regions[index - 1].shared == regions[index].shared
                 && regions[index - 1].file_page_end == regions[index].file_page_end
                 && regions[index - 1].wipe_on_fork == regions[index].wipe_on_fork
             {
@@ -373,6 +385,59 @@ pub fn is_arena_address(address: u64) -> bool {
 mod tests {
     use super::*;
     #[test]
+    fn split_file_mappings_keep_their_original_offset_identity() {
+        let backing = FileBacking {
+            available: PAGE * 9,
+            offset: PAGE * 3,
+            inode: 5,
+            path: "system/data",
+        };
+        let mapped = Layout::default()
+            .map_with_backing(0, PAGE * 3, 3, 0x22, PAGE * 3, Some(backing))
+            .unwrap();
+        let split = mapped
+            .layout
+            .protect(mapped.start + PAGE, PAGE, 1)
+            .unwrap()
+            .layout;
+        let middle = split.regions[1];
+        assert_eq!(
+            middle.file.unwrap().offset + middle.start - middle.file_origin,
+            PAGE * 4
+        );
+        let trimmed = split.unmap(mapped.start, PAGE).unwrap().layout;
+        assert_eq!(trimmed.regions[0].file.unwrap().inode, 5);
+        assert_eq!(trimmed.regions[0].file_origin, mapped.start);
+        #[cfg(feature = "art-runtime")]
+        {
+            let shared = Layout::default()
+                .map_with_backing(0, PAGE, 1, 0x21, 0, Some(backing))
+                .unwrap();
+            assert_eq!(
+                shared.layout.protect(shared.start, PAGE, 3).err(),
+                Some(EACCES)
+            );
+            assert_eq!(
+                shared
+                    .layout
+                    .protect(shared.start, PAGE, 0)
+                    .unwrap()
+                    .layout
+                    .protect(shared.start, PAGE, 3)
+                    .err(),
+                Some(EACCES)
+            );
+        }
+    }
+    fn file(bytes: u64) -> FileBacking {
+        FileBacking {
+            available: bytes,
+            offset: 0,
+            inode: 1,
+            path: "system/test",
+        }
+    }
+    #[test]
     #[cfg(feature = "art-runtime")]
     fn low_arena_never_selects_kernel_tables_or_changes_high_first_fit() {
         let low = Layout::default()
@@ -416,12 +481,12 @@ mod tests {
     }
     #[test]
     #[cfg(feature = "art-runtime")]
-    fn shared_anonymous_policy_survives_splits_and_msync_detects_holes() {
+    fn shared_policy_survives_splits_and_msync_detects_holes() {
         let layout = Layout::default()
             .map(LOW_START, PAGE * 3, 3, 0x21, 0)
             .unwrap()
             .layout;
-        assert!(layout.regions[0].shared_anonymous);
+        assert!(layout.regions[0].shared);
         assert_eq!(
             layout.advise_fork(LOW_START, PAGE, true).err(),
             Some(EINVAL)
@@ -431,7 +496,7 @@ mod tests {
         assert_eq!(layout.msync(LOW_START + 1, PAGE, 0), Err(EINVAL));
         assert_eq!(layout.msync(0x40080000, PAGE, 0), Err(ENOMEM));
         let split = layout.protect(LOW_START + PAGE, PAGE, 0).unwrap().layout;
-        assert!(split.regions.iter().all(|r| r.shared_anonymous));
+        assert!(split.regions.iter().all(|r| r.shared));
         assert_eq!(split.msync(LOW_START, PAGE * 3, 0), Ok(0));
         let hole = split.unmap(LOW_START + PAGE, PAGE).unwrap().layout;
         assert_eq!(hole.msync(LOW_START, PAGE * 3, 0), Err(ENOMEM));
@@ -440,12 +505,12 @@ mod tests {
             .unwrap()
             .layout;
         assert_eq!(replaced.regions.len(), 3);
-        assert!(!replaced.regions[1].shared_anonymous);
+        assert!(!replaced.regions[1].shared);
         assert_eq!(
             layout
-                .map_with_backing(0, PAGE, 3, 0x21, 0, Some(PAGE))
+                .map_with_backing(0, PAGE, 3, 0x21, 0, Some(file(PAGE)))
                 .err(),
-            Some(EINVAL)
+            Some(EACCES)
         );
     }
     #[test]
@@ -462,7 +527,7 @@ mod tests {
         assert!(protected.regions[1].wipe_on_fork);
         assert!(!protected.regions[0].wipe_on_fork);
         let file = protected
-            .map_with_backing(ARENA_START + PAGE, PAGE, 1, 0x32, 0, Some(PAGE))
+            .map_with_backing(ARENA_START + PAGE, PAGE, 1, 0x32, 0, Some(file(PAGE)))
             .unwrap()
             .layout;
         assert!(file.regions[1].file_backed);
@@ -489,7 +554,9 @@ mod tests {
                 end: ARENA_START + (1 << 38),
                 protection: Protection::None,
                 file_backed: false,
-                shared_anonymous: false,
+                file: None,
+                file_origin: 0,
+                shared: false,
                 file_page_end: 0,
                 wipe_on_fork: false,
             }

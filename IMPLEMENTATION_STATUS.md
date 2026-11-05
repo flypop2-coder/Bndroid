@@ -2,6 +2,14 @@
 
 This page records implemented behavior and validation, with a September 9, 2026 platform baseline and dated updates below. Historical test counts belong to the indicated development runs; they are not a claim that every historical gate was rerun during publication. The [complete original status log](docs/archive/originals/IMPLEMENTATION_STATUS.txt) preserves detailed evidence and earlier milestones. Future tasks belong only in [TODO.md](TODO.md).
 
+## ART process and native initialization update — November 6, 2026
+
+ART now reads its core jars, obtains real process/stack metadata and loads ICU, Java core and OpenJDK native libraries through the source Android linker's namespaces. The kernel supplies bounded `/proc/self/stat` and `/proc/self/maps` snapshots, actual CPU/memory accounting, stack guards, large file reads, read-only shared file mappings, access-pattern advice, private anonymous remapping and a bounded Android log endpoint. Extraction includes symlink-backed APEX dependencies and verifies configuration hashes. See [ART Process-0](docs/milestones/androidbox/ART_PROCESS_0.md).
+
+Managed initialization still fails after `rt_sigaction(34, ...)` returns `ENOSYS`, with `java.io.IOException: Function not implemented`. The recorded child cleanup leaves no sparse pages, tables, file descriptions or threads. The supplied Java result has not occurred; A1, ActivityThread, Framework and general APK acceptance remain incomplete.
+
+Validation passed: 1,121 default workspace host tests, 387 ART kernel tests, six ART proof-parser tests plus four UART tests, host/AArch64 ART Clippy, extended ART memory and frontend gates, raw/static/dynamic Bionic regression gates, all four pthread lifecycle modes, EOF containment, native boot and mobile UI. Local evidence includes `target/art-runtime/check.EXkPn7` (memory), `check.tV60g7` (help), and `check.N55rbZ` (managed failure). The APK example's required feature declaration was also corrected and checked.
+
 ## ART frontend and memory update — November 6, 2026
 
 The separate `art-runtime` profile loads the installed Android 16 `dalvikvm64`, `libart.so` and required shared libraries without modifying them. ART's own help/parser completes in two distinct process generations, both exiting zero with no remaining sparse pages/tables, file descriptions or thread resources. An owned native gate also validates 64 MiB below 4 GiB, protection and hole handling, shared anonymous memory across a pthread, rejected kernel/cross-arena mappings, allocation bounds and complete reaping. The runtime source and local-only distribution boundary are frozen in [ADR 0001](docs/decisions/0001-android-runtime-baseline.md).

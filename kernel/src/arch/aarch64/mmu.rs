@@ -312,6 +312,8 @@ pub enum AddressSpaceError {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[allow(clippy::enum_variant_names)]
 pub enum UserPageAccess {
+    #[cfg(feature = "art-runtime")]
+    NoAccess,
     ReadExecute,
     #[allow(dead_code)]
     ReadOnly,
@@ -1436,7 +1438,14 @@ impl UserAddressSpace {
     /// Mapping mutation is serialized in the same IRQ-masked process domain,
     /// so this validation can precede one all-or-nothing copy-from-user.
     pub fn user_range_is_readable(&self, address: u64, bytes: usize) -> bool {
-        self.user_range_has_access(address, bytes, |_| true)
+        self.user_range_has_access(address, bytes, |access| {
+            #[cfg(feature = "art-runtime")]
+            if access == UserPageAccess::NoAccess {
+                return false;
+            }
+            let _ = access;
+            true
+        })
     }
 
     fn user_range_has_access(
@@ -2506,6 +2515,8 @@ fn validate_user_mappings(mappings: &OwnedUserMappings) -> Result<(), AddressSpa
 
 fn user_leaf_descriptor(page: &OwnedUserPage) -> Result<u64, AddressSpaceError> {
     let descriptor = match page.access {
+        #[cfg(feature = "art-runtime")]
+        UserPageAccess::NoAccess => return Ok(0),
         UserPageAccess::ReadExecute => user_ro_x_page_descriptor(page.frame.start_address()),
         UserPageAccess::ReadOnly => user_ro_nx_page_descriptor(page.frame.start_address()),
         UserPageAccess::ReadWrite => user_rw_nx_page_descriptor(page.frame.start_address()),

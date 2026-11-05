@@ -2,6 +2,8 @@
 
 Date: November 6, 2026. Native ABI remains 70; general Android application acceptance remains incomplete.
 
+This records the original frontend milestone. [ART Process-0](ART_PROCESS_0.md) supersedes its procfs failure, global library search and memory-operation limitations with later measured progress.
+
 ## Observed result
 
 Bndroid executes the unmodified local Android 16 `dalvikvm64`, resolves its runtime dependencies, loads `libart.so`, runs its constructors and command-line parser, and prints ART's own help. Two successive process generations exit zero and reclaim all sparse pages, page tables, descriptors and thread resources. This is native ART frontend execution, not a created Java VM or an APK launch.

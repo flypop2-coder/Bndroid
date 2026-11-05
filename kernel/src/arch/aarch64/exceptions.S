@@ -163,7 +163,13 @@ __irq_common:
     msr daifset, #2
     SAVE_TRAP_FRAME
     mov x0, sp
+    .if {accounting}
+    bl linux_account_enter
+    .endif
     bl irq_dispatch
+    .if {accounting}
+    bl linux_account_leave
+    .endif
     mov sp, x0
     RESTORE_TRAP_FRAME
     eret
@@ -172,7 +178,13 @@ __sync_common:
     msr daifset, #2
     SAVE_TRAP_FRAME
     mov x0, sp
+    .if {accounting}
+    bl linux_account_enter
+    .endif
     bl sync_dispatch
+    .if {accounting}
+    bl linux_account_leave
+    .endif
     mov sp, x0
     RESTORE_TRAP_FRAME
     eret
@@ -184,7 +196,13 @@ __lower_sync_common:
     msr daifset, #2
     SAVE_TRAP_FRAME
     mov x0, sp
+    .if {accounting}
+    bl linux_account_enter
+    .endif
     bl lower_sync_dispatch
+    .if {accounting}
+    bl linux_account_leave
+    .endif
     mov sp, x0
     RESTORE_TRAP_FRAME
     eret
