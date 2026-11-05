@@ -17,6 +17,9 @@ static volatile int constructor_seen;
 __attribute__((constructor)) static void before_main(void) { constructor_seen = 1; }
 __attribute__((destructor)) static void after_main(void) { puts("DYNAMIC_DESTRUCTOR_OK"); }
 static void at_exit(void) { puts("DYNAMIC_ATEXIT_OK"); }
+#ifdef BNDROID_TEST_THREADS
+extern void test_threads(void);
+#endif
 
 int main(int argc, char **argv) {
     CHECK(argc == 2 && strcmp(argv[1], "--verify") == 0);
@@ -39,6 +42,9 @@ int main(int argc, char **argv) {
     volatile double value = 0.0;
     CHECK(cos(value) == 1.0);
     CHECK(dlclose(plugin) == 0);
+#ifdef BNDROID_TEST_THREADS
+    test_threads();
+#endif
 
     int directory = open("/system/etc", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     CHECK(directory >= 3);

@@ -31,3 +31,11 @@ BNDROID_DYNAMIC_FAULT_CHECK=1 ./scripts/check-bionic-dynamic-runtime.sh
 ```
 
 That negative gate expects `BIONIC_DYNAMIC_EOF_FAULT_CHECK_OK`; the supervisor intentionally reports the failed child afterward. This validates containment, not POSIX signal-handler delivery. For syscall diagnostics, add the kernel feature `linux-syscall-trace` to a manual build; keep it off for normal output assertions because tracing interleaves UART writes.
+
+The same dynamic profile also supports real Bionic threads. Run the normal, main-thread-exit, worker-group-exit, and worker-fault checks with:
+
+```sh
+./scripts/check-bionic-threads.sh
+```
+
+For just the normal pthread test, set `BNDROID_DYNAMIC_THREADS_CHECK=1` when running `check-bionic-dynamic-runtime.sh`. The [thread milestone](../../docs/milestones/androidbox/BIONIC_THREADS_0.md) describes ownership, limits, synchronization, and the distinction between stored signal masks and unimplemented signal delivery.

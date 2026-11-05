@@ -1263,6 +1263,8 @@ pub fn reap_terminal_children() -> usize {
         crate::arch::aarch64::restore_daif(saved_daif);
         return 0;
     }
+    #[cfg(feature = "bionic-dynamic-runtime")]
+    scheduler::linux_threads::reap();
     let mut reaped = 0;
     while reaped < DYNAMIC_PROCESS_CAPACITY {
         let Some(terminal) = scheduler::terminal_user_snapshot() else {
@@ -8118,15 +8120,24 @@ pub fn with_linux_files<R>(operation: impl FnOnce(&mut bndroid_kernel::linux_fd:
 }
 
 #[cfg(feature = "bionic-dynamic-runtime")]
-pub fn linux_return_pc_is_valid(id: u64, pc: usize) -> Option<bool> {
+pub fn linux_return_state_is_valid(id: u64, pc: usize, stack: usize) -> Option<bool> {
     let process = lookup(ProcessId(id))?;
     if process.image_id != UserImageId::LinuxApp {
         return None;
     }
-    Some(
-        process
-            .address_space
-            .as_ref()
-            .is_some_and(|space| space.linux_executable(pc)),
-    )
+    Some(process.address_space.as_ref().is_some_and(|space| {
+        pc.is_multiple_of(4)
+            && space.linux_executable(pc)
+            && stack.is_multiple_of(16)
+            // Detached Bionic threads unmap their stack before the final exit
+            // syscall. EL0 SP never selects a kernel exception stack; an
+            // unmapped user access is handled by normal fault containment.
+            && stack > 0
+            && stack < bndroid_kernel::linux_vm::ARENA_END as usize
+    }))
+}
+
+#[cfg(feature = "bionic-dynamic-runtime")]
+pub fn is_linux_process(id: u64) -> bool {
+    lookup(ProcessId(id)).is_some_and(|process| process.image_id == UserImageId::LinuxApp)
 }

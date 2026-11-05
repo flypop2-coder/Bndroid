@@ -2,6 +2,8 @@
 
 Recorded November 6, 2026. An ordinary NDK PIE now reaches `main` through the unmodified Android dynamic linker on the Bndroid kernel. Real shared Bionic, libm, libdl, and a separately compiled plugin execute in two supervised, isolated process generations. No Linux guest kernel is involved in this execution gate. ART, JNI, Binder, Framework, and general APK execution remain open.
 
+The same dynamic profile later gained [real Bionic threads](BIONIC_THREADS_0.md); the counts and limits below record the initial dynamic-loading milestone.
+
 ## Inputs and reproduction
 
 The native toolchain remains NDK r27b/API 35. Runtime inputs come from the already installed arm64 SDK Android 16/API 36.1 revision 3 image, fingerprint:
@@ -45,4 +47,4 @@ The positive gate verifies real shared-libc identity; plugin constructors, ELF T
 
 The deliberate EOF-read gate verifies the exact fault address and EL0 data-abort class, then observes one reaped child, one surviving Init, and zero dynamic pages/tables/file descriptions. The 1,114 default host tests, 19 Linux-feature helper tests, four UART parser tests, predecessor runtime checks, native boot/fault containment, mobile UI acceptance, and profile Clippy passed. Missing or corrupt root archives reject boot before userspace.
 
-The tested runtime tolerates 60 `ENOSYS` results for futex, sched_getaffinity, sigaltstack, rt_sigaction, rt_sigprocmask, gettimeofday, and socket. Missing platform properties and generated linker configuration use the upstream fallback; the latter emits a warning. These are explicit gaps. There is no signal delivery, native thread creation, wall clock, network, ASLR, MTE, writable Linux filesystem, APK JNI loading, ART, Binder, or full Android Framework in this profile. AndroidBox A1–A4 remain incomplete.
+The tested runtime tolerates 60 `ENOSYS` results for futex, sched_getaffinity, sigaltstack, rt_sigaction, rt_sigprocmask, gettimeofday, and socket. Missing platform properties and generated linker configuration use the upstream fallback; the latter emits a warning. These were explicit gaps at this milestone. Native thread creation and ordinary futex/mask support were subsequently added; signal delivery, wall clock, network, ASLR, MTE, writable Linux filesystems, APK JNI loading, ART, Binder, and full Android Framework remain open. AndroidBox A1–A4 remain incomplete.

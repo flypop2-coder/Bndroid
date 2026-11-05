@@ -26,6 +26,10 @@ pub fn dispatch(frame: *mut TrapFrame) -> *mut TrapFrame {
     // SAFETY: the common SVC path validated this process's saved TrapFrame.
     let registers = unsafe { (*frame).x };
     #[cfg(feature = "bionic-dynamic-runtime")]
+    if let Some(next) = crate::scheduler::linux_threads::dispatch(frame, &registers) {
+        return next;
+    }
+    #[cfg(feature = "bionic-dynamic-runtime")]
     if let Some(result) = crate::linux_files::dispatch(&registers) {
         return complete(frame, result);
     }
@@ -113,7 +117,7 @@ pub fn reject_svc(frame: *mut TrapFrame) -> *mut TrapFrame {
     complete(frame, errno(ENOSYS))
 }
 
-fn complete(frame: *mut TrapFrame, value: u64) -> *mut TrapFrame {
+pub(crate) fn complete(frame: *mut TrapFrame, value: u64) -> *mut TrapFrame {
     #[cfg(feature = "linux-syscall-trace")]
     unsafe {
         crate::kprintln!(
@@ -244,7 +248,7 @@ pub(crate) fn getrandom(address: u64, requested: u64, flags: u64) -> u64 {
     count as u64
 }
 
-fn user_address(address: u64) -> u64 {
+pub(crate) fn user_address(address: u64) -> u64 {
     if crate::process::linux_tagged_addresses(None) {
         address & 0x00ff_ffff_ffff_ffff
     } else {
@@ -323,6 +327,8 @@ pub fn monitor() -> ! {
         let processes = crate::process::snapshot();
         if syscalls.failure != 0 || crate::scheduler::user_init_fault_snapshot().count != 0 {
             let memory = aarch64::mmu::linux_memory_snapshot();
+            #[cfg(feature = "bionic-dynamic-runtime")]
+            crate::scheduler::linux_threads::evidence("LINUX_THREADS_FAILURE_CLEANUP");
             crate::kprintln!(
                 "LINUX_RUNTIME_FAILURE_CLEANUP live_processes={} faulted={} reaped={} live_pages={} live_tables={} live_files={}",
                 processes.live,
@@ -348,6 +354,8 @@ pub fn monitor() -> ! {
             let memory = aarch64::mmu::linux_memory_snapshot();
             assert_eq!(memory.pages, 0);
             assert_eq!(memory.tables, 0);
+            #[cfg(feature = "bionic-dynamic-runtime")]
+            crate::scheduler::linux_threads::evidence("LINUX_THREADS_OK");
             if cfg!(feature = "bionic-runtime") {
                 assert!(memory.peak_pages > 0 && memory.reclaimed_pages >= memory.peak_pages);
                 assert!(crate::linux_entropy::consumed() > 32);
@@ -414,4 +422,14 @@ pub(crate) fn copy_in(address: u64, bytes: &mut [u8]) -> Result<(), i64> {
         return Err(EFAULT);
     }
     Ok(())
+}
+
+#[cfg(feature = "bionic-dynamic-runtime")]
+pub(crate) fn record_group_exit(process: u64, code: u64) {
+    EXITS.fetch_add(1, Ordering::Release);
+    crate::kprintln!(
+        "LINUX_PROCESS_EXIT pid={} code={} native_handles=0",
+        process,
+        code
+    );
 }

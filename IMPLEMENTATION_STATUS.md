@@ -2,13 +2,21 @@
 
 This page records implemented behavior and validation, with a September 9, 2026 platform baseline and dated updates below. Historical test counts belong to the indicated development runs; they are not a claim that every historical gate was rerun during publication. The [complete original status log](docs/archive/originals/IMPLEMENTATION_STATUS.txt) preserves detailed evidence and earlier milestones. Future tasks belong only in [TODO.md](TODO.md).
 
+## Bionic pthread update — November 6, 2026
+
+The existing dynamic profile now creates real Bionic pthreads sharing a process address space and file table, with separate kernel stacks, TIDs, TLS, signal masks, and clear-TID state. Futex waits/wakes/bitsets, monotonic deadlines, sleeping, yielding, join, and detach execute through the scheduler. Native process resources remain alive until the entire thread group stops.
+
+Four QEMU gates passed: normal synchronization with 24 total created/reaped threads, main-thread-first exit, worker-initiated group exit, and a worker fault while siblings wait. All gates verify zero surviving thread stacks/waiters and full shared-resource cleanup. The 1,117 default host tests, synchronization helper tests, dynamic-profile Clippy, previous dynamic/static/raw Linux gates, EOF containment, native boot/fault tests, and mobile UI gate passed. See [Bionic Threads-0](docs/milestones/androidbox/BIONIC_THREADS_0.md) for scope and commands.
+
+Signal-handler delivery, advanced futex modes, writable Linux filesystems, JNI/ART, Binder, Framework, and general Android applications remain unfinished. The single-core dynamic profile has a bounded global thread pool; this is not a full pthread/Linux or Android compatibility claim.
+
 ## Android dynamic linker update — November 6, 2026
 
 The `bionic-dynamic-runtime` profile executes an ordinary NDK PIE through unmodified Android 16 `linker64`, shared libc/libm/libdl, and a separately built plugin. Both supervised process generations verify `dlopen`/symbols/unload, ELF TLS across timer preemption, constructors/destructors, private file mapping, and POSIX descriptor operations. The immutable runtime root comes from explicitly supplied local SDK files; a tested extraction helper uses an isolated temporary AVD. No upstream binaries enter Git.
 
 The positive QEMU gate recorded 1,014 Linux calls, four bad-address checks, two zero-status exits, and zero remaining sparse page/table owners or file descriptions. An intentional read beyond file EOF is contained and also releases every child resource. The default 1,114 workspace host tests, predecessor static Bionic/raw Linux gates, native kernel boot and EL0 fault containment, mobile UI gate, and dynamic-profile Clippy with warnings denied passed. Nineteen Linux-feature helper tests and four UART parser tests passed; missing/corrupt root archives reject boot before userspace. See [Bionic Dynamic-0](docs/milestones/androidbox/BIONIC_DYNAMIC_0.md) for reproducible commands, frozen input hashes, detailed limits, and remaining syscall gaps.
 
-Native dynamic linking now works in this separate profile. Threads, signal delivery, writable Linux filesystems, JNI/APK native libraries, ART, Binder, Framework, and general Android applications still require implementation.
+Native dynamic linking works in this separate profile; thread support is described in the later update above. Signal delivery, writable Linux filesystems, JNI/APK native libraries, ART, Binder, Framework, and general Android applications still require implementation.
 
 ## Real static Bionic update — November 6, 2026
 

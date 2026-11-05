@@ -19,7 +19,14 @@ const KERNEL_CONTEXT_COUNT: usize = 3;
 // One manager, one provider, and two distinct client processes must be able
 // to run concurrently for the M18 multi-client service proof.
 const DYNAMIC_USER_CONTEXT_COUNT: usize = crate::limits::DYNAMIC_PROCESS_CAPACITY;
-const USER_CONTEXT_COUNT: usize = 1 + DYNAMIC_USER_CONTEXT_COUNT;
+#[cfg(feature = "bionic-dynamic-runtime")]
+pub mod linux_threads;
+const LINUX_THREAD_CONTEXT_COUNT: usize = if cfg!(feature = "bionic-dynamic-runtime") {
+    32
+} else {
+    0
+};
+const USER_CONTEXT_COUNT: usize = 1 + DYNAMIC_USER_CONTEXT_COUNT + LINUX_THREAD_CONTEXT_COUNT;
 const CONTEXT_COUNT: usize = KERNEL_CONTEXT_COUNT + USER_CONTEXT_COUNT;
 const MONITOR_CONTEXT: usize = 0;
 const WORKER_0_CONTEXT: usize = 1;
@@ -1582,6 +1589,8 @@ fn fault_current_user_inner(
             sp_el0,
             unsafe { (*frame).tpidr_el0 }
         );
+        #[cfg(feature = "bionic-dynamic-runtime")]
+        return linux_threads::fault_group(frame, reason, esr, far);
     }
     #[cfg(feature = "mobile-ui-runtime")]
     if current != USER_INIT_CONTEXT {
@@ -1710,6 +1719,10 @@ fn terminate_user_process_inner(
     else {
         return Err(TerminateUserError::NotFound);
     };
+    #[cfg(feature = "bionic-dynamic-runtime")]
+    if linux_threads::terminate_group(process_id)? {
+        return Ok(());
+    }
     let dynamic_slot = dynamic_user_index(context)
         .unwrap_or_else(|| panic!("forced termination target lacked a dynamic slot"));
     let wait_slot = user_wait_slot_for_context(context);
@@ -1848,6 +1861,8 @@ pub fn detach_terminal_user(process_id: u64) -> Option<StoppedUserThread> {
     CONTEXTS[context].stack_bottom.store(0, Ordering::Relaxed);
     CONTEXTS[context].stack_top.store(0, Ordering::Relaxed);
     CONTEXTS[context].canary_address.store(0, Ordering::Relaxed);
+    #[cfg(feature = "bionic-dynamic-runtime")]
+    linux_threads::reset_context(context);
     CONTEXT_PROCESS_IDS[context].store(0, Ordering::Relaxed);
     USER_DYNAMIC_CODE_STARTS[dynamic_slot].store(0, Ordering::Relaxed);
     USER_DYNAMIC_CODE_ENDS[dynamic_slot].store(0, Ordering::Relaxed);
@@ -1887,6 +1902,8 @@ pub fn on_timer_tick(frame: *mut TrapFrame) -> *mut TrapFrame {
     // the periodic IRQ only supplies a sampling opportunity. This guarantees
     // no early expiry without reusing the context-only kernel sleep queue.
     wake_object_waiters();
+    #[cfg(feature = "bionic-dynamic-runtime")]
+    linux_threads::wake_expired(now_counter);
     validate_sleeping_invariants();
     if sleeping_context_count() == WORKER_COUNT {
         OVERLAP_TICKS.fetch_add(1, Ordering::Relaxed);
@@ -1895,9 +1912,7 @@ pub fn on_timer_tick(frame: *mut TrapFrame) -> *mut TrapFrame {
     if is_user_context(current) {
         if current == USER_INIT_CONTEXT {
             USER_INIT_LOWER_IRQS.fetch_add(1, Ordering::Relaxed);
-        } else {
-            let dynamic_slot = dynamic_user_index(current)
-                .unwrap_or_else(|| panic!("dynamic user IRQ lacked a context slot"));
+        } else if let Some(dynamic_slot) = dynamic_user_index(current) {
             USER_DYNAMIC_LOWER_IRQS[dynamic_slot].fetch_add(1, Ordering::Relaxed);
         }
         validate_frame_storage_or_panic(current, frame);
@@ -2630,14 +2645,16 @@ fn validate_user_kernel_state_or_panic(index: usize, frame: *mut TrapFrame) {
 
 fn user_return_state_is_valid(index: usize, frame: *mut TrapFrame) -> bool {
     let (elr, sp_el0) = unsafe { ((*frame).elr_el1 as usize, (*frame).sp_el0 as usize) };
-    let (code_start, code_end, user_stack_start, user_stack_end) = user_bounds(index);
-    let executable = elr >= code_start && elr < code_end;
     #[cfg(feature = "bionic-dynamic-runtime")]
-    let executable = crate::process::linux_return_pc_is_valid(
+    if let Some(valid) = crate::process::linux_return_state_is_valid(
         CONTEXT_PROCESS_IDS[index].load(Ordering::Relaxed),
         elr,
-    )
-    .unwrap_or(executable);
+        sp_el0,
+    ) {
+        return valid;
+    }
+    let (code_start, code_end, user_stack_start, user_stack_end) = user_bounds(index);
+    let executable = elr >= code_start && elr < code_end;
     elr.is_multiple_of(4)
         && executable
         && sp_el0.is_multiple_of(16)
@@ -2703,6 +2720,10 @@ fn stack_canary_intact(context: &StaticContext) -> bool {
 }
 
 fn selection_counter(index: usize) -> &'static AtomicU64 {
+    #[cfg(feature = "bionic-dynamic-runtime")]
+    if index >= DYNAMIC_USER_CONTEXT_END {
+        return linux_threads::selection_counter(index);
+    }
     match index {
         MONITOR_CONTEXT => &MONITOR_SELECTED,
         WORKER_0_CONTEXT => &SCHED_WORKER_0_SELECTED,

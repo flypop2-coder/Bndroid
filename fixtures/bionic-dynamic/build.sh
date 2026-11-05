@@ -21,9 +21,23 @@ case "${BNDROID_DYNAMIC_FAULT_CHECK:-0}" in
   1) FLAGS+=(-DBNDROID_TEST_EOF_FAULT) ;;
   *) echo "BNDROID_DYNAMIC_FAULT_CHECK must be 0 or 1" >&2; exit 2 ;;
 esac
+EXTRA_SOURCES=()
+THREAD_MODE=0
+case "${BNDROID_THREAD_TEST_MODE:-normal}" in
+  normal) ;;
+  leader-exit) THREAD_MODE=1 ;;
+  group-exit) THREAD_MODE=2 ;;
+  worker-fault) THREAD_MODE=3 ;;
+  *) echo "Unknown BNDROID_THREAD_TEST_MODE" >&2; exit 2 ;;
+esac
+case "${BNDROID_DYNAMIC_THREADS_CHECK:-0}" in
+  0) ;;
+  1) FLAGS+=(-DBNDROID_TEST_THREADS -DBNDROID_THREAD_TEST_MODE="$THREAD_MODE" -pthread); EXTRA_SOURCES+=("$ROOT/fixtures/bionic-dynamic/threads.c") ;;
+  *) echo "BNDROID_DYNAMIC_THREADS_CHECK must be 0 or 1" >&2; exit 2 ;;
+esac
 "$CC" "${FLAGS[@]}" -fPIC -shared -Wl,-soname,libbndroidplugin.so \
   "$ROOT/fixtures/bionic-dynamic/plugin.c" -o "$OUT/libbndroidplugin.so"
-"$CC" "${FLAGS[@]}" -fPIE -pie "$ROOT/fixtures/bionic-dynamic/main.c" -ldl -lm -o "$OUT/dynamic-probe"
+"$CC" "${FLAGS[@]}" -fPIE -pie "$ROOT/fixtures/bionic-dynamic/main.c" ${EXTRA_SOURCES[@]+"${EXTRA_SOURCES[@]}"} -ldl -lm -o "$OUT/dynamic-probe"
 "$TOOLCHAIN/bin/llvm-readelf" -h -l -d "$OUT/dynamic-probe" > "$OUT/elf.txt"
 "$CC" --version > "$OUT/compiler.txt"
 cp "$NDK_ROOT/source.properties" "$OUT/ndk.properties"
