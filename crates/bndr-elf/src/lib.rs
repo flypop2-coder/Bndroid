@@ -16,6 +16,7 @@ const PROGRAM_TYPE_LOAD: u32 = 1;
 const PROGRAM_TYPE_DYNAMIC: u32 = 2;
 const PROGRAM_TYPE_INTERPRETER: u32 = 3;
 const PROGRAM_TYPE_TLS: u32 = 7;
+const PROGRAM_TYPE_PHDR: u32 = 6;
 const PROGRAM_TYPE_GNU_STACK: u32 = 0x6474_e551;
 const PROGRAM_FLAG_EXECUTE: u32 = 1;
 const PROGRAM_FLAG_WRITE: u32 = 2;
@@ -69,6 +70,7 @@ pub enum ElfError {
     LoadPagesOverlap,
     TooManyLoadPages,
     EntryNotExecutable,
+    InvalidProgramHeaderSegment,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -165,6 +167,16 @@ pub struct ElfImage<'a> {
 
 impl<'a> ElfImage<'a> {
     pub fn parse(bytes: &'a [u8]) -> Result<Self, ElfError> {
+        Self::parse_profile(bytes, false)
+    }
+
+    /// Static Linux ELF entry support, including a validated, mapped PHDR.
+    /// Dynamic linking, TLS and ET_DYN still require separate implementation.
+    pub fn parse_linux_static(bytes: &'a [u8]) -> Result<Self, ElfError> {
+        Self::parse_profile(bytes, true)
+    }
+
+    fn parse_profile(bytes: &'a [u8], linux: bool) -> Result<Self, ElfError> {
         if bytes.len() > MAX_ELF_FILE_SIZE {
             return Err(ElfError::FileTooLarge);
         }
@@ -243,6 +255,7 @@ impl<'a> ElfImage<'a> {
         let mut entry_is_executable = false;
         let mut previous_load_address = None;
         let mut saw_gnu_stack = false;
+        let mut phdr_segment = None;
         for index in 0..program_header_count {
             let header = program_header_at(program_header_offset, index)?;
             let program_type =
@@ -250,6 +263,12 @@ impl<'a> ElfImage<'a> {
             let segment = match program_type {
                 PROGRAM_TYPE_NULL => continue,
                 PROGRAM_TYPE_LOAD => parse_load_segment_at(bytes, header)?,
+                PROGRAM_TYPE_PHDR if linux => {
+                    if load_segment_count != 0 || phdr_segment.replace(header).is_some() {
+                        return Err(ElfError::InvalidProgramHeaderSegment);
+                    }
+                    continue;
+                }
                 PROGRAM_TYPE_GNU_STACK => {
                     if saw_gnu_stack {
                         return Err(ElfError::DuplicateGnuStack);
@@ -295,18 +314,57 @@ impl<'a> ElfImage<'a> {
             return Err(ElfError::EntryNotExecutable);
         }
 
-        Ok(Self {
+        let image = Self {
             bytes,
             entry,
             program_header_offset,
             program_header_count,
             load_segment_count,
             load_page_count,
-        })
+        };
+        if linux {
+            let address = image
+                .program_header_address()
+                .ok_or(ElfError::InvalidProgramHeaderSegment)?;
+            if let Some(header) = phdr_segment {
+                if read_u32(bytes, header + 4) != Some(PROGRAM_FLAG_READ)
+                    || read_u64(bytes, header + 8) != Some(program_header_offset as u64)
+                    || read_u64(bytes, header + 16) != Some(address)
+                    || read_u64(bytes, header + 32) != Some(table_bytes as u64)
+                    || read_u64(bytes, header + 40) != Some(table_bytes as u64)
+                    || read_u64(bytes, header + 48) != Some(8)
+                {
+                    return Err(ElfError::InvalidProgramHeaderSegment);
+                }
+            }
+        }
+        Ok(image)
     }
 
     pub const fn entry(&self) -> u64 {
         self.entry
+    }
+
+    pub const fn program_header_count(&self) -> usize {
+        self.program_header_count
+    }
+
+    /// The table must be entirely backed by readable file bytes in one LOAD.
+    pub fn program_header_address(&self) -> Option<u64> {
+        let start = self.program_header_offset as u64;
+        let end = start.checked_add((self.program_header_count * PROGRAM_HEADER_SIZE) as u64)?;
+        for index in 0..self.program_header_count {
+            let header = program_header_at(self.program_header_offset, index).ok()?;
+            if read_u32(self.bytes, header)? != PROGRAM_TYPE_LOAD {
+                continue;
+            }
+            let offset = read_u64(self.bytes, header + 8)?;
+            let size = read_u64(self.bytes, header + 32)?;
+            if offset <= start && offset.checked_add(size)? >= end {
+                return read_u64(self.bytes, header + 16)?.checked_add(start - offset);
+            }
+        }
+        None
     }
 
     pub const fn load_segment_count(&self) -> usize {
@@ -508,6 +566,127 @@ mod tests {
                 },
             ],
         )
+    }
+
+    fn linux_elf() -> Vec<u8> {
+        let mut bytes = build_elf(
+            TEXT_VA + 0x1000,
+            &[
+                TestSegment {
+                    flags: 4,
+                    offset: 0x1000,
+                    virtual_address: TEXT_VA,
+                    file_size: 0x1000,
+                    memory_size: 0x1000,
+                    alignment: 0x1000,
+                },
+                TestSegment {
+                    flags: 5,
+                    offset: 0x2000,
+                    virtual_address: TEXT_VA + 0x1000,
+                    file_size: 8,
+                    memory_size: 8,
+                    alignment: 0x1000,
+                },
+                TestSegment {
+                    flags: 6,
+                    offset: 0x3000,
+                    virtual_address: TEXT_VA + 0x2000,
+                    file_size: 4,
+                    memory_size: 0x1000,
+                    alignment: 0x1000,
+                },
+            ],
+        );
+        bytes.copy_within(64..64 + 3 * 56, 64 + 56);
+        bytes[64..64 + 56].fill(0);
+        write_u16(&mut bytes, 56, 4);
+        write_u32(&mut bytes, 64, 6);
+        write_u32(&mut bytes, 68, 4);
+        write_u64(&mut bytes, 72, 64);
+        write_u64(&mut bytes, 80, TEXT_VA + 64);
+        write_u64(&mut bytes, 96, 4 * 56);
+        write_u64(&mut bytes, 104, 4 * 56);
+        write_u64(&mut bytes, 112, 8);
+        write_u64(&mut bytes, 64 + 56 + 8, 0);
+        bytes
+    }
+
+    #[test]
+    fn linux_static_profile_maps_the_actual_program_header_bytes() {
+        let bytes = linux_elf();
+        assert_eq!(
+            ElfImage::parse(&bytes),
+            Err(ElfError::UnsupportedProgramHeaderType)
+        );
+        let image = ElfImage::parse_linux_static(&bytes).unwrap();
+        assert_eq!(image.program_header_address(), Some(TEXT_VA + 64));
+        assert_eq!(image.program_header_count(), 4);
+        assert_eq!(image.entry(), TEXT_VA + 0x1000);
+        assert_eq!(
+            &image.load_segments().next().unwrap().file_data()[64..64 + 4 * 56],
+            &bytes[64..64 + 4 * 56]
+        );
+    }
+
+    #[test]
+    fn linux_static_rejects_forged_duplicate_unmapped_or_late_phdr() {
+        for (offset, value) in [(72, 65), (80, TEXT_VA + 65), (96, 8), (104, 8), (112, 4096)] {
+            let mut bytes = linux_elf();
+            write_u64(&mut bytes, offset, value);
+            assert_eq!(
+                ElfImage::parse_linux_static(&bytes),
+                Err(ElfError::InvalidProgramHeaderSegment)
+            );
+        }
+        let mut bytes = linux_elf();
+        write_u32(&mut bytes, 68, 6);
+        assert_eq!(
+            ElfImage::parse_linux_static(&bytes),
+            Err(ElfError::InvalidProgramHeaderSegment)
+        );
+        let mut bytes = linux_elf();
+        write_u32(&mut bytes, 64 + 56, 6);
+        assert_eq!(
+            ElfImage::parse_linux_static(&bytes),
+            Err(ElfError::InvalidProgramHeaderSegment)
+        );
+        let mut bytes = linux_elf();
+        write_u64(&mut bytes, 64 + 56 + 32, 64);
+        assert_eq!(
+            ElfImage::parse_linux_static(&bytes),
+            Err(ElfError::InvalidProgramHeaderSegment)
+        );
+        let mut bytes = linux_elf();
+        write_u32(&mut bytes, 64, PROGRAM_TYPE_NULL);
+        write_u32(&mut bytes, 64 + 3 * 56, 6);
+        assert_eq!(
+            ElfImage::parse_linux_static(&bytes),
+            Err(ElfError::InvalidProgramHeaderSegment)
+        );
+        assert_eq!(
+            ElfImage::parse_linux_static(&valid_elf()),
+            Err(ElfError::InvalidProgramHeaderSegment)
+        );
+    }
+
+    #[test]
+    fn linux_static_still_rejects_dynamic_tls_and_writable_code() {
+        for (kind, expected) in [
+            (PROGRAM_TYPE_DYNAMIC, ElfError::DynamicSegmentUnsupported),
+            (PROGRAM_TYPE_TLS, ElfError::TlsUnsupported),
+            (PROGRAM_TYPE_INTERPRETER, ElfError::InterpreterUnsupported),
+        ] {
+            let mut bytes = linux_elf();
+            write_u32(&mut bytes, 64, kind);
+            assert_eq!(ElfImage::parse_linux_static(&bytes), Err(expected));
+        }
+        let mut bytes = linux_elf();
+        write_u32(&mut bytes, 64 + 2 * 56 + 4, 7);
+        assert_eq!(
+            ElfImage::parse_linux_static(&bytes),
+            Err(ElfError::WritableExecutableSegment)
+        );
     }
 
     #[test]

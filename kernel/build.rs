@@ -155,6 +155,15 @@ fn main() {
         return;
     }
 
+    println!("cargo:rerun-if-env-changed=BNDROID_LINUX_APP_ELF");
+    if env::var_os("CARGO_FEATURE_LINUX_ABI_RUNTIME").is_some() {
+        let path = env::var_os("BNDROID_LINUX_APP_ELF")
+            .expect("linux-abi-runtime requires BNDROID_LINUX_APP_ELF; build fixtures/linux-arm64-probe first");
+        let path = canonical_existing(Path::new(&path), "BNDROID_LINUX_APP_ELF");
+        println!("cargo:rerun-if-changed={}", path.display());
+        println!("cargo:rustc-env=BNDR_LINUX_APP_ELF={}", path.display());
+    }
+
     let workspace = manifest_dir
         .parent()
         .expect("kernel manifest must be inside the workspace");
@@ -381,6 +390,11 @@ fn build_embedded_images(
         abi_command
             .arg("--cfg")
             .arg("feature=\"mobile-ui-runtime\"");
+    }
+    if env::var_os("CARGO_FEATURE_LINUX_ABI_RUNTIME").is_some() {
+        abi_command
+            .arg("--cfg")
+            .arg("feature=\"linux-abi-runtime\"");
     }
     if env::var_os("CARGO_FEATURE_ANDROIDBOX_APK_INSTALL0").is_some() {
         abi_command
@@ -844,6 +858,9 @@ fn run_rustc(command: &mut Command, label: &str) {
 }
 
 fn add_userspace_feature_cfgs(command: &mut Command) {
+    if env::var_os("CARGO_FEATURE_LINUX_ABI_RUNTIME").is_some() {
+        command.arg("--cfg").arg("feature=\"linux-abi-runtime\"");
+    }
     if env::var_os("CARGO_FEATURE_MOBILE_UI_RUNTIME").is_some() {
         command.arg("--cfg").arg("feature=\"mobile-ui-runtime\"");
     }

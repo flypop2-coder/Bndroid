@@ -698,6 +698,7 @@ pub fn activate_user_process(
     code_end: usize,
     user_stack_start: usize,
     user_stack_end: usize,
+    initial_stack_pointer: usize,
     translation: crate::arch::aarch64::mmu::TranslationContext,
     argument0: u64,
     argument1: u64,
@@ -722,6 +723,9 @@ pub fn activate_user_process(
         || user_stack_start >= user_stack_end
         || !user_stack_start.is_multiple_of(16)
         || !user_stack_end.is_multiple_of(16)
+        || initial_stack_pointer < user_stack_start
+        || initial_stack_pointer > user_stack_end
+        || !initial_stack_pointer.is_multiple_of(16)
         || translation.asid() == crate::arch::aarch64::mmu::KERNEL_ASID
         || translation.root_address()
             == crate::arch::aarch64::mmu::kernel_translation_context().root_address()
@@ -753,7 +757,13 @@ pub fn activate_user_process(
     USER_DYNAMIC_TERMINATION_REASONS[dynamic_slot].store(0, Ordering::Relaxed);
     clear_dynamic_user_fault_witness(dynamic_slot);
     CONTEXT_PROCESS_IDS[context].store(process_id, Ordering::Relaxed);
-    let frame = build_user_frame(stack_range.1, entry, user_stack_end, argument0, argument1);
+    let frame = build_user_frame(
+        stack_range.1,
+        entry,
+        initial_stack_pointer,
+        argument0,
+        argument1,
+    );
     CONTEXTS[context]
         .saved_frame
         .store(frame, Ordering::Relaxed);

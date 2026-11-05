@@ -184,6 +184,10 @@ extern "C" fn lower_sync_dispatch(frame: *mut TrapFrame) -> *mut TrapFrame {
         if immediate == u64::from(bndr_abi::SVC_USER_SYSCALL) {
             return crate::syscall::dispatch(frame);
         }
+        #[cfg(feature = "linux-abi-runtime")]
+        if crate::process::current_live_user_image_id() == Some(bndr_abi::UserImageId::LinuxApp) {
+            return crate::linux_runtime::reject_svc(frame);
+        }
         return crate::syscall::reject_svc_immediate(frame, immediate);
     }
     if source_mode == 0 {

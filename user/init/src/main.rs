@@ -2023,6 +2023,10 @@ pub fn init_entry(startup_handle: u64, raw_image_id: u64) -> ! {
         process_terminate_self_test()
     }
     wait_for_lower_el_timer_preemption();
+    #[cfg(feature = "linux-abi-runtime")]
+    if ABI_VERSION == 70 {
+        linux_abi_init(startup_handle);
+    }
     #[cfg(feature = "unified-product-runtime")]
     product_runtime::init_runtime(startup_handle);
     #[cfg(all(
@@ -2131,6 +2135,47 @@ fn process_terminate_self_test() -> ! {
         unsafe {
             asm!("wfi", options(nomem, nostack, preserves_flags));
         }
+    }
+}
+
+#[cfg(feature = "linux-abi-runtime")]
+fn linux_abi_init(system_root: u64) -> ! {
+    let mut previous_pid = 0;
+    for _ in 0..2 {
+        let channel = syscall(SyscallNumber::ChannelCreate, 0, 0, 0);
+        if channel.status != Status::Ok.raw() {
+            fail(0x7001);
+        }
+        let child = syscall(
+            SyscallNumber::ProcessSpawn,
+            channel.out2,
+            UserImageId::LinuxApp.raw(),
+            0,
+        );
+        if child.status != Status::Ok.raw() || child.out1 == 0 || child.out1 == previous_pid {
+            fail(0x7002);
+        }
+        previous_pid = child.out1;
+        if syscall(SyscallNumber::HandleClose, channel.out1, 0, 0).status != Status::Ok.raw() {
+            fail(0x7003);
+        }
+        let result = syscall(SyscallNumber::ProcessWait, child.out1, 0, 0);
+        if result.status != Status::Ok.raw()
+            || result.out1 != 0
+            || result.out2 != ProcessTerminationReason::Exited.raw()
+        {
+            fail(0x7100 + result.out1);
+        }
+    }
+    if syscall(SyscallNumber::HandleClose, system_root, 0, 0).status != Status::Ok.raw() {
+        fail(0x7004);
+    }
+    if syscall(SyscallNumber::InitReady, INIT_READY_MAGIC, 0x4c4e5831, 2).status != Status::Ok.raw()
+    {
+        fail(0x7005);
+    }
+    loop {
+        wait_for_lower_el_timer_preemption();
     }
 }
 

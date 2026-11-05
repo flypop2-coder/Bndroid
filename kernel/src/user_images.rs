@@ -7,6 +7,8 @@ static CLIENT_ELF: &[u8] = include_bytes!(env!("BNDR_ECHO_CLIENT_ELF"));
 static SURFACE_SERVER_ELF: &[u8] = include_bytes!(env!("BNDR_SURFACE_SERVER_ELF"));
 static LAUNCHER_ELF: &[u8] = include_bytes!(env!("BNDR_LAUNCHER_ELF"));
 static APP_ELF: &[u8] = include_bytes!(env!("BNDR_APP_ELF"));
+#[cfg(feature = "linux-abi-runtime")]
+static LINUX_APP_ELF: &[u8] = include_bytes!(env!("BNDR_LINUX_APP_ELF"));
 #[cfg(feature = "androidbox-process0")]
 static ANDROID_APP_ELF: &[u8] = include_bytes!(env!("BNDR_ANDROID_APP_ELF"));
 #[cfg(feature = "input-server-runtime")]
@@ -15,6 +17,7 @@ static INPUT_SERVER_ELF: &[u8] = include_bytes!(env!("BNDR_INPUT_SERVER_ELF"));
 static STORAGE_SERVER_ELF: &[u8] = include_bytes!(env!("BNDR_STORAGE_SERVER_ELF"));
 
 pub const IMAGE_COUNT: usize = 7
+    + cfg!(feature = "linux-abi-runtime") as usize
     + cfg!(feature = "androidbox-process0") as usize
     + cfg!(feature = "input-server-runtime") as usize
     + cfg!(feature = "storage-server-runtime") as usize;
@@ -44,6 +47,8 @@ pub fn get(id: UserImageId) -> EmbeddedUserImage {
         UserImageId::SurfaceServer => SURFACE_SERVER_ELF,
         UserImageId::Launcher => LAUNCHER_ELF,
         UserImageId::App => APP_ELF,
+        #[cfg(feature = "linux-abi-runtime")]
+        UserImageId::LinuxApp => LINUX_APP_ELF,
         #[cfg(feature = "androidbox-process0")]
         UserImageId::AndroidApp => ANDROID_APP_ELF,
         #[cfg(feature = "input-server-runtime")]
@@ -71,6 +76,8 @@ pub fn snapshot() -> UserImageCatalogSnapshot {
         get(UserImageId::SurfaceServer),
         get(UserImageId::Launcher),
         get(UserImageId::App),
+        #[cfg(feature = "linux-abi-runtime")]
+        get(UserImageId::LinuxApp),
         #[cfg(feature = "input-server-runtime")]
         get(UserImageId::InputServer),
         #[cfg(feature = "storage-server-runtime")]

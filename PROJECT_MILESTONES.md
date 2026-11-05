@@ -41,6 +41,7 @@ This index follows the milestone locations established on GitHub. English pages 
 | [Layout Directional-17](docs/milestones/androidbox/ANDROIDBOX_LAYOUT_DIRECTIONAL_17.md) | Per-side padding/margins, ABI 67 |
 | [Layout Size-18](docs/milestones/androidbox/ANDROIDBOX_LAYOUT_SIZE_18.md) | Exact positive integer dp dimensions, ABI 68 |
 | [Layout Mixed-19](docs/milestones/androidbox/ANDROIDBOX_LAYOUT_MIXED_19.md) | Fixed-and-weighted horizontal Buttons, ABI 69 |
+| [Linux arm64 entry](docs/milestones/androidbox/LINUX_ARM64_ENTRY.md) | NDK static ELF, Linux startup/syscall subset, native process cleanup, ABI 70; no Bionic or ART startup |
 
 ## Historical OS design records
 

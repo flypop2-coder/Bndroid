@@ -3450,6 +3450,10 @@ pub fn dispatch(frame: *mut TrapFrame) -> *mut TrapFrame {
         panic!("lower-EL syscall dispatcher entered with PAN disabled");
     }
     record_user_asid();
+    #[cfg(feature = "linux-abi-runtime")]
+    if crate::process::current_live_user_image_id() == Some(UserImageId::LinuxApp) {
+        return crate::linux_runtime::dispatch(frame);
+    }
     record_call();
     let (raw_number, arg0, arg1, arg2) =
         unsafe { ((*frame).x[8], (*frame).x[0], (*frame).x[1], (*frame).x[2]) };
@@ -16260,6 +16264,15 @@ fn init_ready(
 ) -> *mut TrapFrame {
     if !crate::process::current_is_init() {
         return complete(frame, Status::PermissionDenied, 0, 0);
+    }
+    #[cfg(feature = "linux-abi-runtime")]
+    if magic == INIT_READY_MAGIC
+        && register_sentinel == 0x4c4e5831
+        && stack_sentinel == 2
+        && with_table(|table| table.is_empty())
+    {
+        INIT_READY.store(true, Ordering::Release);
+        return complete(frame, Status::Ok, 0, 0);
     }
     #[cfg(feature = "process-terminate-self-test")]
     if magic == INIT_READY_MAGIC

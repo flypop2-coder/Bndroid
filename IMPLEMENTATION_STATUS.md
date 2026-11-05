@@ -2,6 +2,14 @@
 
 This page records implemented behavior and validation, with a September 9, 2026 platform baseline and dated updates below. Historical test counts belong to the indicated development runs; they are not a claim that every historical gate was rerun during publication. The [complete original status log](docs/archive/originals/IMPLEMENTATION_STATUS.txt) preserves detailed evidence and earlier milestones. Future tasks belong only in [TODO.md](TODO.md).
 
+## Native arm64 entry update — November 6, 2026
+
+The isolated ABI 70 `linux-abi-runtime` profile loads and executes an NDK-compiled static arm64 ELF in a separate EL0 address space. It supplies a Linux `argc`/`argv`/`envp`/auxv stack, validates mapped program headers, routes Linux syscall numbers by kernel-owned process identity, and implements a small console/time/identity/exit subset. Two successive native processes verify fresh data/BSS, normal exit/reaping, and zero inherited native handles. Live-process accounting includes the new image type, preventing a scheduling-dependent snapshot panic.
+
+The QEMU gate validates 52 Linux calls, eight unsupported calls, two rejected private SVCs, ten invalid-address results, bounded short writes, and an unchanged temporary-disk base. The default workspace's 1,096 host tests, 36 Linux-feature ABI tests, four Linux stack/time tests, default kernel boot, and mobile UI QEMU gate passed. See [native entry scope and reproduction](docs/milestones/androidbox/LINUX_ARM64_ENTRY.md).
+
+The probe supplies its own startup code and does not link Bionic. Dynamic linking, TLS, ART, JNI, Binder, and general APK execution remain unimplemented in this profile; this is a foundation for their integration rather than an Android compatibility milestone completion.
+
 ## Interactive demo update — November 6, 2026
 
 `scripts/run-mobile-ui.sh` provides an offline interactive demo, `--tour` for a guided walkthrough that leaves Home open, and `--headless` for a finite smoke check. It uses a temporary disk overlay and the checked-in Resources-1 APK without requiring an SDK. Build outputs are isolated from the pure-mobile gate; each session retains separate logs, screenshots, and a success summary. Startup and QMP failures are bounded and clean up only the runner's child process.

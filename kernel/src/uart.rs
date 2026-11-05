@@ -10,6 +10,16 @@ const FLAG_TX_FIFO_FULL: u32 = 1 << 5;
 pub struct Uart;
 
 impl Uart {
+    #[cfg(feature = "linux-abi-runtime")]
+    pub fn write_bytes(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            if byte == b'\n' {
+                self.write_byte(b'\r');
+            }
+            self.write_byte(byte);
+        }
+    }
+
     fn write_byte(&mut self, byte: u8) {
         let flags = (UART0_BASE + FLAG_REGISTER) as *const u32;
         while unsafe { read_volatile(flags) } & FLAG_TX_FIFO_FULL != 0 {

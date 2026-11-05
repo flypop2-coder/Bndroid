@@ -30,6 +30,7 @@ pub mod input_server_restart_trace;
     feature = "service-dependency-runtime"
 ))]
 pub mod input_surface_recovery_trace;
+pub mod linux_abi;
 pub mod memory;
 pub mod object;
 pub mod object_wait;

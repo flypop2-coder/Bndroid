@@ -5,6 +5,7 @@ edition = "2024"
 
 [features]
 default = []
+linux-abi-runtime = []
 mobile-ui-runtime = []
 androidbox-apk-install0 = ["mobile-ui-runtime"]
 androidbox-el0-runtime0 = ["androidbox-apk-install0"]

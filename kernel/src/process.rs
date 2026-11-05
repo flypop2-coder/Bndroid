@@ -538,6 +538,10 @@ pub struct ProcessSnapshot {
     pub android_app_handles: usize,
     #[cfg(feature = "androidbox-process0")]
     pub android_app_authority: AndroidAppAuthorityEvidence,
+    #[cfg(feature = "linux-abi-runtime")]
+    pub linux_app_live: u64,
+    #[cfg(feature = "linux-abi-runtime")]
+    pub linux_app_handles: usize,
     pub total_handles: usize,
     pub resident_control_links_valid: bool,
     pub resident_control_queues_empty: bool,
@@ -1091,6 +1095,18 @@ fn commit_prepared_spawn(
     }
     process.startup_handle = Some(child_startup_handle);
 
+    #[cfg(feature = "linux-abi-runtime")]
+    if image_id == UserImageId::LinuxApp {
+        // Linux applications have a separate descriptor ABI and inherit no
+        // Bndroid capability. Consume the spawn channel, then drop it before
+        // making the process runnable.
+        process
+            .handles
+            .close(child_startup_handle)
+            .expect("Linux startup channel exists");
+        process.startup_handle = None;
+    }
+
     slots_mut()[process_slot].process = Some(process);
     STARTUP_MOVES.fetch_add(1, Ordering::Relaxed);
     CHILD_HANDLE_ISOLATED.store(true, Ordering::Relaxed);
@@ -1175,6 +1191,10 @@ fn commit_prepared_spawn(
         }
     }
 
+    #[cfg(feature = "linux-abi-runtime")]
+    let linux_entry = image_id == UserImageId::LinuxApp;
+    #[cfg(not(feature = "linux-abi-runtime"))]
+    let linux_entry = false;
     scheduler::activate_user_process(
         pending,
         dynamic_slot,
@@ -1184,9 +1204,14 @@ fn commit_prepared_spawn(
         info.code_end,
         info.stack_start,
         info.stack_end,
+        info.initial_stack_pointer,
         translation,
-        u64::from(child_startup_handle.raw()),
-        image_id.raw(),
+        if linux_entry {
+            0
+        } else {
+            u64::from(child_startup_handle.raw())
+        },
+        if linux_entry { 0 } else { image_id.raw() },
     );
     Ok(id)
 }
@@ -2837,6 +2862,8 @@ fn collect_androidbox_interactive_graphics_evidence(
                     | UserImageId::StorageServer => None,
                     #[cfg(feature = "androidbox-process0")]
                     UserImageId::AndroidApp => None,
+                    #[cfg(feature = "linux-abi-runtime")]
+                    UserImageId::LinuxApp => None,
                 };
                 if let Some(role_index) = role_index {
                     evidence.producer_role_counts[role_index] = evidence.producer_role_counts
@@ -2912,11 +2939,28 @@ pub fn snapshot() -> ProcessSnapshot {
     let mut android_app_live = 0_u64;
     #[cfg(feature = "androidbox-process0")]
     let mut android_app_handles = 0_usize;
+    #[cfg(feature = "linux-abi-runtime")]
+    let mut linux_app_live = 0_u64;
+    #[cfg(feature = "linux-abi-runtime")]
+    let mut linux_app_handles = 0_usize;
     let mut total_handles = 0_usize;
     for process in slots_ref()
         .iter()
         .filter_map(|slot| slot.process.as_deref())
     {
+        #[cfg(feature = "linux-abi-runtime")]
+        if process.image_id == UserImageId::LinuxApp {
+            linux_app_live = linux_app_live
+                .checked_add(1)
+                .unwrap_or_else(|| panic!("LinuxApp live count overflowed"));
+            linux_app_handles = linux_app_handles
+                .checked_add(process.handles.len())
+                .unwrap_or_else(|| panic!("LinuxApp handle count overflowed"));
+            total_handles = total_handles
+                .checked_add(process.handles.len())
+                .unwrap_or_else(|| panic!("live process handle count overflowed"));
+            continue;
+        }
         #[cfg(feature = "storage-server-runtime")]
         if process.image_id == UserImageId::StorageServer {
             storage_server_live = storage_server_live
@@ -3059,6 +3103,10 @@ pub fn snapshot() -> ProcessSnapshot {
         android_app_handles,
         #[cfg(feature = "androidbox-process0")]
         android_app_authority: resident.android_app_authority,
+        #[cfg(feature = "linux-abi-runtime")]
+        linux_app_live,
+        #[cfg(feature = "linux-abi-runtime")]
+        linux_app_handles,
         total_handles,
         // Compatibility aliases carry the selected baseline/final service
         // graph, all-queue, and exact-token semantics.
@@ -4779,6 +4827,10 @@ fn collect_resident_topology(
                     }
                     #[cfg(feature = "androidbox-process0")]
                     UserImageId::AndroidApp => {
+                        graphics_buffer_rights_valid = false;
+                    }
+                    #[cfg(feature = "linux-abi-runtime")]
+                    UserImageId::LinuxApp => {
                         graphics_buffer_rights_valid = false;
                     }
                 }

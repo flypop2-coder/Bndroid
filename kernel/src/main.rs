@@ -8,6 +8,7 @@
     any(
         bndroid_storage_irq_timeout_profile,
         feature = "process-terminate-self-test",
+        feature = "linux-abi-runtime",
         feature = "app-lifecycle-runtime",
         feature = "mobile-ui-runtime",
         feature = "storage-server-runtime"
@@ -176,6 +177,8 @@ mod input_stream;
 mod interrupt;
 mod kernel_heap;
 mod limits;
+#[cfg(feature = "linux-abi-runtime")]
+mod linux_runtime;
 mod log;
 #[cfg(feature = "androidbox-apk-install0")]
 mod package_manager;
@@ -11070,6 +11073,10 @@ pub extern "C" fn kernel_main(dtb_address: usize, boot_exception_level: u64) -> 
         });
     let user_info = userboot::start()
         .unwrap_or_else(|error| fatal_boot_error("EL0 init activation failed", error.as_str()));
+    #[cfg(feature = "linux-abi-runtime")]
+    if bndr_abi::ABI_VERSION == 70 {
+        linux_runtime::monitor();
+    }
     crate::kprintln!(
         "USER_MAP_OK code={:#018x} entry={:#018x} code_end={:#018x} code_bytes={} code_pa={:#018x} stack={:#018x} stack_end={:#018x} stack_pages={} stack_pa={:#018x} guard_low={:#018x} guard_high={:#018x} guards_unmapped=2 mapped_pages={} unique_frames={} leafs_verified={}",
         user_info.code_start,

@@ -1,6 +1,18 @@
 #![no_std]
 
 #[cfg(all(
+    feature = "linux-abi-runtime",
+    any(
+        feature = "mobile-ui-runtime",
+        feature = "app-data-runtime",
+        feature = "storage-server-runtime"
+    )
+))]
+compile_error!("linux-abi-runtime currently requires its isolated native process profile");
+#[cfg(feature = "linux-abi-runtime")]
+pub const ABI_VERSION: u64 = 70;
+
+#[cfg(all(
     feature = "androidbox-apk-install0",
     any(feature = "app-data-runtime", feature = "storage-server-runtime")
 ))]
@@ -254,6 +266,7 @@ pub const ABI_VERSION: u64 = 24;
 ))]
 pub const ABI_VERSION: u64 = 24;
 #[cfg(not(any(
+    feature = "linux-abi-runtime",
     feature = "androidbox-apk-install0",
     feature = "storage-server-runtime",
     feature = "app-data-runtime",
@@ -6377,6 +6390,10 @@ pub enum UserImageId {
     /// graphics-buffer, input, storage, or package-manager capability.
     #[cfg(feature = "androidbox-process0")]
     AndroidApp = 10,
+    /// A native executable using Linux arm64 syscall and process-entry ABIs.
+    /// Its syscall numbers must never be dispatched as Bndroid operations.
+    #[cfg(feature = "linux-abi-runtime")]
+    LinuxApp = 11,
 }
 
 /// Stable node identities for M66's authenticated resident shutdown graph.
@@ -6483,6 +6500,8 @@ impl UserImageId {
             9 => Some(Self::StorageServer),
             #[cfg(feature = "androidbox-process0")]
             10 => Some(Self::AndroidApp),
+            #[cfg(feature = "linux-abi-runtime")]
+            11 => Some(Self::LinuxApp),
             _ => None,
         }
     }
@@ -7869,11 +7888,14 @@ mod tests {
         ))]
         assert_eq!(ABI_VERSION, 24);
         #[cfg(not(any(
+            feature = "linux-abi-runtime",
             feature = "storage-server-runtime",
             feature = "app-data-runtime",
             feature = "mobile-ui-runtime"
         )))]
         assert_eq!(ABI_VERSION, 23);
+        #[cfg(feature = "linux-abi-runtime")]
+        assert_eq!(ABI_VERSION, 70);
         let stable = [
             SyscallNumber::AbiVersion,
             SyscallNumber::ChannelCreate,
@@ -12926,6 +12948,11 @@ mod tests {
         }
 
         assert_eq!(UserImageId::from_raw(0), None);
+        #[cfg(feature = "linux-abi-runtime")]
+        {
+            assert_eq!(UserImageId::from_raw(11), Some(UserImageId::LinuxApp));
+            assert!(UserImageId::LinuxApp.is_spawnable());
+        }
         #[cfg(feature = "androidbox-process0")]
         {
             assert_eq!(UserImageId::AndroidApp.raw(), 10);

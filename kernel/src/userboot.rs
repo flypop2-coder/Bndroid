@@ -112,6 +112,7 @@ pub struct UserBootInfo {
     pub file_bytes: usize,
     pub stack_start: usize,
     pub stack_end: usize,
+    pub initial_stack_pointer: usize,
     pub stack_pages: usize,
     pub mapped_pages: usize,
     pub verified_leaf_pages: usize,
@@ -233,6 +234,20 @@ pub(crate) fn prepare_image(
     let private_table_frames = address_space.private_table_frames();
     let mapped_pages = address_space.mapped_page_count();
     let address_space_tlb_invalidations = mmu::address_space_tlb_invalidations();
+    #[cfg(feature = "linux-abi-runtime")]
+    let initial_stack_pointer = if image_id == UserImageId::LinuxApp {
+        match populate_linux_stack(&address_space, &image) {
+            Ok(pointer) => pointer,
+            Err(error) => {
+                release_unpublished_address_space(address_space)?;
+                return Err(error);
+            }
+        }
+    } else {
+        USER_STACK_END
+    };
+    #[cfg(not(feature = "linux-abi-runtime"))]
+    let initial_stack_pointer = USER_STACK_END;
     let info = UserBootInfo {
         image_id: image.image_id,
         image_digest: image.image_digest,
@@ -252,6 +267,7 @@ pub(crate) fn prepare_image(
         file_bytes: image.file_bytes,
         stack_start: USER_STACK_START,
         stack_end: USER_STACK_END,
+        initial_stack_pointer,
         stack_pages: USER_STACK_PAGES,
         mapped_pages,
         verified_leaf_pages,
@@ -357,6 +373,50 @@ fn populate_stack_pages(mappings: &mut OwnedUserMappings) -> Result<(), UserBoot
         virtual_address += PAGE_SIZE;
     }
     Ok(())
+}
+
+#[cfg(feature = "linux-abi-runtime")]
+fn populate_linux_stack(
+    address_space: &UserAddressSpace,
+    image: &EmbeddedImage<'_>,
+) -> Result<usize, UserBootError> {
+    let elf = ElfImage::parse_linux_static(crate::user_images::get(image.image_id).bytes)
+        .map_err(UserBootError::Elf)?;
+    let pointer = USER_STACK_END - PAGE_SIZE;
+    let physical = address_space
+        .page_physical(pointer)
+        .ok_or(UserBootError::InvalidImage)?;
+    // SAFETY: this whole stack page belongs to the unpublished address space.
+    // No userspace thread or other writer can access it before publication.
+    let output = unsafe { &mut *(physical as *mut [u8; PAGE_SIZE]) };
+    bndroid_kernel::linux_abi::initial_stack(
+        output,
+        pointer as u64,
+        &[b"/system/bin/linux-probe", b"--verify"],
+        &[b"LANG=C"],
+        &[
+            (
+                3,
+                elf.program_header_address()
+                    .ok_or(UserBootError::InvalidImage)?,
+            ),
+            (4, 56),
+            (5, elf.program_header_count() as u64),
+            (6, PAGE_SIZE as u64),
+            (7, 0),
+            (9, elf.entry()),
+            (11, 10000),
+            (12, 10000),
+            (13, 10000),
+            (14, 10000),
+            (16, 0),
+            (17, 100),
+            (23, 0),
+            (26, 0),
+        ],
+    )
+    .map_err(|_| UserBootError::InvalidImage)?;
+    Ok(pointer)
 }
 
 fn push_mapping(
@@ -483,8 +543,18 @@ fn embedded_image(image_id: UserImageId) -> Result<Box<EmbeddedImage<'static>>, 
     if catalog_image.id != image_id {
         return Err(UserBootError::InvalidImage);
     }
-    let elf = ElfImage::parse(catalog_image.bytes).map_err(UserBootError::Elf)?;
-    if elf.load_segment_count() != 3
+    #[cfg(feature = "linux-abi-runtime")]
+    let linux = image_id == UserImageId::LinuxApp;
+    #[cfg(not(feature = "linux-abi-runtime"))]
+    let linux = false;
+    let elf = if linux {
+        ElfImage::parse_linux_static(catalog_image.bytes)
+    } else {
+        ElfImage::parse(catalog_image.bytes)
+    }
+    .map_err(UserBootError::Elf)?;
+    if (!linux && elf.load_segment_count() != 3)
+        || elf.load_segment_count() > MAX_LOAD_SEGMENTS
         || elf.load_page_count() == 0
         || elf.load_page_count() > mmu::MAX_USER_LOAD_PAGES
     {
@@ -544,8 +614,12 @@ fn embedded_image(image_id: UserImageId) -> Result<Box<EmbeddedImage<'static>>, 
             UserPageAccess::ReadExecute => {
                 rx_segments += 1;
                 rx_pages += pages;
-                code_start = virtual_start;
-                code_end = memory_end;
+                code_start = if rx_segments == 1 {
+                    virtual_start
+                } else {
+                    min(code_start, virtual_start)
+                };
+                code_end = max(code_end, memory_end);
             }
             UserPageAccess::ReadOnly => {
                 ro_segments += 1;
@@ -570,14 +644,16 @@ fn embedded_image(image_id: UserImageId) -> Result<Box<EmbeddedImage<'static>>, 
     }
 
     let entry = usize::try_from(elf.entry()).map_err(|_| UserBootError::InvalidImage)?;
-    if rx_segments != 1
-        || ro_segments != 1
-        || rw_segments != 1
-        || segments[0].is_none_or(|segment| segment.access != UserPageAccess::ReadExecute)
-        || segments[1].is_none_or(|segment| segment.access != UserPageAccess::ReadOnly)
-        || segments[2].is_none_or(|segment| segment.access != UserPageAccess::ReadWrite)
-        || !rw_has_bss
-        || bss_bytes == 0
+    if rx_segments == 0
+        || (!linux
+            && (rx_segments != 1
+                || ro_segments != 1
+                || rw_segments != 1
+                || !rw_has_bss
+                || bss_bytes == 0
+                || segments[0].is_none_or(|segment| segment.access != UserPageAccess::ReadExecute)
+                || segments[1].is_none_or(|segment| segment.access != UserPageAccess::ReadOnly)
+                || segments[2].is_none_or(|segment| segment.access != UserPageAccess::ReadWrite)))
         || code_start > entry
         || entry >= code_end
         || !code_start.is_multiple_of(4)
