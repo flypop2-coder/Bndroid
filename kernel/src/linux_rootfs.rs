@@ -14,7 +14,11 @@ use core::{
 };
 
 use bndroid_kernel::linux_fs::{Archive, Kind, Node, Path};
-const ROOTFS_BYTES: usize = 8 * 1024 * 1024;
+const ROOTFS_BYTES: usize = if cfg!(feature = "art-runtime") {
+    96 * 1024 * 1024
+} else {
+    8 * 1024 * 1024
+};
 const DIRECTORY_BYTES: usize = FILE_DIRECTORY_HEADER_BYTES + 64 * FILE_ENTRY_BYTES;
 #[repr(align(4096))]
 struct Storage(UnsafeCell<[u8; ROOTFS_BYTES]>);
@@ -56,7 +60,7 @@ pub fn init(region: Option<FwCfgMmioRegion>) -> Result<(), &'static str> {
         .map_err(|_| "ambiguous rootfs input")?
         .ok_or("missing runtime rootfs input")?;
     if file.size as usize > ROOTFS_BYTES {
-        return Err("runtime rootfs exceeds 8 MiB");
+        return Err("runtime rootfs exceeds profile byte limit");
     }
     transport
         .dma_read(

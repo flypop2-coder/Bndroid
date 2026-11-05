@@ -2,6 +2,14 @@
 
 This page records implemented behavior and validation, with a September 9, 2026 platform baseline and dated updates below. Historical test counts belong to the indicated development runs; they are not a claim that every historical gate was rerun during publication. The [complete original status log](docs/archive/originals/IMPLEMENTATION_STATUS.txt) preserves detailed evidence and earlier milestones. Future tasks belong only in [TODO.md](TODO.md).
 
+## ART frontend and memory update — November 6, 2026
+
+The separate `art-runtime` profile loads the installed Android 16 `dalvikvm64`, `libart.so` and required shared libraries without modifying them. ART's own help/parser completes in two distinct process generations, both exiting zero with no remaining sparse pages/tables, file descriptions or thread resources. An owned native gate also validates 64 MiB below 4 GiB, protection and hole handling, shared anonymous memory across a pthread, rejected kernel/cross-arena mappings, allocation bounds and complete reaping. The runtime source and local-only distribution boundary are frozen in [ADR 0001](docs/decisions/0001-android-runtime-baseline.md).
+
+The real Java/DEX startup reaches ART initialization and aborts because `/proc/self/stat` is missing. This remains a failing gate with a recorded abort message and zero-resource cleanup; no Java, ActivityThread, Framework or general APK success is claimed. See [ART Frontend-0](docs/milestones/androidbox/ART_FRONTEND_0.md) and the [fixture guide](fixtures/art-runtime/README.md) for separate frontend, memory and managed modes.
+
+Validation passed: 1,117 default workspace host tests, all 383 kernel-library tests under the ART feature (including seven VM model tests), five ART evidence-parser tests, four existing UART parser tests, ART library and complete AArch64 kernel Clippy with warnings denied, the raw Linux/static Bionic gates, all four dynamic pthread lifecycle gates, EOF fault containment, native boot, and the mobile UI gate. An altered runtime input is rejected before archive creation. The positive frontend evidence is `target/art-runtime/check.GxjRwC`; the final memory evidence is `check.vYJPbH`; the managed failure and cleanup are `check.lVxIsp`. These generated inputs/logs remain local and ignored by Git.
+
 ## Bionic pthread update — November 6, 2026
 
 The existing dynamic profile now creates real Bionic pthreads sharing a process address space and file table, with separate kernel stacks, TIDs, TLS, signal masks, and clear-TID state. Futex waits/wakes/bitsets, monotonic deadlines, sleeping, yielding, join, and detach execute through the scheduler. Native process resources remain alive until the entire thread group stops.

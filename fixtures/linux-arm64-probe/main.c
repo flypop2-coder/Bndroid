@@ -93,7 +93,8 @@ int linux_probe_main(const uint64_t *stack) {
     CHECK(call(__NR_clock_gettime, 1, (long)"read-only", 0) == -EFAULT, 39);
     struct utsname name;
     CHECK(call(__NR_uname, (long)&name, 0, 0) == 0, 40);
-    CHECK(equal(name.machine, "aarch64") && equal(name.sysname, "Bndroid"), 41);
+    CHECK(equal(name.machine, "aarch64") && equal(name.sysname, "Linux") &&
+          equal(name.release, "0.1.0-bndroid"), 41);
     CHECK(call(__NR_uname, 0, 0, 0) == -EFAULT, 42);
     char bounded_write[301];
     for (int index = 0; index < 300; ++index) bounded_write[index] = '.';

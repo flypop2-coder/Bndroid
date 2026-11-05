@@ -30,7 +30,11 @@ pub const HEAP_PAGES: usize = 128;
 ))]
 pub const HEAP_PAGES: usize = 64;
 #[cfg(feature = "bionic-dynamic-runtime")]
-pub const HEAP_PAGES: usize = 512;
+pub const HEAP_PAGES: usize = if cfg!(feature = "art-runtime") {
+    2048
+} else {
+    512
+};
 pub const HEAP_BYTES: usize = HEAP_PAGES * PAGE_SIZE;
 #[cfg(feature = "heap-partial-map-failure-self-test")]
 pub const HEAP_ROLLBACK_TEST_PAGES: usize = 17;

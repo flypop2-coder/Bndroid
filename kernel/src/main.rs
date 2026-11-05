@@ -23794,7 +23794,10 @@ fn validate_kernel_heap(frame_baseline: &memory::FrameAllocatorStats) {
         || info.backing_pages != kernel_heap::HEAP_PAGES
         || vm_after.maps - vm_before.maps != kernel_heap::HEAP_PAGES as u64
         || vm_after.unmaps != vm_before.unmaps
-        || table_frames != 1
+        || table_frames as usize
+            != ((kernel_heap::HEAP_START + kernel_heap::HEAP_BYTES - 1) >> 21)
+                - (kernel_heap::HEAP_START >> 21)
+                + 1
         || frame_after_init.allocated_frames
             != frame_baseline.allocated_frames + kernel_heap::HEAP_PAGES + table_frames as usize
     {

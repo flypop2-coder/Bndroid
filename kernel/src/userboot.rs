@@ -415,25 +415,20 @@ fn populate_linux_stack(
     } else {
         0
     };
-    let arguments: &[&[u8]] = if cfg!(feature = "bionic-dynamic-runtime") {
-        &[
-            b"/apex/com.android.runtime/bin/linker64",
-            b"/system/bin/dynamic-probe",
-            b"--verify",
-        ]
-    } else if cfg!(feature = "bionic-runtime") {
+    #[cfg(feature = "bionic-dynamic-runtime")]
+    mod launch {
+        include!(env!("BNDR_LINUX_LAUNCH_RS"));
+    }
+    #[cfg(feature = "bionic-dynamic-runtime")]
+    let (arguments, environment) = (launch::ARGUMENTS, launch::ENVIRONMENT);
+    #[cfg(not(feature = "bionic-dynamic-runtime"))]
+    let arguments: &[&[u8]] = if cfg!(feature = "bionic-runtime") {
         &[b"/system/bin/bionic-probe", b"--verify"]
     } else {
         &[b"/system/bin/linux-probe", b"--verify"]
     };
-    let environment: &[&[u8]] = if cfg!(feature = "bionic-dynamic-runtime") {
-        &[
-            b"LANG=C",
-            b"LD_LIBRARY_PATH=/apex/com.android.runtime/lib64/bionic:/system/lib64",
-        ]
-    } else {
-        &[b"LANG=C"]
-    };
+    #[cfg(not(feature = "bionic-dynamic-runtime"))]
+    let environment: &[&[u8]] = &[b"LANG=C"];
     bndroid_kernel::linux_abi::initial_stack_with_random(
         output,
         pointer as u64,

@@ -152,8 +152,9 @@ Tasks follow dependencies, not optimistic calendar dates. Each stage requires co
 - [x] Run unmodified local NDK Bionic static startup and a C program with ELF TLS, Scudo allocation, stdio, constructors/destructors, sparse anonymous mappings, tagged pointers, host entropy, and complete process mapping cleanup. This does not include ART or general APK execution.
 - [x] Execute an NDK PIE with unmodified local Android linker/shared Bionic, dynamically loaded plugin TLS, bounded immutable runtime files, shared descriptor offsets, private file mappings, and normal/fault cleanup. APK JNI loading and ART remain open.
 - [x] Run real Bionic pthreads with shared process ownership, private TLS, futex synchronization, join/detach, timed waits, leader-first exit, worker group exit, and worker-fault cleanup. Signal delivery, advanced futex modes, and ART remain open.
-- [ ] Write an ADR selecting the Android baseline, source/prebuilt strategy, licensing, updates, and maintenance budget before authorized acquisition.
+- [x] Record the initial local-prebuilt baseline, source strategy, provenance/distribution boundaries, update gates, and resource envelope in [ADR 0001](docs/decisions/0001-android-runtime-baseline.md). No AOSP download or repository binary import is part of this decision.
 - [ ] Boot minimal ART/Bionic userspace and test a restricted Linux ABI personality.
+- [x] Load unmodified local ART through its own `dalvikvm64` frontend, verify two normal help/cleanup cycles, and validate low-address/shared memory prerequisites. Managed VM startup still fails on missing `/proc/self/stat`; this does not complete A1.
 - [ ] Implement Binder identity, transaction/reply/death, and capability mapping.
 - [ ] Run a non-customized managed APK through ActivityThread and Framework.
 - [ ] Run a JNI/native-library APK with W^X, RELRO, ASLR, and crash-isolation checks.

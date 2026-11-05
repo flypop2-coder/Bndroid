@@ -19,7 +19,7 @@ The pure stack/time helpers are in `kernel/src/linux_abi.rs`; the AArch64 dispat
 | `write` (64) | stdout/stderr only, at most 256 bytes per call, positive short writes, validated user reads |
 | `exit`, `exit_group` (93, 94) | Single-thread process exit, low eight bits of status, normal supervisor wait/reap |
 | `clock_gettime` (113) | `CLOCK_MONOTONIC` only, using the architectural timer, validated user writes |
-| `uname` (160) | Explicit Bndroid identity and `aarch64` machine name |
+| `uname` (160) | Linux-personality identity, `0.1.0-bndroid` release and `aarch64` machine name (updated during ART bring-up) |
 | `getpid`, `gettid` (172, 178) | Current process slot ID; this profile has one thread per process |
 | `getppid` (173) | Init identity 1 in this supervisor-only profile |
 | `getuid`, `geteuid`, `getgid`, `getegid` (174–177) | One application principal, ID 10000 |

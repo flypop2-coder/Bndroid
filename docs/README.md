@@ -20,6 +20,7 @@ Public Markdown documentation is maintained in English. Paths already establishe
 | `docs/milestones/androidbox/` | AndroidBox compatibility milestones |
 | `docs/milestones/ui/` | Mobile UI and graphics evidence summaries |
 | `docs/assets/` | Published documentation images |
+| `docs/decisions/` | Current architecture and integration decisions |
 | `docs/archive/originals/` | Verbatim original-language historical records in text format |
 | `crates/bndr-ui/assets/` | UI font binary asset |
 | `target/` (ignored) | Local build outputs, logs, and generated evidence |
@@ -33,5 +34,6 @@ Public Markdown documentation is maintained in English. Paths already establishe
 - [Real static Bionic startup and native runtime checks](milestones/androidbox/BIONIC_STATIC_0.md)
 - [Android dynamic linker, shared Bionic, and runtime files](milestones/androidbox/BIONIC_DYNAMIC_0.md)
 - [Bionic threads, futex synchronization, and group cleanup](milestones/androidbox/BIONIC_THREADS_0.md)
+- [ART frontend loading and low-address memory](milestones/androidbox/ART_FRONTEND_0.md)
 
 Historical pages report their original profile and validation date, not universal compatibility or a fresh test run. See [the archive policy](archive/README.md) for source preservation.

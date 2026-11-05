@@ -39,6 +39,7 @@ def main():
     parser.add_argument("--sdk", type=Path, default=Path(os.environ.get("ANDROID_SDK_ROOT", os.environ.get("ANDROID_HOME", str(Path.home() / "Library/Android/sdk")))))
     parser.add_argument("--system-image", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--include-art", action="store_true", help="Also inventory and extract bounded ART/core-Java runtime inputs")
     args = parser.parse_args()
     sdk, image, output = args.sdk.resolve(), args.system_image.resolve(), args.output.resolve()
     properties = (image / "source.properties").read_text()
@@ -114,6 +115,9 @@ def main():
                     shutil.copyfile(notice, output / "source-NOTICE.txt")
                     receipt["notice_sha256"] = hashlib.sha256(notice.read_bytes()).hexdigest()
                 (output / "provenance.json").write_text(json.dumps(receipt, indent=2) + "\n")
+                if args.include_art:
+                    from android_art_inputs import extract_art
+                    extract_art(command, output, sdk, receipt)
                 print(f"BIONIC_RUNTIME_EXTRACT_OK source={fingerprint} path={output}", flush=True)
             finally:
                 # Terminate the Popen owner directly: never kill a possibly

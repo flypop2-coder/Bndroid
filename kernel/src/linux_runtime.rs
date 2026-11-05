@@ -12,6 +12,10 @@ static BAD_ADDRESS: AtomicU64 = AtomicU64::new(0);
 static PRIVATE_SVC: AtomicU64 = AtomicU64::new(0);
 static WRITTEN: AtomicU64 = AtomicU64::new(0);
 static EXITS: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "linux-syscall-trace")]
+static ABORT_MAPPING: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "linux-syscall-trace")]
+static ABORT_OWNER: AtomicU64 = AtomicU64::new(0);
 
 pub fn dispatch(frame: *mut TrapFrame) -> *mut TrapFrame {
     assert_eq!(
@@ -25,6 +29,8 @@ pub fn dispatch(frame: *mut TrapFrame) -> *mut TrapFrame {
     CALLS.fetch_add(1, Ordering::Relaxed);
     // SAFETY: the common SVC path validated this process's saved TrapFrame.
     let registers = unsafe { (*frame).x };
+    #[cfg(feature = "linux-syscall-trace")]
+    trace_abort(&registers);
     #[cfg(feature = "bionic-dynamic-runtime")]
     if let Some(next) = crate::scheduler::linux_threads::dispatch(frame, &registers) {
         return next;
@@ -54,6 +60,11 @@ pub fn dispatch(frame: *mut TrapFrame) -> *mut TrapFrame {
         66 => writev(registers[0], registers[1], registers[2]),
         96 => crate::process::linux_set_tid_address(user_address(registers[0])),
         278 => getrandom(registers[0], registers[1], registers[2]),
+        #[cfg(feature = "art-runtime")]
+        227 => crate::process::with_current_linux_address_space(|space| {
+            space.linux_msync(registers[0], registers[1], registers[2])
+        })
+        .unwrap_or_else(errno),
         215 | 222 | 226 => {
             let result =
                 crate::process::with_current_linux_address_space(|space| match registers[8] {
@@ -110,6 +121,48 @@ pub fn dispatch(frame: *mut TrapFrame) -> *mut TrapFrame {
         }
     };
     complete(frame, result)
+}
+
+#[cfg(feature = "linux-syscall-trace")]
+fn trace_abort(registers: &[u64; 31]) {
+    // Bionic publishes its fatal message in a named private mapping. This
+    // opt-in debugger observes it without implementing PR_SET_VMA or changing
+    // guest behavior. Bound every read and retain process-generation ownership.
+    let owner = crate::process::current_live_user_process_id().unwrap();
+    if registers[8] == 167 && registers[0] == 0x53564d41 && registers[1] == 0 {
+        let name = user_address(registers[4]);
+        let mut bytes = [0; 14];
+        if crate::process::current_user_range_is_readable(name, bytes.len())
+            && usercopy::copy_from_user(&mut bytes, name).is_ok()
+            && &bytes == b"abort message\0"
+        {
+            ABORT_MAPPING.store(user_address(registers[2]), Ordering::Relaxed);
+            ABORT_OWNER.store(owner, Ordering::Relaxed);
+        }
+    }
+    if matches!(registers[8], 93 | 94 | 131 | 240) && ABORT_OWNER.load(Ordering::Relaxed) == owner {
+        let address = ABORT_MAPPING.swap(0, Ordering::Relaxed);
+        if address == 0 {
+            return;
+        }
+        let mut bytes = [0; 256];
+        if crate::process::current_user_range_is_readable(address, bytes.len())
+            && usercopy::copy_from_user(&mut bytes, address).is_ok()
+            && u64::from_le_bytes(bytes[..8].try_into().unwrap()) == 0xb18e40886ac388f0
+            && u64::from_le_bytes(bytes[8..16].try_into().unwrap()) == 0xc6dfba755a1de0b5
+            && u64::from_le_bytes(bytes[16..24].try_into().unwrap()) >= 25
+        {
+            // Skip the magic and size fields. The message itself is an ASCII
+            // diagnostic in current Bionic, truncated safely at this boundary.
+            let end = bytes[24..]
+                .iter()
+                .position(|b| *b == 0)
+                .map_or(bytes.len(), |n| n + 24);
+            if let Ok(message) = core::str::from_utf8(&bytes[24..end]) {
+                crate::kprintln!("LINUX_ABORT_MESSAGE pid={} message={}", owner, message);
+            }
+        }
+    }
 }
 
 pub fn reject_svc(frame: *mut TrapFrame) -> *mut TrapFrame {
@@ -304,9 +357,9 @@ fn getrlimit(resource: u64, address: u64) -> u64 {
 fn uname(address: u64) -> u64 {
     let mut bytes = [0; 65 * 6];
     for (index, value) in [
-        "Bndroid",
+        "Linux",
         "bndroid",
-        "0.1.0",
+        "0.1.0-bndroid",
         "Linux ABI compatibility",
         "aarch64",
         "",

@@ -122,7 +122,12 @@ fn main() {
         "cargo:rustc-link-arg-bin=bndroid-kernel=-T{}",
         linker_script.display()
     );
-    let kernel_bss_limit = if env::var_os("CARGO_FEATURE_ANDROIDBOX_INTERACTIVE0").is_some() {
+    let kernel_bss_limit = if env::var_os("CARGO_FEATURE_ART_RUNTIME").is_some() {
+        // The measured local ART/core-Java input is 69 MiB. Reserve a 96 MiB
+        // immutable rootfs inside a 128 MiB RW/NX image window, with 512 MiB
+        // guest RAM. Native and Bionic-only profiles keep their prior limits.
+        "0x48000000"
+    } else if env::var_os("CARGO_FEATURE_ANDROIDBOX_INTERACTIVE0").is_some() {
         // Interactive-0 adds one fixed 4,608,000-byte SurfaceServer chrome
         // backing. Keep that opt-in profile inside an explicit 24 MiB
         // non-executable BSS window without relaxing predecessor profiles.
@@ -156,6 +161,10 @@ fn main() {
     }
 
     println!("cargo:rerun-if-env-changed=BNDROID_LINUX_APP_ELF");
+    println!("cargo:rerun-if-env-changed=BNDROID_LINUX_LAUNCH_CONFIG");
+    if env::var_os("CARGO_FEATURE_BIONIC_DYNAMIC_RUNTIME").is_some() {
+        configure_linux_launch();
+    }
     if env::var_os("CARGO_FEATURE_LINUX_ABI_RUNTIME").is_some() {
         let path = env::var_os("BNDROID_LINUX_APP_ELF")
             .expect("linux-abi-runtime requires BNDROID_LINUX_APP_ELF; build fixtures/linux-arm64-probe first");
@@ -855,6 +864,80 @@ fn run_rustc(command: &mut Command, label: &str) {
         .status()
         .unwrap_or_else(|error| panic!("failed to invoke rustc for {label}: {error}"));
     assert!(status.success(), "building {label} failed");
+}
+
+fn configure_linux_launch() {
+    let (mut arguments, mut environment) = (Vec::<String>::new(), Vec::<String>::new());
+    if let Some(path) = env::var_os("BNDROID_LINUX_LAUNCH_CONFIG") {
+        let path = canonical_existing(Path::new(&path), "BNDROID_LINUX_LAUNCH_CONFIG");
+        println!("cargo:rerun-if-changed={}", path.display());
+        let input = fs::read_to_string(path).expect("read Linux launch configuration");
+        for line in input
+            .lines()
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        {
+            assert!(!line.contains('\0'), "NUL in Linux launch configuration");
+            if let Some(value) = line.strip_prefix("arg=") {
+                arguments.push(value.to_owned());
+            } else if let Some(value) = line.strip_prefix("env=") {
+                assert!(value.contains('='), "environment entry needs NAME=value");
+                environment.push(value.to_owned());
+            } else {
+                panic!("Linux launch configuration requires arg= or env= lines");
+            }
+        }
+        assert!(
+            !arguments.is_empty() && arguments[0] == "/apex/com.android.runtime/bin/linker64",
+            "first argument must select the embedded interpreter"
+        );
+        assert!(
+            arguments.len() >= 2 && arguments[1].starts_with('/'),
+            "second argument must be an absolute executable path"
+        );
+    } else {
+        arguments.extend(
+            [
+                "/apex/com.android.runtime/bin/linker64",
+                "/system/bin/dynamic-probe",
+                "--verify",
+            ]
+            .map(str::to_owned),
+        );
+        environment.extend(
+            [
+                "LANG=C",
+                "LD_LIBRARY_PATH=/apex/com.android.runtime/lib64/bionic:/system/lib64",
+            ]
+            .map(str::to_owned),
+        );
+    }
+    assert!(
+        arguments.len() <= 32 && environment.len() <= 32,
+        "too many Linux launch entries"
+    );
+    // Reserve the complete argc/argv/env/auxv prefix and aligned AT_RANDOM.
+    let bytes = (1 + arguments.len() + 1 + environment.len() + 1 + 18 * 2) * 8
+        + arguments
+            .iter()
+            .chain(environment.iter())
+            .map(|s| s.len() + 1)
+            .sum::<usize>()
+        + 31;
+    assert!(
+        bytes <= 4096,
+        "Linux launch configuration exceeds one stack page"
+    );
+    let mut source = String::new();
+    for (name, values) in [("ARGUMENTS", arguments), ("ENVIRONMENT", environment)] {
+        source.push_str(&format!("pub const {name}: &[&[u8]] = &[\n"));
+        for value in values {
+            source.push_str(&format!("&{:?},\n", value.as_bytes()));
+        }
+        source.push_str("];\n");
+    }
+    let output = PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("linux-launch.rs");
+    fs::write(&output, source).expect("write Linux launch configuration");
+    println!("cargo:rustc-env=BNDR_LINUX_LAUNCH_RS={}", output.display());
 }
 
 fn add_userspace_feature_cfgs(command: &mut Command) {

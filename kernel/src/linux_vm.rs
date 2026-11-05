@@ -6,7 +6,15 @@ pub const PAGE: u64 = 4096;
 // shared kernel arenas, within the existing private level-one table.
 pub const ARENA_START: u64 = 0x8_0000_0000;
 pub const ARENA_END: u64 = 0x80_0000_0000;
-pub const MAX_REGIONS: usize = 128;
+// ART compressed references need low addresses. Only L1 slots 2/3 are free;
+// slots 0/1 retain privileged MMIO/RAM and 4..8 retain kernel VM/user startup.
+pub const LOW_START: u64 = 0x8000_0000;
+pub const LOW_END: u64 = 0x1_0000_0000;
+pub const MAX_REGIONS: usize = if cfg!(feature = "art-runtime") {
+    512
+} else {
+    128
+};
 pub const ENOMEM: i64 = 12;
 pub const EACCES: i64 = 13;
 pub const EEXIST: i64 = 17;
@@ -38,6 +46,7 @@ pub struct Region {
     pub end: u64,
     pub protection: Protection,
     pub file_backed: bool,
+    pub shared_anonymous: bool,
     pub file_page_end: u64,
     pub wipe_on_fork: bool,
 }
@@ -90,8 +99,15 @@ impl Layout {
         const FIXED: u64 = 0x10;
         const NOREPLACE: u64 = 0x100000;
         const HINTS: u64 = 0x4000 | 0x20000; // NORESERVE, STACK
-        if flags & PRIVATE_ANONYMOUS != PRIVATE_ANONYMOUS
-            || flags & !(PRIVATE_ANONYMOUS | FIXED | NOREPLACE | HINTS) != 0
+        let shared_anonymous =
+            cfg!(feature = "art-runtime") && flags & 3 == 1 && file_bytes.is_none();
+        let kind = if shared_anonymous {
+            0x21
+        } else {
+            PRIVATE_ANONYMOUS
+        };
+        if flags & kind != kind
+            || flags & !(kind | FIXED | NOREPLACE | HINTS) != 0
             || !offset.is_multiple_of(PAGE)
         {
             return Err(EINVAL);
@@ -112,11 +128,21 @@ impl Layout {
             let hint = hint & !(PAGE - 1);
             if self.free(hint, size) {
                 hint
+            } else if cfg!(feature = "art-runtime") && hint != 0 && hint < LOW_END {
+                self.first_fit_in(size, LOW_START, LOW_END)
+                    .or_else(|_| self.first_fit(size))?
             } else {
                 self.first_fit(size)?
             }
         };
-        self.change(start, size, Some(protection), true, file_bytes)
+        self.change(
+            start,
+            size,
+            Some(protection),
+            true,
+            file_bytes,
+            shared_anonymous,
+        )
     }
 
     pub fn protect(&self, address: u64, length: u64, prot: u64) -> Result<Change, i64> {
@@ -138,11 +164,11 @@ impl Layout {
         if cursor < end {
             return Err(ENOMEM);
         }
-        self.change(address, size, Some(protection), false, None)
+        self.change(address, size, Some(protection), false, None, false)
     }
 
     pub fn unmap(&self, address: u64, length: u64) -> Result<Change, i64> {
-        self.change(address, rounded_length(length)?, None, true, None)
+        self.change(address, rounded_length(length)?, None, true, None, false)
     }
 
     pub fn advise_fork(&self, address: u64, length: u64, wipe: bool) -> Result<Self, i64> {
@@ -161,7 +187,7 @@ impl Layout {
             if r.start > cursor {
                 return Err(ENOMEM);
             }
-            if wipe && r.file_backed {
+            if wipe && (r.file_backed || r.shared_anonymous) {
                 return Err(EINVAL);
             }
             if r.start < address {
@@ -196,14 +222,54 @@ impl Layout {
     }
 
     fn first_fit(&self, size: u64) -> Result<u64, i64> {
-        let mut cursor = ARENA_START;
+        self.first_fit_in(size, ARENA_START, ARENA_END)
+    }
+
+    fn first_fit_in(&self, size: u64, start: u64, limit: u64) -> Result<u64, i64> {
+        let mut cursor = start;
         for r in &self.regions {
-            if cursor.checked_add(size).is_some_and(|end| end <= r.start) {
+            if r.end <= cursor {
+                continue;
+            }
+            if r.start >= limit {
+                break;
+            }
+            if cursor
+                .checked_add(size)
+                .is_some_and(|end| end <= r.start && end <= limit)
+            {
                 return Ok(cursor);
             }
             cursor = r.end;
         }
-        checked_range(cursor, size).map(|_| cursor)
+        if cursor.checked_add(size).is_some_and(|end| end <= limit) {
+            Ok(cursor)
+        } else {
+            Err(ENOMEM)
+        }
+    }
+
+    pub fn msync(&self, address: u64, length: u64, flags: u64) -> Result<u64, i64> {
+        if !address.is_multiple_of(PAGE) || flags & !7 != 0 || flags & 5 == 5 {
+            return Err(EINVAL);
+        }
+        if length == 0 {
+            return Ok(0);
+        }
+        let end = address.checked_add(rounded_length(length)?).ok_or(ENOMEM)?;
+        let mut cursor = address;
+        for region in &self.regions {
+            if region.start > cursor {
+                break;
+            }
+            if region.end > cursor {
+                cursor = region.end;
+            }
+            if cursor >= end {
+                return Ok(0);
+            }
+        }
+        Err(ENOMEM)
     }
 
     fn change(
@@ -213,6 +279,7 @@ impl Layout {
         protection: Option<Protection>,
         replace: bool,
         file_bytes: Option<u64>,
+        shared_anonymous: bool,
     ) -> Result<Change, i64> {
         let end = checked_range(start, size)?;
         let mut regions = Vec::new();
@@ -245,6 +312,7 @@ impl Layout {
                 end,
                 protection,
                 file_backed: file_bytes.is_some(),
+                shared_anonymous,
                 file_page_end: match file_bytes {
                     Some(0) => start,
                     Some(bytes) => start.checked_add(rounded_length(bytes)?).ok_or(ENOMEM)?,
@@ -259,6 +327,7 @@ impl Layout {
             if regions[index - 1].end == regions[index].start
                 && regions[index - 1].protection == regions[index].protection
                 && regions[index - 1].file_backed == regions[index].file_backed
+                && regions[index - 1].shared_anonymous == regions[index].shared_anonymous
                 && regions[index - 1].file_page_end == regions[index].file_page_end
                 && regions[index - 1].wipe_on_fork == regions[index].wipe_on_fork
             {
@@ -286,15 +355,99 @@ pub fn checked_range(start: u64, size: u64) -> Result<u64, i64> {
         return Err(EINVAL);
     }
     let end = start.checked_add(size).ok_or(ENOMEM)?;
-    if start < ARENA_START || end > ARENA_END || start >= end {
+    if start >= end
+        || !((start >= ARENA_START && end <= ARENA_END)
+            || (cfg!(feature = "art-runtime") && start >= LOW_START && end <= LOW_END))
+    {
         return Err(ENOMEM);
     }
     Ok(end)
 }
 
+pub fn is_arena_address(address: u64) -> bool {
+    (ARENA_START..ARENA_END).contains(&address)
+        || (cfg!(feature = "art-runtime") && (LOW_START..LOW_END).contains(&address))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[cfg(feature = "art-runtime")]
+    fn low_arena_never_selects_kernel_tables_or_changes_high_first_fit() {
+        let low = Layout::default()
+            .map(0x10000000, PAGE * 3, 3, 0x22, 0)
+            .unwrap();
+        assert_eq!(low.start, LOW_START);
+        let high = low.layout.map(0, PAGE, 3, 0x22, 0).unwrap();
+        assert_eq!(high.start, ARENA_START);
+        assert_eq!(
+            high.layout.map(0x10000000, PAGE, 3, 0x22, 0).unwrap().start,
+            LOW_START + PAGE * 3
+        );
+        for address in [
+            0,
+            0x09000000,
+            0x40080000,
+            LOW_START - PAGE,
+            LOW_END,
+            0x200000000,
+        ] {
+            assert_eq!(
+                high.layout.map(address, PAGE, 3, 0x32, 0).err(),
+                Some(ENOMEM)
+            );
+        }
+        assert_eq!(
+            high.layout.map(LOW_END - PAGE, PAGE * 2, 3, 0x32, 0).err(),
+            Some(ENOMEM)
+        );
+        let protected = high
+            .layout
+            .protect(LOW_START + PAGE, PAGE, 1)
+            .unwrap()
+            .layout;
+        assert!(
+            protected
+                .regions
+                .iter()
+                .any(|r| r.start == LOW_START + PAGE && r.protection == Protection::Read)
+        );
+    }
+    #[test]
+    #[cfg(feature = "art-runtime")]
+    fn shared_anonymous_policy_survives_splits_and_msync_detects_holes() {
+        let layout = Layout::default()
+            .map(LOW_START, PAGE * 3, 3, 0x21, 0)
+            .unwrap()
+            .layout;
+        assert!(layout.regions[0].shared_anonymous);
+        assert_eq!(
+            layout.advise_fork(LOW_START, PAGE, true).err(),
+            Some(EINVAL)
+        );
+        assert_eq!(layout.msync(LOW_START, PAGE * 3, 4), Ok(0));
+        assert_eq!(layout.msync(LOW_START, PAGE, 5), Err(EINVAL));
+        assert_eq!(layout.msync(LOW_START + 1, PAGE, 0), Err(EINVAL));
+        assert_eq!(layout.msync(0x40080000, PAGE, 0), Err(ENOMEM));
+        let split = layout.protect(LOW_START + PAGE, PAGE, 0).unwrap().layout;
+        assert!(split.regions.iter().all(|r| r.shared_anonymous));
+        assert_eq!(split.msync(LOW_START, PAGE * 3, 0), Ok(0));
+        let hole = split.unmap(LOW_START + PAGE, PAGE).unwrap().layout;
+        assert_eq!(hole.msync(LOW_START, PAGE * 3, 0), Err(ENOMEM));
+        let replaced = layout
+            .map(LOW_START + PAGE, PAGE, 3, 0x32, 0)
+            .unwrap()
+            .layout;
+        assert_eq!(replaced.regions.len(), 3);
+        assert!(!replaced.regions[1].shared_anonymous);
+        assert_eq!(
+            layout
+                .map_with_backing(0, PAGE, 3, 0x21, 0, Some(PAGE))
+                .err(),
+            Some(EINVAL)
+        );
+    }
     #[test]
     fn fork_advice_preserves_backing_and_survives_protection_changes() {
         let layout = Layout::default()
@@ -336,6 +489,7 @@ mod tests {
                 end: ARENA_START + (1 << 38),
                 protection: Protection::None,
                 file_backed: false,
+                shared_anonymous: false,
                 file_page_end: 0,
                 wipe_on_fork: false,
             }
@@ -380,14 +534,16 @@ mod tests {
             assert!(layout.map(address, length, 3, flags, 0).is_err());
         }
         assert_eq!(layout.map(0, PAGE, 7, 0x22, 0).err(), Some(EACCES));
-        assert_eq!(layout.map(0, PAGE, 3, 0x21, 0).err(), Some(EINVAL));
+        if !cfg!(feature = "art-runtime") {
+            assert_eq!(layout.map(0, PAGE, 3, 0x21, 0).err(), Some(EINVAL));
+        }
         assert_eq!(layout.map(0, 0, 3, 0x22, 0).err(), Some(EINVAL));
         assert_eq!(layout.map(0, PAGE, 3, 0x22, 1).err(), Some(EINVAL));
     }
     #[test]
     fn hints_fall_back_and_released_holes_are_reused() {
         let initial = Layout::default()
-            .map(0x40000000, PAGE * 2, 3, 0x22, 0)
+            .map(ARENA_END + PAGE, PAGE * 2, 3, 0x22, 0)
             .unwrap();
         assert_eq!(initial.start, ARENA_START);
         let next = initial.layout.map(ARENA_START, PAGE, 3, 0x22, 0).unwrap();

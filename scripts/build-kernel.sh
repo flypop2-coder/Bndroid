@@ -43,6 +43,12 @@ export CARGO_TARGET_DIR="$TARGET_ROOT"
 
 KERNEL_FEATURES="${BNDROID_KERNEL_FEATURES:-}"
 USERSPACE_FEATURES="${BNDROID_USERSPACE_FEATURES:-}"
+if feature_list_contains "$KERNEL_FEATURES" "art-runtime"; then
+  KERNEL_FEATURES="$(append_feature "$KERNEL_FEATURES" "bionic-dynamic-runtime")"
+fi
+if feature_list_contains "$USERSPACE_FEATURES" "art-runtime"; then
+  USERSPACE_FEATURES="$(append_feature "$USERSPACE_FEATURES" "bionic-dynamic-runtime")"
+fi
 KERNEL_LINUX_ABI_RUNTIME=0
 USER_LINUX_ABI_RUNTIME=0
 if feature_list_contains "$KERNEL_FEATURES" "linux-abi-runtime" || feature_list_contains "$KERNEL_FEATURES" "bionic-runtime" || feature_list_contains "$KERNEL_FEATURES" "bionic-dynamic-runtime" || feature_list_contains "$KERNEL_FEATURES" "linux-syscall-trace"; then

@@ -5,7 +5,13 @@ use bndroid_kernel::linux_vm::{
     self, Change, EACCES, EINVAL, ENOMEM, Layout as VmLayout, Protection,
 };
 
-const MAX_PAGES: usize = 8192;
+// ART's first low-address allocation is 64 MiB. Leave room for its DSO pages
+// while retaining a hard 256 MiB per-process bound in this bring-up profile.
+const MAX_PAGES: usize = if cfg!(feature = "art-runtime") {
+    65536
+} else {
+    8192
+};
 const MAX_TABLES: usize = 256;
 static LIVE_PAGES: AtomicU64 = AtomicU64::new(0);
 static LIVE_TABLES: AtomicU64 = AtomicU64::new(0);
@@ -317,7 +323,7 @@ impl LinuxMappings {
     }
 
     pub(super) fn verify(&self, l1: &OwnedFrame) -> bool {
-        for key in (linux_vm::ARENA_START >> 30) as usize..(linux_vm::ARENA_END >> 30) as usize {
+        for key in (0..ENTRY_COUNT).filter(|key| linux_vm::is_arena_address((*key as u64) << 30)) {
             let expected = self
                 .table(2, key)
                 .map_or(0, |address| address as u64 | DESCRIPTOR_TABLE_OR_PAGE);
@@ -405,6 +411,33 @@ fn page_descriptor(page: &Page) -> u64 {
 }
 
 impl UserAddressSpace {
+    #[cfg(feature = "art-runtime")]
+    pub fn linux_msync(&self, address: u64, length: u64, flags: u64) -> Result<u64, i64> {
+        // Supported file mappings are private and cannot dirty their source;
+        // shared anonymous pages have no persistent backing. Reject holes and
+        // privileged identity mappings despite their visibility to the kernel.
+        let result = self.linux.layout.msync(address, length, flags);
+        if result != Err(ENOMEM) {
+            return result;
+        }
+        let end = address
+            .checked_add(linux_vm::rounded_length(length)?)
+            .ok_or(ENOMEM)?;
+        if end > INIT_USER_WINDOW_END as u64 || address < INIT_USER_WINDOW_START as u64 {
+            return Err(ENOMEM);
+        }
+        for page in (address..end).step_by(PAGE_SIZE) {
+            if !self
+                .mappings
+                .pages
+                .iter()
+                .any(|entry| entry.virtual_address as u64 == page)
+            {
+                return Err(ENOMEM);
+            }
+        }
+        Ok(0)
+    }
     #[cfg(feature = "bionic-dynamic-runtime")]
     pub fn linux_madvise(&mut self, address: u64, length: u64, advice: u64) -> Result<u64, i64> {
         if !matches!(advice, 18 | 19) {
@@ -471,7 +504,7 @@ impl UserAddressSpace {
         length: u64,
         protection: u64,
     ) -> Result<u64, i64> {
-        if address >= linux_vm::ARENA_START {
+        if address >= linux_vm::ARENA_START || linux_vm::is_arena_address(address) {
             return self
                 .linux
                 .protect(&self.level_1, self.asid(), address, length, protection);
