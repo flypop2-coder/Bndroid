@@ -375,12 +375,21 @@ fn populate_stack_pages(mappings: &mut OwnedUserMappings) -> Result<(), UserBoot
     Ok(())
 }
 
+#[cfg(not(feature = "el0-fault-containment-self-test"))]
+fn parse_linux_image(bytes: &[u8]) -> Result<ElfImage<'_>, bndr_elf::ElfError> {
+    if cfg!(feature = "bionic-runtime") {
+        ElfImage::parse_bionic_static(bytes)
+    } else {
+        ElfImage::parse_linux_static(bytes)
+    }
+}
+
 #[cfg(feature = "linux-abi-runtime")]
 fn populate_linux_stack(
     address_space: &UserAddressSpace,
     image: &EmbeddedImage<'_>,
 ) -> Result<usize, UserBootError> {
-    let elf = ElfImage::parse_linux_static(crate::user_images::get(image.image_id).bytes)
+    let elf = parse_linux_image(crate::user_images::get(image.image_id).bytes)
         .map_err(UserBootError::Elf)?;
     let pointer = USER_STACK_END - PAGE_SIZE;
     let physical = address_space
@@ -389,10 +398,24 @@ fn populate_linux_stack(
     // SAFETY: this whole stack page belongs to the unpublished address space.
     // No userspace thread or other writer can access it before publication.
     let output = unsafe { &mut *(physical as *mut [u8; PAGE_SIZE]) };
-    bndroid_kernel::linux_abi::initial_stack(
+    let random = if cfg!(feature = "bionic-runtime") {
+        let mut bytes = [0; 16];
+        crate::linux_entropy::fill(&mut bytes).map_err(|_| UserBootError::InvalidImage)?;
+        Some(bytes)
+    } else {
+        None
+    };
+    bndroid_kernel::linux_abi::initial_stack_with_random(
         output,
         pointer as u64,
-        &[b"/system/bin/linux-probe", b"--verify"],
+        &[
+            if cfg!(feature = "bionic-runtime") {
+                b"/system/bin/bionic-probe"
+            } else {
+                b"/system/bin/linux-probe"
+            },
+            b"--verify",
+        ],
         &[b"LANG=C"],
         &[
             (
@@ -414,6 +437,7 @@ fn populate_linux_stack(
             (23, 0),
             (26, 0),
         ],
+        random.as_ref(),
     )
     .map_err(|_| UserBootError::InvalidImage)?;
     Ok(pointer)
@@ -548,7 +572,7 @@ fn embedded_image(image_id: UserImageId) -> Result<Box<EmbeddedImage<'static>>, 
     #[cfg(not(feature = "linux-abi-runtime"))]
     let linux = false;
     let elf = if linux {
-        ElfImage::parse_linux_static(catalog_image.bytes)
+        parse_linux_image(catalog_image.bytes)
     } else {
         ElfImage::parse(catalog_image.bytes)
     }

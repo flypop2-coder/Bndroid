@@ -31,6 +31,7 @@ pub mod input_server_restart_trace;
 ))]
 pub mod input_surface_recovery_trace;
 pub mod linux_abi;
+pub mod linux_vm;
 pub mod memory;
 pub mod object;
 pub mod object_wait;

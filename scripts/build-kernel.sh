@@ -45,10 +45,10 @@ KERNEL_FEATURES="${BNDROID_KERNEL_FEATURES:-}"
 USERSPACE_FEATURES="${BNDROID_USERSPACE_FEATURES:-}"
 KERNEL_LINUX_ABI_RUNTIME=0
 USER_LINUX_ABI_RUNTIME=0
-if feature_list_contains "$KERNEL_FEATURES" "linux-abi-runtime"; then
+if feature_list_contains "$KERNEL_FEATURES" "linux-abi-runtime" || feature_list_contains "$KERNEL_FEATURES" "bionic-runtime"; then
   KERNEL_LINUX_ABI_RUNTIME=1
 fi
-if feature_list_contains "$USERSPACE_FEATURES" "linux-abi-runtime"; then
+if feature_list_contains "$USERSPACE_FEATURES" "linux-abi-runtime" || feature_list_contains "$USERSPACE_FEATURES" "bionic-runtime"; then
   USER_LINUX_ABI_RUNTIME=1
 fi
 if [[ "$KERNEL_LINUX_ABI_RUNTIME" != "$USER_LINUX_ABI_RUNTIME" ]]; then

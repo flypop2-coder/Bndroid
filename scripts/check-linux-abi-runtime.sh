@@ -38,6 +38,7 @@ import re
 import subprocess
 import sys
 import time
+from scripts.linux_runtime_evidence import parse_marker
 
 artifacts = Path(sys.argv[1])
 timeout = float(os.environ.get("BNDROID_QEMU_TIMEOUT_SECONDS", "60"))
@@ -57,10 +58,8 @@ try:
             raise RuntimeError("Guest rejected the native runtime")
         if process.poll() is not None:
             raise RuntimeError(f"QEMU exited early: {process.returncode}")
-        lines = [line for line in text.splitlines() if line.startswith("LINUX_ABI_RUNTIME_OK ")]
-        if lines:
-            assert len(lines) == 1
-            proof = dict(field.split("=", 1) for field in lines[0].split()[1:])
+        proof = parse_marker(text, "LINUX_ABI_RUNTIME_OK")
+        if proof is not None:
             expected = {"abi": "70", "native_processes": "2", "native_exits": "2", "native_reaped": "2", "remaining_processes": "1", "native_handles": "0", "supervisor_channels": "2", "unsupported": "8", "private_svc_rejected": "2", "bad_address": "10", "linux_kernel": "0", "bionic_startup": "0", "art": "0"}
             for key, value in expected.items():
                 assert proof.get(key) == value, (key, proof.get(key), value)

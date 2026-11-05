@@ -36,6 +36,14 @@ static int write_all(const char *bytes, long length) {
 #define CHECK(condition, code) do { if (!(condition)) return (code); } while (0)
 
 int linux_probe_main(const uint64_t *stack) {
+    uint64_t initial_tls, read_only_tls;
+    __asm__ volatile("mrs %0, tpidr_el0\n mrs %1, tpidrro_el0" : "=r"(initial_tls), "=r"(read_only_tls));
+    CHECK(initial_tls == 0 && read_only_tls == 0, 47);
+    uint64_t tls_cookie = (uint64_t)(uintptr_t)zeroed;
+    __asm__ volatile("msr tpidr_el0, %0" :: "r"(tls_cookie) : "memory");
+    for (int tick = 0; tick < 3; ++tick) __asm__ volatile("wfi" ::: "memory");
+    __asm__ volatile("mrs %0, tpidr_el0" : "=r"(initial_tls));
+    CHECK(initial_tls == tls_cookie, 48);
     CHECK(((uintptr_t)stack & 15) == 0 && stack[0] == 2, 10);
     CHECK(equal((const char *)stack[1], "/system/bin/linux-probe"), 11);
     CHECK(equal((const char *)stack[2], "--verify") && stack[3] == 0, 12);
@@ -94,5 +102,7 @@ int linux_probe_main(const uint64_t *stack) {
     CHECK(call(__NR_write, 2, (long)(bounded_write + 256), 45) == 45, 46);
     static const char message[] = "LINUX_ARM64_PROBE_OK entry=elf stack=linux syscalls=linux memory=isolated\n";
     CHECK(write_all(message, sizeof(message) - 1), 43);
+    __asm__ volatile("mrs %0, tpidr_el0" : "=r"(initial_tls));
+    CHECK(initial_tls == tls_cookie, 49);
     return 0;
 }

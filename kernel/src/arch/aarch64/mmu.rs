@@ -6,6 +6,10 @@ use core::arch::asm;
 use core::cell::UnsafeCell;
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+#[cfg(feature = "linux-abi-runtime")]
+mod linux;
+#[cfg(feature = "linux-abi-runtime")]
+pub use linux::linux_memory_snapshot;
 
 use bndroid_kernel::aarch64_paging::{
     DESCRIPTOR_BLOCK, DESCRIPTOR_TABLE_OR_PAGE, descriptor_address, descriptor_type,
@@ -587,6 +591,8 @@ pub struct UserAddressSpace {
     user_level_2: OwnedFrame,
     user_level_3: Vec<OwnedFrame>,
     mappings: OwnedUserMappings,
+    #[cfg(feature = "linux-abi-runtime")]
+    linux: linux::LinuxMappings,
     asid_lease: AsidLease,
 }
 
@@ -858,7 +864,8 @@ pub unsafe fn init_identity_map() -> Result<(), MmuError> {
 
     let mair = 0x04_u64 | (0xff_u64 << 8); // Device-nGnRE, Normal WB/WA.
     let physical_address_range = (memory_features & 0xf).min(0b101);
-    let tcr = 16_u64 // T0SZ: 48-bit lower virtual addresses.
+    let tcr = (u64::from(cfg!(feature = "linux-abi-runtime")) << 37) // TBI0: Android heap pointer tags.
+        | 16_u64 // T0SZ: 48-bit lower virtual addresses.
         | (0b01 << 8) // IRGN0: inner write-back, write-allocate.
         | (0b01 << 10) // ORGN0: outer write-back, write-allocate.
         | (0b11 << 12) // SH0: inner shareable.
@@ -1123,6 +1130,8 @@ impl UserAddressSpace {
             user_level_2,
             user_level_3,
             mappings,
+            #[cfg(feature = "linux-abi-runtime")]
+            linux: linux::LinuxMappings::default(),
             asid_lease: asid_claim.commit(),
         };
         ADDRESS_SPACE_CREATION_COUNT.fetch_add(1, Ordering::Relaxed);
@@ -1435,6 +1444,8 @@ impl UserAddressSpace {
                 .iter()
                 .find(|mapping| mapping.virtual_address == page)
                 .map(|mapping| mapping.access);
+            #[cfg(feature = "linux-abi-runtime")]
+            let owned_access = owned_access.or_else(|| self.linux.access(page));
             let borrowed_access = self
                 .mappings
                 .metadata
@@ -1462,18 +1473,27 @@ impl UserAddressSpace {
     /// Checks every image, data, and stack owner rather than comparing only
     /// representative code/stack pages or a lossy fingerprint.
     pub fn user_frames_are_disjoint(&self, other: &Self) -> bool {
-        self.mappings.pages.iter().all(|page| {
-            other
-                .mappings
-                .pages
-                .iter()
-                .all(|other_page| page.frame.start_address() != other_page.frame.start_address())
-        })
+        let distinct =
+            self.mappings.pages.iter().all(|page| {
+                other.mappings.pages.iter().all(|other_page| {
+                    page.frame.start_address() != other_page.frame.start_address()
+                })
+            });
+        #[cfg(feature = "linux-abi-runtime")]
+        let distinct = distinct
+            && self
+                .linux
+                .disjoint_from(&other.linux, &other.mappings.pages)
+            && other.linux.disjoint_from(&self.linux, &self.mappings.pages);
+        distinct
     }
 
     pub fn private_table_frames(&self) -> usize {
         let _ = (&self.root, &self.level_1, &self.user_level_2);
-        3 + self.user_level_3.len()
+        let count = 3 + self.user_level_3.len();
+        #[cfg(feature = "linux-abi-runtime")]
+        let count = count + self.linux.table_count();
+        count
     }
 
     pub fn query_page_descriptor(&self, virtual_address: usize) -> Result<Option<u64>, UnmapError> {
@@ -1545,6 +1565,11 @@ impl UserAddressSpace {
                 stopped,
             });
         }
+        #[cfg(feature = "linux-abi-runtime")]
+        assert!(
+            self.linux.verify(&self.level_1),
+            "Linux translation hierarchy changed without ownership"
+        );
         // SAFETY: every page belongs to this private L3, the stopped proof
         // prevents all future walkers, and the page-table guard serializes the
         // descriptor writes through the completing ASID-wide invalidation.
@@ -1554,6 +1579,8 @@ impl UserAddressSpace {
                 &self.mappings,
                 &self.mappings.metadata.graphics_mappings,
             );
+            #[cfg(feature = "linux-abi-runtime")]
+            self.linux.detach(&self.level_1);
             invalidate_asid(self.translation.asid());
         }
         let removed_graphics_mappings = self
@@ -1572,6 +1599,8 @@ impl UserAddressSpace {
             user_level_2,
             user_level_3,
             mut mappings,
+            #[cfg(feature = "linux-abi-runtime")]
+            linux,
             asid_lease,
         } = self;
         if translation.asid() != asid_lease.asid() {
@@ -1591,6 +1620,8 @@ impl UserAddressSpace {
         for page in mappings.pages {
             release_destroyed_address_space_frame(page.frame, "user leaf");
         }
+        #[cfg(feature = "linux-abi-runtime")]
+        linux.release();
         for frame in user_level_3 {
             release_destroyed_address_space_frame(frame, "L3 table");
         }

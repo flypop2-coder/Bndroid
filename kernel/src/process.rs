@@ -267,6 +267,12 @@ struct Process {
     handles: Box<HandleTable<KernelObject, HANDLE_CAPACITY>>,
     startup_handle: Option<HandleValue>,
     is_init: bool,
+    #[cfg(feature = "linux-abi-runtime")]
+    linux_clear_child_tid: u64,
+    #[cfg(feature = "linux-abi-runtime")]
+    linux_streams: [Option<u64>; 3],
+    #[cfg(feature = "linux-abi-runtime")]
+    linux_tagged_addresses: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -862,6 +868,12 @@ pub fn install_init(prepared: Box<PreparedUserProcess>) {
         handles,
         startup_handle: None,
         is_init: true,
+        #[cfg(feature = "linux-abi-runtime")]
+        linux_clear_child_tid: 0,
+        #[cfg(feature = "linux-abi-runtime")]
+        linux_streams: [Some(0); 3],
+        #[cfg(feature = "linux-abi-runtime")]
+        linux_tagged_addresses: false,
     };
     slot.process = Some(
         try_box(process).unwrap_or_else(|_| panic!("kernel heap could not allocate init Process")),
@@ -1021,6 +1033,12 @@ fn commit_prepared_spawn(
         handles,
         startup_handle: None,
         is_init: false,
+        #[cfg(feature = "linux-abi-runtime")]
+        linux_clear_child_tid: 0,
+        #[cfg(feature = "linux-abi-runtime")]
+        linux_streams: [Some(0); 3],
+        #[cfg(feature = "linux-abi-runtime")]
+        linux_tagged_addresses: false,
     };
     let mut process = match try_box(process) {
         Ok(process) => process,
@@ -2475,6 +2493,95 @@ pub fn current_user_range_is_readable(address: u64, bytes: usize) -> bool {
     lookup(ProcessId(raw))
         .and_then(|process| process.address_space.as_ref())
         .is_some_and(|address_space| address_space.user_range_is_readable(address, bytes))
+}
+
+#[cfg(feature = "linux-abi-runtime")]
+pub fn with_current_linux_address_space<R>(
+    operation: impl FnOnce(&mut mmu::UserAddressSpace) -> R,
+) -> R {
+    assert!(crate::arch::aarch64::irq_is_masked());
+    let id = scheduler::current_process_id().expect("Linux syscall has a process");
+    let process = lookup_mut(ProcessId(id)).expect("Linux process remains live");
+    assert_eq!(process.image_id, UserImageId::LinuxApp);
+    operation(
+        process
+            .address_space
+            .as_mut()
+            .expect("Linux process owns an address space"),
+    )
+}
+
+#[cfg(feature = "linux-abi-runtime")]
+pub fn linux_set_tid_address(address: u64) -> u64 {
+    assert!(crate::arch::aarch64::irq_is_masked());
+    let id = scheduler::current_process_id().expect("Linux syscall has a process");
+    let process = lookup_mut(ProcessId(id)).expect("Linux process remains live");
+    assert_eq!(process.image_id, UserImageId::LinuxApp);
+    process.linux_clear_child_tid = address;
+    id & 0xffff_ffff
+}
+
+#[cfg(feature = "linux-abi-runtime")]
+pub fn linux_stream_flags(descriptor: u64) -> Option<u64> {
+    let id = scheduler::current_process_id()?;
+    let process = lookup(ProcessId(id))?;
+    process
+        .linux_streams
+        .get(usize::try_from(descriptor).ok()?)
+        .copied()
+        .flatten()
+}
+
+#[cfg(feature = "linux-abi-runtime")]
+pub fn linux_tagged_addresses(replacement: Option<bool>) -> bool {
+    assert!(crate::arch::aarch64::irq_is_masked());
+    let id = scheduler::current_process_id().expect("Linux process identity");
+    let process = lookup_mut(ProcessId(id)).expect("live Linux process");
+    assert_eq!(process.image_id, UserImageId::LinuxApp);
+    if let Some(enabled) = replacement {
+        process.linux_tagged_addresses = enabled;
+    }
+    process.linux_tagged_addresses
+}
+
+#[cfg(feature = "linux-abi-runtime")]
+pub fn linux_update_stream(descriptor: u64, flags: Option<u64>) -> bool {
+    assert!(crate::arch::aarch64::irq_is_masked());
+    let Some(id) = scheduler::current_process_id() else {
+        return false;
+    };
+    let Some(process) = lookup_mut(ProcessId(id)) else {
+        return false;
+    };
+    let Ok(descriptor) = usize::try_from(descriptor) else {
+        return false;
+    };
+    let Some(slot) = process
+        .linux_streams
+        .get_mut(descriptor)
+        .filter(|slot| slot.is_some())
+    else {
+        return false;
+    };
+    *slot = flags;
+    true
+}
+
+#[cfg(feature = "linux-abi-runtime")]
+pub fn linux_clear_tid_on_exit() {
+    assert!(crate::arch::aarch64::irq_is_masked());
+    let id = scheduler::current_process_id().expect("Linux exit has a process");
+    let process = lookup_mut(ProcessId(id)).expect("Linux process remains live");
+    let pointer = core::mem::take(&mut process.linux_clear_child_tid);
+    if pointer != 0
+        && process
+            .address_space
+            .as_ref()
+            .is_some_and(|space| space.user_range_is_writable(pointer, 4))
+    {
+        // Single-thread profile: there are no futex waiters to wake yet.
+        let _ = crate::arch::aarch64::usercopy::copy_to_user(pointer, &[0; 4]);
+    }
 }
 
 /// Returns the full generation-qualified PID only when exactly one live

@@ -42,6 +42,7 @@ This index follows the milestone locations established on GitHub. English pages 
 | [Layout Size-18](docs/milestones/androidbox/ANDROIDBOX_LAYOUT_SIZE_18.md) | Exact positive integer dp dimensions, ABI 68 |
 | [Layout Mixed-19](docs/milestones/androidbox/ANDROIDBOX_LAYOUT_MIXED_19.md) | Fixed-and-weighted horizontal Buttons, ABI 69 |
 | [Linux arm64 entry](docs/milestones/androidbox/LINUX_ARM64_ENTRY.md) | NDK static ELF, Linux startup/syscall subset, native process cleanup, ABI 70; no Bionic or ART startup |
+| [Bionic Static-0](docs/milestones/androidbox/BIONIC_STATIC_0.md) | Unmodified NDK Bionic startup, ELF TLS, Scudo, sparse memory, stdio and exit handlers; no ART or general APK execution |
 
 ## Historical OS design records
 

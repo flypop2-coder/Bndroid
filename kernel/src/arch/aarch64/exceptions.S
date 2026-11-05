@@ -23,7 +23,7 @@
     // IRQ and returnable synchronous exceptions share these macros so their
     // context-switch ABI cannot drift apart.
     .macro SAVE_TRAP_FRAME
-        sub sp, sp, #800
+        sub sp, sp, #816
 
         stp x0, x1, [sp, #0]
         stp x2, x3, [sp, #16]
@@ -70,6 +70,10 @@
         str x9, [sp, #784]
         mrs x9, fpsr
         str x9, [sp, #792]
+        mrs x9, tpidr_el0
+        str x9, [sp, #800]
+        mrs x9, tpidrro_el0
+        str x9, [sp, #808]
     .endm
 
     .macro RESTORE_TRAP_FRAME
@@ -84,6 +88,10 @@
         msr fpcr, x9
         ldr x9, [sp, #792]
         msr fpsr, x9
+        ldr x9, [sp, #800]
+        msr tpidr_el0, x9
+        ldr x9, [sp, #808]
+        msr tpidrro_el0, x9
 
         ldp q0, q1, [sp, #272]
         ldp q2, q3, [sp, #304]
@@ -118,7 +126,7 @@
         ldp x28, x29, [sp, #224]
         ldr x30, [sp, #240]
         ldp x0, x1, [sp, #0]
-        add sp, sp, #800
+        add sp, sp, #816
     .endm
 
     .section .text.exceptions, "ax"

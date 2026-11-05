@@ -1570,6 +1570,19 @@ fn fault_current_user_inner(
     validate_frame_storage_or_panic(current, frame);
     validate_user_kernel_state_or_panic(current, frame);
     let (elr, sp_el0) = unsafe { ((*frame).elr_el1, (*frame).sp_el0) };
+    #[cfg(feature = "linux-abi-runtime")]
+    if crate::process::current_live_user_image_id() == Some(bndr_abi::UserImageId::LinuxApp) {
+        crate::kprintln!(
+            "LINUX_USER_FAULT pid={} reason={} esr={:#x} far={:#x} elr={:#x} sp={:#x} tls={:#x}",
+            crate::process::current_live_user_process_id().unwrap_or(0),
+            reason as u64,
+            esr,
+            far,
+            elr,
+            sp_el0,
+            unsafe { (*frame).tpidr_el0 }
+        );
+    }
     #[cfg(feature = "mobile-ui-runtime")]
     if current != USER_INIT_CONTEXT {
         crate::kprintln!(

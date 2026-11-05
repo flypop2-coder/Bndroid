@@ -26,9 +26,38 @@ pub fn dispatch(frame: *mut TrapFrame) -> *mut TrapFrame {
     // SAFETY: the common SVC path validated this process's saved TrapFrame.
     let registers = unsafe { (*frame).x };
     let result = match registers[8] {
+        25 => fcntl(registers[0], registers[1], registers[2]),
+        57 => {
+            if crate::process::linux_update_stream(registers[0], None) {
+                0
+            } else {
+                errno(EBADF)
+            }
+        }
+        // The supervised launch supplies /dev/null semantics on stdin.
+        63 => {
+            if registers[0] == 0 && crate::process::linux_stream_flags(0).is_some() {
+                0
+            } else {
+                errno(EBADF)
+            }
+        }
         64 => write(registers[0], registers[1], registers[2]),
+        66 => writev(registers[0], registers[1], registers[2]),
+        96 => crate::process::linux_set_tid_address(user_address(registers[0])),
+        278 => getrandom(registers[0], registers[1], registers[2]),
+        215 | 222 | 226 => {
+            let result =
+                crate::process::with_current_linux_address_space(|space| match registers[8] {
+                    215 => space.linux_munmap(registers[0], registers[1]),
+                    222 => space.linux_mmap(registers[..6].try_into().unwrap()),
+                    _ => space.linux_mprotect(registers[0], registers[1], registers[2]),
+                });
+            result.unwrap_or_else(errno)
+        }
         93 | 94 => {
             let code = registers[0] & 255;
+            crate::process::linux_clear_tid_on_exit();
             // Exercise accounting while the native image is still alive,
             // independently of when the monitor next gets a time slice.
             let snapshot = crate::process::snapshot();
@@ -43,7 +72,22 @@ pub fn dispatch(frame: *mut TrapFrame) -> *mut TrapFrame {
             return crate::scheduler::exit_current_user(frame, code);
         }
         113 => clock_gettime(registers[0], registers[1]),
+        120 | 121 => {
+            let pid = registers[0] as u32;
+            let own = crate::process::current_live_user_process_id().unwrap() as u32;
+            if pid != 0 && pid != own {
+                errno(3)
+            } else if registers[8] == 120 {
+                0
+            }
+            // SCHED_OTHER, normal time sharing.
+            else {
+                copy_out(registers[1], &[0; 4])
+            } // sched_priority = 0.
+        }
         160 => uname(registers[0]),
+        163 => getrlimit(registers[0], registers[1]),
+        167 => prctl(&registers),
         172 | 178 => crate::process::current_live_user_process_id().unwrap() & 0xffff_ffff,
         173 => 1,           // This entry profile is spawned only by Init.
         174..=177 => 10000, // One application principal in this first profile.
@@ -79,7 +123,8 @@ fn bad_address() -> u64 {
 }
 
 fn write(descriptor: u64, address: u64, requested: u64) -> u64 {
-    if descriptor != 1 && descriptor != 2 {
+    let address = user_address(address);
+    if !matches!(descriptor, 1 | 2) || crate::process::linux_stream_flags(descriptor).is_none() {
         return errno(EBADF);
     }
     // A positive short write is legal and bounds IRQ-masked console work.
@@ -100,6 +145,7 @@ fn write(descriptor: u64, address: u64, requested: u64) -> u64 {
 }
 
 fn copy_out(address: u64, bytes: &[u8]) -> u64 {
+    let address = user_address(address);
     if !crate::process::current_user_range_is_writable(address, bytes.len())
         || usercopy::copy_to_user(address, bytes).is_err()
     {
@@ -108,16 +154,122 @@ fn copy_out(address: u64, bytes: &[u8]) -> u64 {
     0
 }
 
-fn clock_gettime(clock: u64, address: u64) -> u64 {
-    if clock != 1 {
+fn writev(descriptor: u64, address: u64, count: u64) -> u64 {
+    let address = user_address(address);
+    if !matches!(descriptor, 1 | 2) || crate::process::linux_stream_flags(descriptor).is_none() {
+        return errno(EBADF);
+    }
+    if count > 64 {
         return errno(EINVAL);
-    } // CLOCK_MONOTONIC
-    let Some(bytes) = monotonic_timespec(
-        aarch64::timer::counter_value(),
-        aarch64::timer::frequency_hz(),
-    ) else {
+    }
+    if !crate::process::current_user_range_is_readable(address, count as usize * 16) {
+        return bad_address();
+    }
+    let mut total = 0;
+    for index in 0..count {
+        let mut iovec = [0; 16];
+        if usercopy::copy_from_user(&mut iovec, address + index * 16).is_err() {
+            return if total == 0 { bad_address() } else { total };
+        }
+        let base = u64::from_le_bytes(iovec[..8].try_into().unwrap());
+        let requested = u64::from_le_bytes(iovec[8..].try_into().unwrap());
+        let written = write(descriptor, base, requested.min(256 - total));
+        if (written as i64) < 0 {
+            return if total == 0 { written } else { total };
+        }
+        total += written;
+        if written < requested || total == 256 {
+            break;
+        }
+    }
+    total
+}
+
+fn fcntl(descriptor: u64, command: u64, argument: u64) -> u64 {
+    let Some(flags) = crate::process::linux_stream_flags(descriptor) else {
+        return errno(EBADF);
+    };
+    match command {
+        1 => flags, // F_GETFD
+        2 if argument & !1 == 0 => {
+            assert!(crate::process::linux_update_stream(
+                descriptor,
+                Some(argument)
+            ));
+            0
+        }
+        3 => u64::from(descriptor != 0), // F_GETFL: stdin RO, console outputs WO.
+        _ => errno(EINVAL),
+    }
+}
+
+fn getrandom(address: u64, requested: u64, flags: u64) -> u64 {
+    let address = user_address(address);
+    if flags & !3 != 0 {
+        return errno(EINVAL);
+    }
+    let count = requested.min(256) as usize;
+    if count == 0 {
+        return 0;
+    }
+    if !crate::process::current_user_range_is_writable(address, count) {
+        return bad_address();
+    }
+    let mut bytes = [0; 256];
+    if crate::linux_entropy::fill(&mut bytes[..count]).is_err() {
+        return errno(11);
+    }
+    let status = copy_out(address, &bytes[..count]);
+    if status != 0 {
+        return status;
+    }
+    count as u64
+}
+
+fn user_address(address: u64) -> u64 {
+    if crate::process::linux_tagged_addresses(None) {
+        address & 0x00ff_ffff_ffff_ffff
+    } else {
+        address
+    }
+}
+
+fn prctl(registers: &[u64; 31]) -> u64 {
+    match registers[0] {
+        55 if registers[1] & !1 == 0 && registers[2..5] == [0; 3] => {
+            crate::process::linux_tagged_addresses(Some(registers[1] != 0));
+            0
+        }
+        56 if registers[1..5] == [0; 4] => u64::from(crate::process::linux_tagged_addresses(None)),
+        _ => errno(EINVAL),
+    }
+}
+
+fn clock_gettime(clock: u64, address: u64) -> u64 {
+    if !matches!(clock, 1 | 6) {
+        return errno(EINVAL);
+    } // CLOCK_MONOTONIC and CLOCK_MONOTONIC_COARSE.
+    let frequency = aarch64::timer::frequency_hz();
+    let mut counter = aarch64::timer::counter_value();
+    if clock == 6 {
+        let quantum = (frequency / 100).max(1);
+        counter -= counter % quantum;
+    }
+    let Some(bytes) = monotonic_timespec(counter, frequency) else {
         return errno(EINVAL);
     };
+    copy_out(address, &bytes)
+}
+
+fn getrlimit(resource: u64, address: u64) -> u64 {
+    let limit = match resource {
+        3 => (crate::userboot::USER_STACK_END - crate::userboot::USER_STACK_START) as u64,
+        7 => 3, // The only descriptor slots currently provided are 0, 1, 2.
+        _ => return errno(EINVAL),
+    };
+    let mut bytes = [0; 16];
+    bytes[..8].copy_from_slice(&limit.to_le_bytes());
+    bytes[8..].copy_from_slice(&limit.to_le_bytes());
     copy_out(address, &bytes)
 }
 
@@ -159,6 +311,27 @@ pub fn monitor() -> ! {
             assert_eq!(processes.total_handles, 0);
             assert_eq!(syscalls.channels_created, 2);
             assert_eq!(EXITS.load(Ordering::Acquire), 2);
+            let memory = aarch64::mmu::linux_memory_snapshot();
+            assert_eq!(memory.pages, 0);
+            assert_eq!(memory.tables, 0);
+            if cfg!(feature = "bionic-runtime") {
+                assert!(memory.peak_pages > 0 && memory.reclaimed_pages >= memory.peak_pages);
+                assert!(crate::linux_entropy::consumed() > 32);
+                crate::kprintln!(
+                    "BIONIC_RUNTIME_OK abi=70 native_processes=2 native_exits=2 native_reaped=2 remaining_processes=1 native_handles=0 linux_calls={} unsupported={} bad_address={} live_anonymous_pages={} live_anonymous_tables={} peak_anonymous_pages={} reclaimed_anonymous_pages={} entropy_bytes={} loader=ndk-static-bionic bionic_startup=1 art=0",
+                    CALLS.load(Ordering::Relaxed),
+                    UNKNOWN.load(Ordering::Relaxed),
+                    BAD_ADDRESS.load(Ordering::Relaxed),
+                    memory.pages,
+                    memory.tables,
+                    memory.peak_pages,
+                    memory.reclaimed_pages,
+                    crate::linux_entropy::consumed()
+                );
+                loop {
+                    aarch64::wait_for_interrupt();
+                }
+            }
             assert_eq!(UNKNOWN.load(Ordering::Relaxed), 8);
             assert_eq!(PRIVATE_SVC.load(Ordering::Relaxed), 2);
             assert_eq!(BAD_ADDRESS.load(Ordering::Relaxed), 10);

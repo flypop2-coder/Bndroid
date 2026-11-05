@@ -2,6 +2,14 @@
 
 This page records implemented behavior and validation, with a September 9, 2026 platform baseline and dated updates below. Historical test counts belong to the indicated development runs; they are not a claim that every historical gate was rerun during publication. The [complete original status log](docs/archive/originals/IMPLEMENTATION_STATUS.txt) preserves detailed evidence and earlier milestones. Future tasks belong only in [TODO.md](TODO.md).
 
+## Real static Bionic update — November 6, 2026
+
+The `bionic-runtime` profile now boots an ordinary C program using NDK r27b/API 35 CRT and Bionic libraries without modifying them. Two process generations verify constructors, ELF TLS/errno across preemption, Scudo allocation through 2 MiB, stdio, atexit, and destructors. The kernel adds validated static metadata, saved thread pointers, private sparse anonymous memory, per-process standard streams and tagged-pointer control, and consumed-once host entropy. All anonymous page/table owners are reclaimed after exit.
+
+The gate passes with 220 Linux calls, 12 bad-address results, and explicit `ENOSYS` for missing optional startup interfaces. The 1,104 default workspace tests, original native-entry gate, default kernel boot, mobile UI acceptance gate, four UART proof-parser checks, and Bionic Clippy check passed. Missing entropy rejects boot. See [Bionic Static-0](docs/milestones/androidbox/BIONIC_STATIC_0.md) for exact limits, syscall gaps, reproduction, and local artifact provenance.
+
+This provides real native Bionic execution. Dynamic linking, threads/signals, a general filesystem ABI, JNI, ART, Binder, Framework, and general APK execution remain open.
+
 ## Native arm64 entry update — November 6, 2026
 
 The isolated ABI 70 `linux-abi-runtime` profile loads and executes an NDK-compiled static arm64 ELF in a separate EL0 address space. It supplies a Linux `argc`/`argv`/`envp`/auxv stack, validates mapped program headers, routes Linux syscall numbers by kernel-owned process identity, and implements a small console/time/identity/exit subset. Two successive native processes verify fresh data/BSS, normal exit/reaping, and zero inherited native handles. Live-process accounting includes the new image type, preventing a scheduling-dependent snapshot panic.

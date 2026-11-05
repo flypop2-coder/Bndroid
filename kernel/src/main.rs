@@ -178,6 +178,8 @@ mod interrupt;
 mod kernel_heap;
 mod limits;
 #[cfg(feature = "linux-abi-runtime")]
+mod linux_entropy;
+#[cfg(feature = "linux-abi-runtime")]
 mod linux_runtime;
 mod log;
 #[cfg(feature = "androidbox-apk-install0")]
@@ -10798,6 +10800,10 @@ pub extern "C" fn kernel_main(dtb_address: usize, boot_exception_level: u64) -> 
             "UI_READY protocol=1 owner=kernel view=home targets=3 phone=72/132/176/72 messages=72/220/176/72 settings=72/308/176/72 home=128/448/64/24 gesture=tap capture=1 hit_test=1 surface=opaque-scene surface_generation=0 damage_commit=1 userspace_surface=0"
         );
     }
+
+    #[cfg(feature = "bionic-runtime")]
+    linux_entropy::init(fw_cfg_mmio_region)
+        .unwrap_or_else(|error| fatal_boot_error("Linux entropy initialization failed", error));
 
     #[cfg(feature = "androidbox-apk-install0")]
     {

@@ -34,6 +34,17 @@ pub fn initial_stack(
     environment: &[&[u8]],
     auxiliary: &[(u64, u64)],
 ) -> Result<(), StackError> {
+    initial_stack_with_random(output, address, arguments, environment, auxiliary, None)
+}
+
+pub fn initial_stack_with_random(
+    output: &mut [u8; STACK_PAGE_BYTES],
+    address: u64,
+    arguments: &[&[u8]],
+    environment: &[&[u8]],
+    auxiliary: &[(u64, u64)],
+    random: Option<&[u8; 16]>,
+) -> Result<(), StackError> {
     if !address.is_multiple_of(16) {
         return Err(StackError::Misaligned);
     }
@@ -47,12 +58,21 @@ pub fn initial_stack(
         return Err(StackError::TooManyEntries);
     }
     for (index, (kind, _)) in auxiliary.iter().enumerate() {
-        if *kind == 0 || *kind == 31 || auxiliary[..index].iter().any(|(other, _)| other == kind) {
+        if *kind == 0
+            || *kind == 31
+            || (*kind == 25 && random.is_some())
+            || auxiliary[..index].iter().any(|(other, _)| other == kind)
+        {
             return Err(StackError::InvalidAuxiliary);
         }
     }
     output.fill(0);
-    let words = 1 + arguments.len() + 1 + environment.len() + 1 + (auxiliary.len() + 2) * 2;
+    let words = 1
+        + arguments.len()
+        + 1
+        + environment.len()
+        + 1
+        + (auxiliary.len() + 2 + usize::from(random.is_some())) * 2;
     let mut strings = words * 8;
     let mut cursor = 0;
     put_word(output, &mut cursor, arguments.len() as u64);
@@ -85,6 +105,15 @@ pub fn initial_stack(
     }
     put_word(output, &mut cursor, 31); // AT_EXECFN
     put_word(output, &mut cursor, executable_name);
+    if let Some(random) = random {
+        let start = (strings + 15) & !15;
+        if start + random.len() > output.len() {
+            return Err(StackError::NoSpace);
+        }
+        output[start..start + random.len()].copy_from_slice(random);
+        put_word(output, &mut cursor, 25); // AT_RANDOM
+        put_word(output, &mut cursor, address + start as u64);
+    }
     put_word(output, &mut cursor, 0); // AT_NULL
     put_word(output, &mut cursor, 0);
     Ok(())
@@ -199,6 +228,25 @@ mod tests {
     fn errno_is_negative_in_x0_not_a_native_status_tuple() {
         assert_eq!(errno(ENOSYS) as i64, -38);
         assert_eq!(errno(EFAULT) as i64, -14);
+    }
+
+    #[test]
+    fn random_auxiliary_points_at_supplied_guest_bytes() {
+        let mut page = [0; STACK_PAGE_BYTES];
+        let bytes = [0xa5; 16];
+        initial_stack_with_random(&mut page, 0x200000000, &[b"probe"], &[], &[], Some(&bytes))
+            .unwrap();
+        let word =
+            |index: usize| u64::from_le_bytes(page[index * 8..index * 8 + 8].try_into().unwrap());
+        assert_eq!(word(6), 25);
+        let offset = (word(7) - 0x200000000) as usize;
+        assert_eq!(offset % 16, 0);
+        assert_eq!(&page[offset..offset + 16], &bytes);
+        assert_eq!(word(8), 0);
+        assert_eq!(
+            initial_stack_with_random(&mut page, 0, &[], &[], &[(25, 8)], Some(&bytes)),
+            Err(StackError::InvalidAuxiliary)
+        );
     }
 
     #[test]

@@ -8,6 +8,7 @@ export CARGO_TARGET_DIR="$WORKSPACE_ROOT/target"
 export CARGO_NET_OFFLINE=true
 
 python3 "$SCRIPT_DIR/test_mobile_ui_demo.py"
+python3 "$SCRIPT_DIR/test_linux_runtime_evidence.py"
 
 "$SCRIPT_DIR/check-storage-server-static.sh"
 "$SCRIPT_DIR/check-storage-server-recovery-static.sh"

@@ -13,6 +13,8 @@ pub struct TrapFrame {
     pub q: [u128; 32],
     pub fpcr: u64,
     pub fpsr: u64,
+    pub tpidr_el0: u64,
+    pub tpidrro_el0: u64,
 }
 
 impl TrapFrame {
@@ -36,6 +38,8 @@ impl TrapFrame {
             q: [0; 32],
             fpcr: 0,
             fpsr: 0,
+            tpidr_el0: 0,
+            tpidrro_el0: 0,
         };
         frame.x[0] = argument;
         frame.x[30] = thread_exit;
@@ -61,19 +65,23 @@ impl TrapFrame {
             q: [0; 32],
             fpcr: 0,
             fpsr: 0,
+            tpidr_el0: 0,
+            tpidrro_el0: 0,
         };
         frame.x[0] = argument;
         frame
     }
 }
 
-const _: [(); 800] = [(); core::mem::size_of::<TrapFrame>()];
+const _: [(); 816] = [(); core::mem::size_of::<TrapFrame>()];
 const _: [(); 248] = [(); core::mem::offset_of!(TrapFrame, sp_el0)];
 const _: [(); 256] = [(); core::mem::offset_of!(TrapFrame, elr_el1)];
 const _: [(); 264] = [(); core::mem::offset_of!(TrapFrame, spsr_el1)];
 const _: [(); 272] = [(); core::mem::offset_of!(TrapFrame, q)];
 const _: [(); 784] = [(); core::mem::offset_of!(TrapFrame, fpcr)];
 const _: [(); 792] = [(); core::mem::offset_of!(TrapFrame, fpsr)];
+const _: [(); 800] = [(); core::mem::offset_of!(TrapFrame, tpidr_el0)];
+const _: [(); 808] = [(); core::mem::offset_of!(TrapFrame, tpidrro_el0)];
 
 const ESR_EC_SHIFT: u64 = 26;
 const ESR_EC_MASK: u64 = 0x3f;

@@ -30,5 +30,6 @@ Public Markdown documentation is maintained in English. Paths already establishe
 - [Mapped buffering and region rendering](milestones/ui/MOBILE_MAPPED_BUFFERQUEUE.md)
 - [AndroidBox Layout Mixed-19, ABI 69](milestones/androidbox/ANDROIDBOX_LAYOUT_MIXED_19.md)
 - [Native arm64 entry and Linux ABI subset, ABI 70](milestones/androidbox/LINUX_ARM64_ENTRY.md)
+- [Real static Bionic startup and native runtime checks](milestones/androidbox/BIONIC_STATIC_0.md)
 
 Historical pages report their original profile and validation date, not universal compatibility or a fresh test run. See [the archive policy](archive/README.md) for source preservation.
