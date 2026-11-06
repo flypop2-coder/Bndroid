@@ -1,4 +1,4 @@
-//! Checked Linux private virtual-memory plans, without page-table side effects.
+//! Checked Linux virtual-memory plans, without page-table side effects.
 use alloc::vec::Vec;
 
 pub const PAGE: u64 = 4096;
@@ -48,6 +48,10 @@ pub struct FileBacking {
     pub offset: u64,
     pub inode: u64,
     pub path: &'static str,
+    /// Anonymous mutable file; inode identifies its retained open description.
+    pub memory: bool,
+    /// Permission at mmap time, retained across later FUTURE_WRITE sealing.
+    pub may_write: bool,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Region {
@@ -60,6 +64,7 @@ pub struct Region {
     pub shared: bool,
     pub file_page_end: u64,
     pub wipe_on_fork: bool,
+    pub dont_fork: bool,
 }
 
 #[derive(Debug, Default)]
@@ -141,7 +146,8 @@ impl Layout {
             return Err(EINVAL);
         }
         let protection = Protection::from_linux(prot)?;
-        if shared && file_bytes.is_some() && protection == Protection::ReadWrite {
+        if shared && file_bytes.is_some_and(|f| !f.may_write) && protection == Protection::ReadWrite
+        {
             return Err(EACCES);
         }
         let size = rounded_length(length)?;
@@ -174,10 +180,9 @@ impl Layout {
         let size = rounded_length(length)?;
         let end = checked_range(address, size)?;
         if protection == Protection::ReadWrite
-            && self
-                .regions
-                .iter()
-                .any(|r| r.start < end && address < r.end && r.shared && r.file_backed)
+            && self.regions.iter().any(|r| {
+                r.start < end && address < r.end && r.shared && r.file.is_some_and(|f| !f.may_write)
+            })
         {
             return Err(EACCES);
         }
@@ -204,6 +209,18 @@ impl Layout {
     }
 
     pub fn advise_fork(&self, address: u64, length: u64, wipe: bool) -> Result<Self, i64> {
+        self.advise_inheritance(address, length, Some(wipe), None)
+    }
+    pub fn advise_dontfork(&self, address: u64, length: u64, dont: bool) -> Result<Self, i64> {
+        self.advise_inheritance(address, length, None, Some(dont))
+    }
+    fn advise_inheritance(
+        &self,
+        address: u64,
+        length: u64,
+        wipe: Option<bool>,
+        dont: Option<bool>,
+    ) -> Result<Self, i64> {
         let size = rounded_length(length)?;
         let end = checked_range(address, size)?;
         let mut regions = Vec::new();
@@ -219,7 +236,7 @@ impl Layout {
             if r.start > cursor {
                 return Err(ENOMEM);
             }
-            if wipe && (r.file_backed || r.shared) {
+            if wipe == Some(true) && (r.file_backed || r.shared) {
                 return Err(EINVAL);
             }
             if r.start < address {
@@ -228,7 +245,8 @@ impl Layout {
             regions.push(Region {
                 start: r.start.max(address),
                 end: r.end.min(end),
-                wipe_on_fork: wipe,
+                wipe_on_fork: wipe.unwrap_or(r.wipe_on_fork),
+                dont_fork: dont.unwrap_or(r.dont_fork),
                 ..r
             });
             if end < r.end {
@@ -353,6 +371,7 @@ impl Layout {
                     None => 0,
                 },
                 wipe_on_fork: false,
+                dont_fork: false,
             });
         }
         regions.sort_unstable_by_key(|r| r.start);
@@ -366,6 +385,7 @@ impl Layout {
                 && regions[index - 1].shared == regions[index].shared
                 && regions[index - 1].file_page_end == regions[index].file_page_end
                 && regions[index - 1].wipe_on_fork == regions[index].wipe_on_fork
+                && regions[index - 1].dont_fork == regions[index].dont_fork
             {
                 regions[index - 1].end = regions[index].end;
                 regions.remove(index);
@@ -408,6 +428,49 @@ pub fn is_arena_address(address: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[cfg(feature = "art-runtime")]
+    fn memfd_mapping_rights_and_inheritance_survive_splits() {
+        let backing = FileBacking {
+            memory: true,
+            may_write: true,
+            ..file(PAGE * 3)
+        };
+        let mapped = Layout::default()
+            .map_with_backing(0, PAGE * 3, 3, 0x21, 0, Some(backing))
+            .unwrap();
+        let start = mapped.start;
+        let protected = mapped.layout.protect(start + PAGE, PAGE, 1).unwrap().layout;
+        let advised = protected.advise_dontfork(start, PAGE * 2, true).unwrap();
+        assert!(
+            advised
+                .regions
+                .iter()
+                .take(2)
+                .all(|r| r.dont_fork && r.file.unwrap().may_write)
+        );
+        assert!(!advised.regions.last().unwrap().dont_fork);
+        assert!(advised.protect(start, PAGE * 3, 3).is_ok());
+        assert_eq!(advised.protect(start, PAGE, 7).err(), Some(EACCES));
+        let sealed = Layout::default()
+            .map_with_backing(
+                0,
+                PAGE,
+                1,
+                0x21,
+                0,
+                Some(FileBacking {
+                    may_write: false,
+                    ..backing
+                }),
+            )
+            .unwrap();
+        assert_eq!(
+            sealed.layout.protect(sealed.start, PAGE, 3).err(),
+            Some(EACCES)
+        );
+        assert_eq!(advised.advise_fork(start, PAGE, true).err(), Some(EINVAL));
+    }
     #[test]
     fn discard_preflight_rejects_holes_shared_backing_and_overflow_without_changes() {
         let layout = Layout::default().map(0, PAGE * 3, 3, 0x22, 0).unwrap();
@@ -462,6 +525,8 @@ mod tests {
             offset: PAGE * 3,
             inode: 5,
             path: "system/data",
+            memory: false,
+            may_write: false,
         };
         let mapped = Layout::default()
             .map_with_backing(0, PAGE * 3, 3, 0x22, PAGE * 3, Some(backing))
@@ -506,6 +571,8 @@ mod tests {
             offset: 0,
             inode: 1,
             path: "system/test",
+            memory: false,
+            may_write: false,
         }
     }
     #[test]
@@ -630,6 +697,7 @@ mod tests {
                 shared: false,
                 file_page_end: 0,
                 wipe_on_fork: false,
+                dont_fork: false,
             }
         );
         let split = layout.protect(ARENA_START + PAGE, 7, 3).unwrap().layout;

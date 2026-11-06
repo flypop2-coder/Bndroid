@@ -20,6 +20,18 @@ PROCESS = "LINUX_PROCESS_EXIT pid=4294967298 code=0 native_handles=0\nLINUX_PROC
 
 
 class EvidenceTests(unittest.TestCase):
+    def test_memfd_needs_both_processes_fault_returns_and_zero_live_resources(self):
+        marker = "ART_MEMFD_OK aliases=1 code=1 truncate=1 seals=1 lifetime=1 wx=1\n"
+        signals = "LINUX_SIGNALS_OK delivered=6 returned=6 interrupted=0 pending=0\n"
+        log = marker * 2 + signals + PROCESS + PROOF
+        self.assertEqual(completion_status(log, "memfd"), "memfd-passed")
+        for old, new in (("returned=6", "returned=5"), ("delivered=6", "delivered=0"), ("pending=0", "pending=1")):
+            self.assertEqual(completion_status(log.replace(old, new), "memfd"), "invalid-memfd-fault-proof")
+        self.assertNotEqual(completion_status(log.replace("wx=1", "wx=0"), "memfd"), "memfd-passed")
+        for peak in ("1000", "40000"):
+            self.assertEqual(completion_status(log.replace("peak_anonymous_pages=17000", "peak_anonymous_pages=" + peak), "memfd"), "invalid-memfd-backing-proof")
+        self.assertEqual(completion_status(log.replace("live_anonymous_pages=0", "live_anonymous_pages=1"), "memfd"), "invalid-cleanup-proof")
+
     def test_framework_requires_both_native_operations_and_authenticated_process_logs(self):
         def messages(pid):
             return "".join(f"ANDROID_LOG pid={pid} buffer=0 priority=4 tag=bndroid-framework message={message}\n"

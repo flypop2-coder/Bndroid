@@ -2,6 +2,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
+#include <stdint.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/random.h>
@@ -27,15 +28,24 @@ int main(void) {
     CHECK(__system_property_get("ro.dalvik.vm.native.bridge", value) == 1 && strcmp(value, "0") == 0);
     CHECK(__system_property_get("ro.product.cpu.abilist32", value) == 0 && value[0] == 0);
     CHECK(__system_property_get("ro.bndroid.absent", value) == 0 && value[0] == 0);
+    CHECK(__system_property_get("ro.build.version.sdk", value) == 2 && strcmp(value, "36") == 0);
+    CHECK(__system_property_get("ro.build.version.sdk_full", value) == 4 && strcmp(value, "36.1") == 0);
+    CHECK(__system_property_get("ro.build.version.all_codenames", value) == 3 && strcmp(value, "REL") == 0);
     const prop_info *property = __system_property_find("ro.product.cpu.abilist64");
     CHECK(property != NULL && __system_property_find("ro.bndroid.absent") == NULL);
     struct property_value result = {0, 0};
     int count = 0;
     __system_property_read_callback(property, read_value, &result);
-    CHECK(result.matched == 1 && __system_property_foreach(count_property, &count) == 0 && count == 6);
+    CHECK(result.matched == 1 && __system_property_foreach(count_property, &count) == 0 && count == 13);
+    struct timespec before, after, monotonic;
+    CHECK(clock_gettime(CLOCK_BOOTTIME, &before) == 0);
     struct timespec timeout = {0, 10000000};
     uint32_t next = 0;
     CHECK(!__system_property_wait(property, result.serial, &next, &timeout));
+    CHECK(clock_gettime(CLOCK_BOOTTIME, &after) == 0 && clock_gettime(CLOCK_MONOTONIC, &monotonic) == 0);
+    int64_t elapsed = (after.tv_sec-before.tv_sec)*1000000000LL + after.tv_nsec-before.tv_nsec;
+    int64_t clocks = (monotonic.tv_sec-after.tv_sec)*1000000000LL + monotonic.tv_nsec-after.tv_nsec;
+    CHECK(elapsed >= 10000000 && clocks >= 0 && clocks < 1000000000);
     int fd = open("/dev/__properties__", O_RDONLY|O_CLOEXEC);
     CHECK(fd >= 0);
     void *mapped = mmap(NULL, 128*1024, PROT_READ, MAP_SHARED, fd, 0);

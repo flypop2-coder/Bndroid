@@ -28,6 +28,7 @@ def completion_status(text, mode):
         return None
     expected = {
         "memory": "ART_MEMORY_OK low_64m=1 protections=1 holes=1 shared_threads=1 kernel_isolation=1\n",
+        "memfd": "ART_MEMFD_OK aliases=1 code=1 truncate=1 seals=1 lifetime=1 wx=1\n",
         "properties": "ART_PROPERTIES_OK bionic_reader=1 callback=1 enumerate=1 wait=1 immutable=1\n",
         "help": "dalvikvm: [options] class [argument ...]\n",
         "framework-help": "dalvikvm: [options] class [argument ...]\n",
@@ -70,6 +71,15 @@ def completion_status(text, mode):
         return "invalid-process-proof"
     if not threads.get("created") or threads["created"] != threads.get("reaped"):
         return "invalid-thread-proof"
+    if mode == "memfd":
+        try:
+            signals = parse_marker(text, "LINUX_SIGNALS_OK")
+            if not signals or signals.get("pending") != "0" or int(signals.get("delivered", 0)) != 6 or signals.get("returned") != signals.get("delivered"):
+                return "invalid-memfd-fault-proof"
+            if not 16384 <= int(proof.get("peak_anonymous_pages", 0)) < 20000 or int(proof.get("reclaimed_anonymous_pages", 0)) < 32768:
+                return "invalid-memfd-backing-proof"
+        except ValueError:
+            return "invalid-memfd-fault-proof"
     if mode == "properties":
         try:
             if int(threads.get("waits", 0)) < 2 or int(threads.get("timeouts", 0)) < 2:
@@ -159,7 +169,7 @@ def main():
     process = None
     text = ""
     status = "timeout"
-    if mode not in ("java", "managed", "memory", "properties", "help", "framework", "framework-help", "signals", "signal-bad-frame", "signal-bad-pc", "signal-bad-fp", "signal-default", "signal-guard"):
+    if mode not in ("java", "managed", "memory", "memfd", "properties", "help", "framework", "framework-help", "signals", "signal-bad-frame", "signal-bad-pc", "signal-bad-fp", "signal-default", "signal-guard"):
         raise SystemExit("Unknown ART mode")
     with tempfile.NamedTemporaryFile(prefix="bndroid-art-entropy-") as entropy:
         entropy.write(os.urandom(65536))
@@ -202,6 +212,7 @@ def main():
                "managed_runtime_verified": mode == "managed" and status == "managed-passed",
                "apk_dex_jni_verified": mode == "managed" and status == "managed-passed",
                "framework_frontend_verified": mode == "framework-help" and status == "framework-help-passed",
+               "shared_memfd_verified": mode == "memfd" and status == "memfd-passed",
                "boot_properties_verified": mode == "properties" and status == "properties-passed",
                "framework_parcel_looper_verified": mode == "framework" and status == "framework-passed",
                "abort_messages": re.findall(r"^LINUX_ABORT_MESSAGE pid=\d+ message=(.*)$", text, re.MULTILINE),

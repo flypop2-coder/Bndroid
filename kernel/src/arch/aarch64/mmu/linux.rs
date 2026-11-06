@@ -1,28 +1,18 @@
-//! Sparse private Linux anonymous/file mappings. No user-controlled address may
-//! select a shared kernel table or the native image/stack window.
+//! Sparse Linux mappings with private or retained anonymous-file backing.
+//! User addresses cannot select kernel tables or the native image/stack window.
 use super::*;
 use bndroid_kernel::linux_vm::{
     self, Change, EACCES, EINVAL, ENOMEM, Layout as VmLayout, Protection,
 };
 
-// Framework startup also extracts its full boot DEX set; observed ART-only
-// limits fail before framework.jar can load. Keep each profile hard-bounded.
-const MAX_PAGES: usize = if cfg!(feature = "framework-runtime") {
-    131072
-} else if cfg!(feature = "art-runtime") {
-    65536
-} else {
-    8192
-};
+use bndroid_kernel::linux_pages;
+const MAX_PAGES: usize = linux_pages::MAX_PAGES;
 const MAX_TABLES: usize = if cfg!(feature = "framework-runtime") {
     512
 } else {
     256
 };
-static LIVE_PAGES: AtomicU64 = AtomicU64::new(0);
 static LIVE_TABLES: AtomicU64 = AtomicU64::new(0);
-static PEAK_PAGES: AtomicU64 = AtomicU64::new(0);
-static RECLAIMED_PAGES: AtomicU64 = AtomicU64::new(0);
 #[cfg(feature = "art-runtime")]
 static DISCARDED_PAGES: AtomicU64 = AtomicU64::new(0);
 #[cfg(feature = "art-runtime")]
@@ -39,11 +29,12 @@ pub struct LinuxMemorySnapshot {
     pub demand_zero_pages: u64,
 }
 pub fn linux_memory_snapshot() -> LinuxMemorySnapshot {
+    let (pages, peak_pages, reclaimed_pages) = linux_pages::snapshot();
     LinuxMemorySnapshot {
-        pages: LIVE_PAGES.load(Ordering::Acquire),
+        pages,
         tables: LIVE_TABLES.load(Ordering::Acquire),
-        peak_pages: PEAK_PAGES.load(Ordering::Acquire),
-        reclaimed_pages: RECLAIMED_PAGES.load(Ordering::Acquire),
+        peak_pages,
+        reclaimed_pages,
         #[cfg(feature = "art-runtime")]
         discarded_pages: DISCARDED_PAGES.load(Ordering::Acquire),
         #[cfg(feature = "art-runtime")]
@@ -51,11 +42,37 @@ pub fn linux_memory_snapshot() -> LinuxMemorySnapshot {
     }
 }
 
+// Physical frames are page aligned. Keep ownership in the low bit rather than
+// a two-word enum: each of up to 131072 mapping records stays 24 bytes, avoiding
+// large vector reallocations that fragment the bounded 8 MiB kernel heap.
+struct Frame(usize);
+impl Frame {
+    fn private(page: linux_pages::Page) -> Self {
+        Self(page.into_address() | 1)
+    }
+    #[cfg(feature = "art-runtime")]
+    fn shared(frame: PhysFrame) -> Self {
+        Self(frame.start_address())
+    }
+    fn start_address(&self) -> usize {
+        self.0 & !1
+    }
+}
+impl Drop for Frame {
+    fn drop(&mut self) {
+        if self.0 & 1 != 0 {
+            // This token was transferred by private(), never copied, and is
+            // released only after the owning mapping has invalidated its PTE.
+            drop(unsafe { linux_pages::Page::from_address(self.start_address()) });
+        }
+    }
+}
 struct Page {
     address: usize,
-    frame: OwnedFrame,
+    frame: Frame,
     protection: Protection,
 }
+const _: () = assert!(core::mem::size_of::<Page>() == 24);
 struct Table {
     key: usize,
     level: u8,
@@ -67,6 +84,8 @@ pub(super) struct LinuxMappings {
     layout: VmLayout,
     pages: Vec<Page>,
     tables: Vec<Table>,
+    #[cfg(feature = "art-runtime")]
+    memories: Vec<bndroid_kernel::linux_fd::FileRef>,
 }
 
 #[derive(Default)]
@@ -78,6 +97,8 @@ struct Prepared {
 enum Source<'a> {
     File(&'a [u8]),
     #[cfg(feature = "art-runtime")]
+    Memory(&'a bndroid_kernel::linux_memfd::MemoryFile),
+    #[cfg(feature = "art-runtime")]
     Move {
         start: usize,
         end: usize,
@@ -86,7 +107,7 @@ enum Source<'a> {
 impl Drop for Prepared {
     fn drop(&mut self) {
         for page in self.pages.drain(..) {
-            release_destroyed_address_space_frame(page.frame, "unpublished Linux page");
+            drop(page);
         }
         for table in self.tables.drain(..) {
             release_destroyed_address_space_frame(table.frame, "unpublished Linux table");
@@ -95,6 +116,107 @@ impl Drop for Prepared {
 }
 
 impl LinuxMappings {
+    #[cfg(feature = "art-runtime")]
+    fn retain_memories(&mut self) {
+        self.memories.retain(|opened| {
+            let inode = opened.memory().unwrap().inode();
+            self.layout
+                .regions
+                .iter()
+                .any(|r| r.file.is_some_and(|f| f.memory && f.inode == inode))
+        });
+    }
+
+    #[cfg(feature = "art-runtime")]
+    fn resize_memory(
+        &mut self,
+        asid: u8,
+        memory: &bndroid_kernel::linux_memfd::MemoryFile,
+        length: u64,
+    ) -> Result<u64, i64> {
+        let prepared = memory.prepare_resize(length)?;
+        let eof = length.div_ceil(PAGE_SIZE as u64) * PAGE_SIZE as u64;
+        let remove = |page: &Page| {
+            self.layout.regions.iter().any(|r| {
+                r.start <= page.address as u64
+                    && (page.address as u64) < r.end
+                    && r.file.is_some_and(|f| {
+                        f.memory
+                            && f.inode == memory.inode()
+                            && f.offset + page.address as u64 - r.file_origin >= eof
+                    })
+            })
+        };
+        let guard = PageTableGuard::acquire().map_err(|_| ENOMEM)?;
+        for page in &self.pages {
+            if remove(page) {
+                unsafe {
+                    ptr::write_volatile(self.leaf(page.address).unwrap(), 0);
+                }
+            }
+        }
+        unsafe {
+            invalidate_asid(asid);
+        }
+        // Shared Page entries do not own physical frames. Drop their aliases
+        // before truncating the backing object's unique frame ownership.
+        self.pages.retain(|page| !remove(page));
+        unsafe {
+            memory.commit_resize(prepared);
+        }
+        for region in &mut self.layout.regions {
+            if let Some(file) = region.file.as_mut()
+                && file.memory
+                && file.inode == memory.inode()
+            {
+                file.available = length.saturating_sub(file.offset);
+                region.file_page_end = region.file_origin
+                    + file.available.div_ceil(PAGE_SIZE as u64) * PAGE_SIZE as u64;
+            }
+        }
+        drop(guard);
+        Ok(0)
+    }
+
+    #[cfg(feature = "art-runtime")]
+    fn demand_memory(
+        &mut self,
+        l1: &OwnedFrame,
+        asid: u8,
+        address: usize,
+        write: bool,
+        execute: bool,
+    ) -> Result<bool, i64> {
+        if self.pages.iter().any(|page| page.address == address) {
+            return Ok(false);
+        }
+        let Some(region) = self.layout.regions.iter().find(|r| {
+            r.start <= address as u64
+                && (address as u64) < r.end
+                && r.file.is_some_and(|f| f.memory)
+        }) else {
+            return Ok(false);
+        };
+        if address as u64 >= region.file_page_end
+            || region.protection == Protection::None
+            || write && region.protection != Protection::ReadWrite
+            || execute && region.protection != Protection::ReadExecute
+        {
+            return Ok(false);
+        }
+        let protection = match region.protection {
+            Protection::Read => 1,
+            Protection::ReadWrite => 3,
+            Protection::ReadExecute => 5,
+            Protection::None => unreachable!(),
+        };
+        let change = self
+            .layout
+            .protect(address as u64, PAGE_SIZE as u64, protection)?;
+        self.apply(l1, asid, change, None)?;
+        Ok(true)
+    }
+
     #[cfg(feature = "art-runtime")]
     fn discard(&mut self, asid: u8, address: u64, length: u64) -> Result<u64, i64> {
         if length == 0 {
@@ -128,13 +250,12 @@ impl LinuxMappings {
             let page = &self.pages[index];
             if address <= page.address as u64 && (page.address as u64) < end {
                 let page = self.pages.swap_remove(index);
-                release_destroyed_address_space_frame(page.frame, "Linux MADV_DONTNEED");
+                drop(page);
                 count += 1;
             } else {
                 index += 1;
             }
         }
-        reclaim_pages(count);
         DISCARDED_PAGES.fetch_add(count, Ordering::Relaxed);
         // Keep the VMA's rights and private empty tables. A later permitted
         // access repopulates a fresh zero page; PROT_NONE stays inaccessible.
@@ -181,10 +302,7 @@ impl LinuxMappings {
         self.pages.try_reserve(1).map_err(|_| ENOMEM)?;
         let guard = PageTableGuard::acquire().map_err(|_| ENOMEM)?;
         assert_eq!(unsafe { ptr::read_volatile(leaf) }, 0);
-        let frame = memory::allocate_frame().map_err(|_| ENOMEM)?;
-        unsafe {
-            ptr::write_bytes(frame.start_address() as *mut u8, 0, PAGE_SIZE);
-        }
+        let frame = Frame::private(linux_pages::Page::allocate()?);
         if execute {
             crate::userboot::synchronize_instruction_cache(frame.start_address(), PAGE_SIZE);
         }
@@ -199,8 +317,6 @@ impl LinuxMappings {
         }
         self.pages.push(page);
         drop(guard);
-        let live = LIVE_PAGES.fetch_add(1, Ordering::AcqRel) + 1;
-        PEAK_PAGES.fetch_max(live, Ordering::Relaxed);
         DEMAND_ZERO_PAGES.fetch_add(1, Ordering::Relaxed);
         Ok(true)
     }
@@ -256,6 +372,11 @@ impl LinuxMappings {
             {
                 change.layout = change.layout.advise_fork(old_end, new - old, true)?;
             }
+            if let Ok(change) = growth.as_mut()
+                && region.dont_fork
+            {
+                change.layout = change.layout.advise_dontfork(old_end, new - old, true)?;
+            }
             if let Ok(change) = growth {
                 self.apply(l1, asid, change, None)?;
                 return Ok(address);
@@ -278,6 +399,9 @@ impl LinuxMappings {
         change.layout = change.layout.unmap(address, old)?.layout;
         if region.wipe_on_fork {
             change.layout = change.layout.advise_fork(result, new, true)?;
+        }
+        if region.dont_fork {
+            change.layout = change.layout.advise_dontfork(result, new, true)?;
         }
         // Both layout changes, all destination pages/copies and metadata are
         // prepared before either address changes. Allocation failure leaves
@@ -420,10 +544,37 @@ impl LinuxMappings {
                 if remaining + pending.pages.len() >= MAX_PAGES {
                     return Err(ENOMEM);
                 }
-                let frame = memory::allocate_frame().map_err(|_| ENOMEM)?;
-                unsafe {
-                    ptr::write_bytes(frame.start_address() as *mut u8, 0, PAGE_SIZE);
-                }
+                #[cfg(feature = "art-runtime")]
+                let shared = change.layout.regions.iter().find_map(|region| {
+                    let file = region.file?;
+                    if !(file.memory
+                        && region.start <= address as u64
+                        && (address as u64) < region.end)
+                    {
+                        return None;
+                    }
+                    let memory = match source {
+                        Some(Source::Memory(memory)) if memory.inode() == file.inode => memory,
+                        _ => self
+                            .memories
+                            .iter()
+                            .filter_map(|f| f.memory())
+                            .find(|m| m.inode() == file.inode)
+                            .expect("retained memfd mapping"),
+                    };
+                    Some(
+                        memory
+                            .page(file.offset + address as u64 - region.file_origin)
+                            .expect("resident memfd page below EOF"),
+                    )
+                });
+                #[cfg(feature = "art-runtime")]
+                let frame = match shared {
+                    Some(frame) => Frame::shared(frame),
+                    None => Frame::private(linux_pages::Page::allocate()?),
+                };
+                #[cfg(not(feature = "art-runtime"))]
+                let frame = Frame::private(linux_pages::Page::allocate()?);
                 if let Some(Source::File(bytes)) = source {
                     let offset = address - start;
                     let count = bytes.len().saturating_sub(offset).min(PAGE_SIZE);
@@ -473,8 +624,16 @@ impl LinuxMappings {
             }
         }
         // Reserve every metadata mutation before publishing any descriptor.
+        // Replacements remove their old entries before appending new ones.
+        // Reserving old+new would spuriously double the large page vector for
+        // an equal-size MAP_FIXED update (ART's R-to-RX code-cache view).
         self.pages
-            .try_reserve(pending.pages.len())
+            .try_reserve(
+                pending
+                    .pages
+                    .len()
+                    .saturating_sub(self.pages.len() - remaining),
+            )
             .map_err(|_| ENOMEM)?;
         self.tables
             .try_reserve(pending.tables.len())
@@ -484,7 +643,6 @@ impl LinuxMappings {
             .try_reserve_exact(self.pages.len() - remaining)
             .map_err(|_| ENOMEM)?;
         let guard = PageTableGuard::acquire().map_err(|_| ENOMEM)?;
-        let added_pages = pending.pages.len() as u64;
         let added_tables = pending.tables.len() as u64;
         for page in &self.pages {
             if start <= page.address && page.address < end || moving(page.address) {
@@ -565,14 +723,11 @@ impl LinuxMappings {
             invalidate_asid(asid);
         }
         drop(guard);
-        let live = LIVE_PAGES.fetch_add(added_pages, Ordering::AcqRel) + added_pages;
-        PEAK_PAGES.fetch_max(live, Ordering::Relaxed);
         LIVE_TABLES.fetch_add(added_tables, Ordering::AcqRel);
         self.layout = change.layout;
-        reclaim_pages(removed.len() as u64);
-        for page in removed {
-            release_destroyed_address_space_frame(page.frame, "Linux munmap");
-        }
+        drop(removed);
+        #[cfg(feature = "art-runtime")]
+        self.retain_memories();
         Ok(())
     }
 
@@ -605,8 +760,8 @@ impl LinuxMappings {
                 .regions
                 .iter()
                 .find(|r| {
-                    !r.file_backed
-                        && !r.shared
+                    ((!r.file_backed && !r.shared)
+                        || (r.file.is_some_and(|f| f.memory) && (address as u64) < r.file_page_end))
                         && r.start <= address as u64
                         && (address as u64) < r.end
                 })
@@ -665,10 +820,9 @@ impl LinuxMappings {
     }
 
     pub(super) fn release(mut self) {
-        reclaim_pages(self.pages.len() as u64);
         LIVE_TABLES.fetch_sub(self.tables.len() as u64, Ordering::AcqRel);
         for page in self.pages.drain(..) {
-            release_destroyed_address_space_frame(page.frame, "Linux user leaf");
+            drop(page);
         }
         for table in self.tables.drain(..) {
             release_destroyed_address_space_frame(table.frame, "Linux private table");
@@ -693,12 +847,6 @@ impl LinuxMappings {
     }
 }
 
-fn reclaim_pages(count: u64) {
-    let old = LIVE_PAGES.fetch_sub(count, Ordering::AcqRel);
-    assert!(old >= count, "Linux live page accounting underflow");
-    RECLAIMED_PAGES.fetch_add(count, Ordering::Relaxed);
-}
-
 fn page_descriptor(page: &Page) -> u64 {
     match page.protection {
         Protection::None => 0,
@@ -710,6 +858,86 @@ fn page_descriptor(page: &Page) -> u64 {
 
 impl UserAddressSpace {
     #[cfg(feature = "art-runtime")]
+    pub fn linux_memfd_resize(
+        &mut self,
+        memory: &bndroid_kernel::linux_memfd::MemoryFile,
+        length: u64,
+    ) -> Result<u64, i64> {
+        self.linux.resize_memory(self.asid(), memory, length)
+    }
+    #[cfg(feature = "art-runtime")]
+    pub fn linux_memfd_seal(
+        &self,
+        memory: &bndroid_kernel::linux_memfd::MemoryFile,
+        seals: u64,
+    ) -> Result<u64, i64> {
+        let writable = self.linux.layout.regions.iter().any(|r| {
+            r.shared
+                && r.file
+                    .is_some_and(|f| f.memory && f.inode == memory.inode() && f.may_write)
+        });
+        memory.add_seals(seals, writable)
+    }
+    #[cfg(feature = "art-runtime")]
+    pub fn linux_mmap_memory(
+        &mut self,
+        args: [u64; 6],
+        opened: &bndroid_kernel::linux_fd::FileRef,
+    ) -> Result<u64, i64> {
+        let memory = opened.memory().ok_or(19)?;
+        if args[5] > i64::MAX as u64 || !args[5].is_multiple_of(PAGE_SIZE as u64) {
+            return Err(EINVAL);
+        }
+        // Private mutable-file mappings require copy-on-write, not independent
+        // eager snapshots. Leave them unsupported until that behavior exists.
+        if args[3] & 3 == 2 {
+            return Err(38);
+        }
+        if args[3] & 3 != 1 || args[3] & 0x20 != 0 {
+            return Err(EINVAL);
+        }
+        if args[2] & 2 != 0 && !opened.writable() {
+            return Err(EACCES);
+        }
+        if args[2] & 2 != 0 && !memory.may_write() {
+            return Err(1);
+        }
+        let change = self.linux.layout.map_with_backing(
+            args[0],
+            args[1],
+            args[2],
+            args[3] | 0x20,
+            args[5],
+            Some(linux_vm::FileBacking {
+                available: memory.len().saturating_sub(args[5]),
+                offset: args[5],
+                inode: memory.inode(),
+                path: "memfd:anonymous (deleted)",
+                memory: true,
+                may_write: opened.writable() && memory.may_write(),
+            }),
+        )?;
+        let start = change.start;
+        if !self
+            .linux
+            .memories
+            .iter()
+            .any(|f| f.memory().unwrap().inode() == memory.inode())
+        {
+            self.linux.memories.try_reserve(1).map_err(|_| ENOMEM)?;
+            self.linux.memories.push(opened.clone());
+        }
+        let result = self.linux.apply(
+            &self.level_1,
+            self.asid(),
+            change,
+            Some(Source::Memory(memory)),
+        );
+        self.linux.retain_memories();
+        result?;
+        Ok(start)
+    }
+    #[cfg(feature = "art-runtime")]
     pub fn linux_demand_fault(&mut self, esr: u64, address: u64) -> bool {
         let class = (esr >> 26) & 63;
         if !matches!(class, 0x20 | 0x24 | 0x25)
@@ -719,6 +947,19 @@ impl UserAddressSpace {
             return false;
         }
         let page = address as usize & !(PAGE_SIZE - 1);
+        if self
+            .linux
+            .demand_memory(
+                &self.level_1,
+                self.asid(),
+                page,
+                class != 0x20 && esr & (1 << 6) != 0,
+                class == 0x20,
+            )
+            .unwrap_or(false)
+        {
+            return true;
+        }
         self.linux
             .demand_zero(
                 self.asid(),
@@ -815,7 +1056,17 @@ impl UserAddressSpace {
                 (
                     file.offset + region.start - region.file_origin,
                     file.inode,
-                    file.path,
+                    if file.memory {
+                        self.linux
+                            .memories
+                            .iter()
+                            .filter_map(|f| f.memory())
+                            .find(|m| m.inode() == file.inode)
+                            .expect("retained memfd proc name")
+                            .proc_name()
+                    } else {
+                        file.path
+                    },
                 )
             });
             rows.push(Map {
@@ -904,6 +1155,14 @@ impl UserAddressSpace {
             // Validate the whole user-owned range, including inaccessible VMAs.
             return self.linux_msync(address, length, 0);
         }
+        #[cfg(feature = "art-runtime")]
+        if matches!(advice, 10 | 11) {
+            self.linux.layout = self
+                .linux
+                .layout
+                .advise_dontfork(address, length, advice == 10)?;
+            return Ok(0);
+        }
         if !matches!(advice, 18 | 19) {
             return Err(EINVAL);
         }
@@ -959,6 +1218,8 @@ impl UserAddressSpace {
                 offset: args[5],
                 path: node.path,
                 inode: node.inode,
+                memory: false,
+                may_write: false,
             }),
         )?;
         let start = change.start;

@@ -12,6 +12,8 @@ import xml.etree.ElementTree as ET
 
 from android_art_inputs import LIMIT
 
+REQUIRED_METADATA = ("/system/etc/init/netbpfload.rc",)
+
 
 def validate_inputs(output):
     receipt = json.loads((output / "art-provenance.json").read_text())
@@ -47,7 +49,7 @@ def extract_framework(command, output, sdk):
     receipt_path = output / "art-provenance.json"
     receipt = json.loads(receipt_path.read_text())
     files = receipt["files"]
-    core_files = sorted(files)
+    core_files = receipt.get("framework", {}).get("core_art_files", sorted(files))
     progress_path = output / "framework-progress.json"
     source_hash = hashlib.sha256(receipt_path.read_bytes()).hexdigest()
     if progress_path.exists():
@@ -67,7 +69,7 @@ def extract_framework(command, output, sdk):
     inventory = set((output / "art-inventory.txt").read_text().splitlines())
     modules = sorted({node.attrib["moduleName"] for node in ET.parse(output / "apex-info-list.xml").getroot()
                       if node.attrib.get("isActive") == "true" and re.fullmatch(r"com\.android\.[a-z0-9.]+", node.attrib.get("moduleName", ""))})
-    directories = ["/system/bin", "/system/framework", "/system_ext/lib64", "/apex/com.android.tzdata/etc"]
+    directories = ["/system/bin", "/system/framework", "/system/etc/init", "/system_ext/lib64", "/apex/com.android.tzdata/etc"]
     directories += [f"/apex/{module}/{part}" for module in modules for part in ("lib64", "javalib")]
     warnings = []
     for directory in directories:
@@ -117,6 +119,10 @@ def extract_framework(command, output, sdk):
             raise RuntimeError(f"Boot classpath is outside the approved platform/APEX set: {path}")
         pull(path)
     pull("/system/framework/framework-res.apk")
+    for path in REQUIRED_METADATA:
+        # libmeminfo's API-36 constructor reads the version header. This is
+        # passive source metadata; Bndroid does not execute Android init rules.
+        pull(path)
     for path in sorted(inventory):
         if path.startswith("/apex/com.android.tzdata/etc/"):
             pull(path)

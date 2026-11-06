@@ -26,4 +26,11 @@ The subsequent Framework inventory measures 347 files / 265,049,386 bytes, inclu
 
 ## Consequences and remaining work
 
+The memfd integration adds the same source's 696-byte
+`/system/etc/init/netbpfload.rc` as passive version metadata required by
+libmeminfo's API-36 constructor. The inventory is now 348 files / 265,050,082 bytes,
+with all previous file records unchanged. It does not start Android init or a BPF
+service. The version properties describe this frozen library set, while the
+application acceptance matrix remains incomplete.
+
 This provides a concrete, reproducible source for testing the custom kernel against real Android runtime behavior without a large source acquisition. Android's namespace, property, signal, memory, filesystem, Binder, and service semantics still have to be implemented and verified. Booting an SDK emulator to read files is never evidence that Bndroid runs Android applications. The acceptance levels in `TODO.md` remain unchanged and incomplete until their full requirements pass on Bndroid.

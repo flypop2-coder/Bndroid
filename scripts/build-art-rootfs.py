@@ -8,7 +8,8 @@ from pathlib import Path, PurePosixPath
 import tarfile
 import zipfile
 
-from android_properties import BOOT_PROPERTIES, encode_properties
+from android_properties import encode_properties, runtime_properties
+from android_framework_inputs import REQUIRED_METADATA
 
 
 def main():
@@ -16,12 +17,14 @@ def main():
     parser.add_argument("--runtime", required=True, type=Path)
     parser.add_argument("--dex", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--mode", choices=("java", "managed", "memory", "properties", "help", "framework", "framework-help", "signals", "signal-bad-frame", "signal-bad-pc", "signal-bad-fp", "signal-default", "signal-guard"), default="java")
+    parser.add_argument("--mode", choices=("java", "managed", "memory", "memfd", "properties", "help", "framework", "framework-help", "signals", "signal-bad-frame", "signal-bad-pc", "signal-bad-fp", "signal-default", "signal-guard"), default="java")
     args = parser.parse_args()
     provenance = json.loads((args.runtime / "art-provenance.json").read_text())
     framework = args.mode.startswith("framework")
     if framework and "framework" not in provenance:
         raise SystemExit("Framework mode requires inputs extracted with --include-framework")
+    if framework and not all(path in provenance["files"] for path in REQUIRED_METADATA):
+        raise SystemExit("Framework metadata is incomplete; re-run extraction with --resume-framework --include-framework")
     inputs = {}
     for name, receipt in provenance["files"].items():
         path = PurePosixPath(name)
@@ -64,7 +67,9 @@ def main():
     if framework:
         inputs["system/framework/bndroid-probe.dex"] = (args.dex.parent / "framework.dex").read_bytes()
     if framework or args.mode == "properties":
-        inputs["dev/__properties__"] = encode_properties(BOOT_PROPERTIES)
+        inputs["dev/__properties__"] = encode_properties(runtime_properties(provenance["source"]))
+    if args.mode == "memfd":
+        inputs["system/bin/memfd-probe"] = (args.dex.parent / "memfd-probe").read_bytes()
     if args.mode == "properties":
         inputs["system/bin/properties-probe"] = (args.dex.parent / "properties-probe").read_bytes()
     if args.mode == "managed":
@@ -121,6 +126,8 @@ def main():
         arguments.insert(2, "-Djava.library.path=/data/app/bndroid.runtime/base.apk!/lib/arm64-v8a")
     if args.mode == "memory":
         arguments = [arguments[0], "/system/bin/art-memory-probe"]
+    if args.mode == "memfd":
+        arguments = [arguments[0], "/system/bin/memfd-probe"]
     if args.mode == "properties":
         arguments = [arguments[0], "/system/bin/properties-probe"]
     if args.mode.startswith("signal"):
@@ -148,7 +155,7 @@ def main():
     if framework:
         receipt["entrypoint"] = "/system/bin/app_process64"
     if framework or args.mode == "properties":
-        receipt["boot_properties"] = BOOT_PROPERTIES
+        receipt["boot_properties"] = runtime_properties(provenance["source"])
     args.output.with_suffix(".json").write_text(json.dumps(receipt, indent=2) + "\n")
     print(f"ART_ROOTFS_BUILD_OK files={receipt['files']} bytes={receipt['bytes']} path={args.output}")
 

@@ -18,6 +18,23 @@ BOOT_PROPERTIES = {
 }
 
 
+def runtime_properties(source):
+    """Version metadata describes the frozen Framework inputs, not app acceptance."""
+    package = dict(line.split("=", 1) for line in source["package_properties"].splitlines() if "=" in line)
+    if package.get("AndroidVersion.ApiLevel") != "36.1":
+        raise ValueError("Bootstrap version properties require the frozen API 36.1 inputs")
+    return {
+        **BOOT_PROPERTIES,
+        "ro.build.version.sdk": "36",
+        "ro.build.version.sdk_full": "36.1",
+        "ro.build.version.preview_sdk": "0",
+        "ro.build.version.codename": "REL",
+        "ro.build.version.all_codenames": "REL",
+        "ro.build.version.release": "16",
+        "ro.build.version.release_or_codename": "16",
+    }
+
+
 def encode_properties(properties):
     # Header is 128 bytes; offsets are relative to its data section. Reserve
     # the 20-byte root node and 92-byte dirty backup even though no writes occur.

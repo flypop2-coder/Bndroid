@@ -93,7 +93,7 @@ impl Stat {
 }
 
 #[derive(Clone, Copy)]
-pub struct Map {
+pub struct Map<'a> {
     pub start: u64,
     pub end: u64,
     pub read: bool,
@@ -102,9 +102,9 @@ pub struct Map {
     pub shared: bool,
     pub offset: u64,
     pub inode: u64,
-    pub name: &'static str,
+    pub name: &'a str,
 }
-impl Map {
+impl Map<'_> {
     pub fn append(&self, text: &mut Text) -> Result<(), i64> {
         if self.start >= self.end
             || !self.start.is_multiple_of(4096)

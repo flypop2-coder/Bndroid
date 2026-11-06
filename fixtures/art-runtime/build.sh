@@ -36,6 +36,10 @@ esac
   -O2 -g -Wall -Wextra -Werror -fPIE -pie \
   -Wl,-z,max-page-size=4096 -Wl,-z,separate-loadable-segments \
   "$ROOT/fixtures/art-runtime/properties.c" -o "$OUT/properties-probe"
+"$NDK_ROOT/toolchains/llvm/prebuilt/$HOST_TAG/bin/aarch64-linux-android35-clang" \
+  -O2 -g -Wall -Wextra -Werror -fPIE -pie \
+  -Wl,-z,max-page-size=4096 -Wl,-z,separate-loadable-segments \
+  "$ROOT/fixtures/art-runtime/memfd.c" -o "$OUT/memfd-probe"
 if [[ "${BNDROID_ART_MODE:-java}" == managed ]]; then
   mkdir -p "$OUT/managed-classes" "$OUT/managed-dex"
   javac --release 8 -d "$OUT/managed-classes" "$ROOT/fixtures/art-runtime/ManagedMain.java"

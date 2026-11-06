@@ -2,6 +2,14 @@
 
 This page records implemented behavior and validation, with a September 9, 2026 platform baseline and dated updates below. Historical test counts belong to the indicated development runs; they are not a claim that every historical gate was rerun during publication. The [complete original status log](docs/archive/originals/IMPLEMENTATION_STATUS.txt) preserves detailed evidence and earlier milestones. Future tasks belong only in [TODO.md](TODO.md).
 
+## Shared ART code-cache backing update — November 6, 2026
+
+Real memfd objects now supply shared physical mappings, truncation/EOF faults, seals, descriptor I/O and lifetime across close/reuse. ART's 64 MiB code-cache layout uses separate RW/NX and R/X views; single RWX mappings remain forbidden. The original physical/heap bounds remain, with compact page ownership and corrected reservation for fixed replacements. [ART Memfd-0](docs/milestones/androidbox/ART_MEMFD_0.md) records the behavior and [ADR 0002](docs/decisions/0002-linux-abi-release-and-code-cache.md) explains the partial Linux ABI release value and protection model.
+
+The native memfd gate (`check.Zb1UFr`) passes in two generations with generated-code execution, six expected signal faults returned, a 17,335-page physical peak and complete cleanup. Properties/boot-clock (`check.Pxb0Zz`), memory/relocation (`check.x2KT7Q`) and APK/GC/JNI (`check.8rZwR4`) pass. Validation includes 1,128 workspace host tests, 395 Framework library tests, 20 Python checks, host-library and AArch64 Clippy, native boot/mobile and Bionic/thread/EOF regressions. Runtime inputs and all generated evidence stay local.
+
+The unmodified Framework now passes code-cache initialization and reaches Java RuntimeInit. Public version properties and the source's 696-byte netbpfload version metadata bring the local input set to 348 files / 265,050,082 bytes; previous inputs are unchanged. The full gate (`check.fDK3by`) still fails: TrafficStats requests the missing dynamic JNI dependency `libframework-connectivity-tiramisu-jni.so`, then its exception path encounters the absent Binder driver. The failed process and all six workers are reclaimed with zero remaining resources. Parcel/Looper, ActivityThread, general APK support and A1–A6 remain incomplete. Earlier failure descriptions below are historical.
+
 ## Framework frontend and bootstrap update — November 6, 2026
 
 The original Android 16 `app_process64` now loads its platform libraries, enters AndroidRuntime and executes ART's help/exit hooks in two supervised process generations. The verified source set contains 347 files / 265,049,386 bytes and all 46 boot jars, with unchanged hashes for the 66 earlier ART inputs. Acquisition supports checked resume and atomic receipts. Runtime inputs and notices remain local; only Bndroid adaptation code, owned probes and documentation enter Git. See [Framework Frontend-0](docs/milestones/androidbox/FRAMEWORK_FRONTEND_0.md).

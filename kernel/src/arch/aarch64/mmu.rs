@@ -908,6 +908,14 @@ pub unsafe fn init_identity_map() -> Result<(), MmuError> {
         | SCTLR_I
         | SCTLR_NTWI // Permit EL0 WFI; timer IRQ still preempts and reschedules it.
         | SCTLR_WXN;
+    #[cfg(feature = "art-runtime")]
+    {
+        // UCT permits CTR_EL0 reads, UCI permits cache maintenance by user VA.
+        // ART/NDK clear_cache requires both to publish dual-view generated code.
+        // Load/store/execute rights are unchanged; set/way and whole-cache
+        // maintenance remain privileged. WXN and PTE W^X remain enabled.
+        sctlr |= (1 << 15) | (1 << 26);
+    }
     if pan_supported {
         // Bit 23 is RES1 before FEAT_PAN, but becomes SPAN when PAN exists.
         // SPAN=0 makes exceptions from EL0 automatically enter with PAN set.

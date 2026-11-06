@@ -33,6 +33,8 @@ pub mod input_surface_recovery_trace;
 pub mod linux_abi;
 pub mod linux_fd;
 pub mod linux_fs;
+pub mod linux_memfd;
+pub mod linux_pages;
 pub mod linux_proc;
 pub mod linux_signal;
 pub mod linux_sync;

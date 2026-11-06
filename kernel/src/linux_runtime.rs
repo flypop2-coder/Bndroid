@@ -397,9 +397,12 @@ fn clock_gettime(clock: u64, address: u64) -> u64 {
             .timespec(anchor.counter.wrapping_add(elapsed), frequency)
             .map_or_else(|| errno(EINVAL), |bytes| copy_out(address, &bytes));
     }
-    if !matches!(clock, 1 | 6) {
+    if !(matches!(clock, 1 | 6) || cfg!(feature = "art-runtime") && clock == 7) {
         return errno(EINVAL);
-    } // CLOCK_MONOTONIC and CLOCK_MONOTONIC_COARSE.
+    }
+    // MONOTONIC, MONOTONIC_COARSE and ART's BOOTTIME. There is no system
+    // suspend in this personality; the always-running counter includes the
+    // whole boot lifetime, including thread sleeps, for both 1 and 7.
     let frequency = aarch64::timer::frequency_hz();
     let mut counter = aarch64::timer::counter_value();
     if clock == 6 {
@@ -466,8 +469,14 @@ fn uname(address: u64) -> u64 {
     for (index, value) in [
         "Linux",
         "bndroid",
-        "0.1.0-bndroid",
-        "Linux ABI compatibility",
+        // ART gates memfd_create on a >= 3.17 release before trying the
+        // syscall. This is an ABI dispatch version, not a Linux kernel build.
+        if cfg!(feature = "art-runtime") {
+            "3.17.0-bndroid-abi"
+        } else {
+            "0.1.0-bndroid"
+        },
+        "Bndroid 0.1.0; partial Linux ABI",
         "aarch64",
         "",
     ]

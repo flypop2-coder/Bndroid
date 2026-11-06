@@ -32,6 +32,7 @@ pub enum Target {
     Node(Node<'static>),
     Snapshot { path: &'static str, inode: u64 },
     UnixDatagram,
+    Memory { inode: u64, length: u64 },
 }
 
 struct Description {
@@ -41,14 +42,16 @@ struct Description {
     target: Target,
     snapshot: Option<Vec<u8>>,
     log_connected: AtomicBool,
+    memory: Option<crate::linux_memfd::MemoryFile>,
 }
 pub struct FileRef(NonNull<Description>);
-// Descriptions contain immutable owned/static bytes and atomic shared state.
+// Descriptions contain immutable bytes, atomic shared descriptor state, or a
+// memory file with serialized metadata access and runtime-owned mapped pages.
 unsafe impl Send for FileRef {}
 unsafe impl Sync for FileRef {}
 impl FileRef {
     pub fn try_new(target: Target, flags: u32) -> Result<Self, i64> {
-        Self::create(target, flags, None)
+        Self::create(target, flags, None, None)
     }
     pub fn try_snapshot(
         path: &'static str,
@@ -56,9 +59,26 @@ impl FileRef {
         flags: u32,
         bytes: Vec<u8>,
     ) -> Result<Self, i64> {
-        Self::create(Target::Snapshot { path, inode }, flags, Some(bytes))
+        Self::create(Target::Snapshot { path, inode }, flags, Some(bytes), None)
     }
-    fn create(target: Target, flags: u32, snapshot: Option<Vec<u8>>) -> Result<Self, i64> {
+    pub fn try_memory(name: &[u8], flags: u32) -> Result<Self, i64> {
+        let memory = crate::linux_memfd::MemoryFile::new(name, flags)?;
+        Self::create(
+            Target::Memory {
+                inode: memory.inode(),
+                length: 0,
+            },
+            2 | 0x20000,
+            None,
+            Some(memory),
+        )
+    }
+    fn create(
+        target: Target,
+        flags: u32,
+        snapshot: Option<Vec<u8>>,
+        memory: Option<crate::linux_memfd::MemoryFile>,
+    ) -> Result<Self, i64> {
         let pointer =
             NonNull::new(unsafe { alloc(Layout::new::<Description>()) }.cast::<Description>())
                 .ok_or(ENOMEM)?;
@@ -70,6 +90,7 @@ impl FileRef {
                 target,
                 snapshot,
                 log_connected: AtomicBool::new(false),
+                memory,
             });
         }
         LIVE_DESCRIPTIONS.fetch_add(1, Ordering::Relaxed);
@@ -79,7 +100,16 @@ impl FileRef {
         unsafe { self.0.as_ref() }
     }
     pub fn target(&self) -> Target {
-        self.inner().target
+        match self.memory() {
+            Some(memory) => Target::Memory {
+                inode: memory.inode(),
+                length: memory.len(),
+            },
+            None => self.inner().target,
+        }
+    }
+    pub fn memory(&self) -> Option<&crate::linux_memfd::MemoryFile> {
+        self.inner().memory.as_ref()
     }
     pub fn snapshot(&self) -> Option<&[u8]> {
         self.inner().snapshot.as_deref()
@@ -129,6 +159,7 @@ impl FileRef {
             Target::Node(node) if node.kind == Kind::File => Some(node.data.len() as u64),
             Target::Node(_) => return Err(EBADF),
             Target::Snapshot { .. } => None, // proc seq-file: SEEK_SET/CUR only.
+            Target::Memory { length, .. } => Some(length),
             _ => return Err(ESPIPE),
         };
         let base = match whence {

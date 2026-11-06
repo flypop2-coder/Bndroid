@@ -1,5 +1,5 @@
-//! Read-only runtime files and POSIX descriptor operations for the dynamic
-//! Bionic profile. Every pointer is checked against the calling address space.
+//! Immutable runtime files, bounded anonymous memory files and POSIX descriptors
+//! for dynamic Bionic. Every pointer is checked against the calling address space.
 use crate::{linux_runtime as runtime, process};
 use bndroid_kernel::{
     linux_abi::errno,
@@ -167,7 +167,9 @@ pub fn dispatch(r: &[u64; 31]) -> Option<u64> {
         25 => fcntl(r[0], r[1], r[2]),
         29 => file(r[0]).and(Err(25)), // ENOTTY; no terminal ioctls.
         43 => statfs_path(r[0], r[1]),
-        44 => file(r[0]).and_then(|_| statfs(r[1])),
+        44 => file_statfs(r[0], r[1]),
+        #[cfg(feature = "art-runtime")]
+        46 => truncate(r[0], r[1]),
         48 => access(r[0], r[1], r[2], 0),
         56 => open(r[0], r[1], r[2]),
         57 => process::with_linux_files(|t| t.close(r[0])).map(|_| 0),
@@ -176,6 +178,8 @@ pub fn dispatch(r: &[u64; 31]) -> Option<u64> {
         64 => write(r[0], r[1], r[2]),
         66 => writev(r[0], r[1], r[2]),
         67 => read(r[0], r[1], r[2], Some(r[3])),
+        #[cfg(feature = "art-runtime")]
+        68 => file(r[0]).and_then(|f| write_memory(&f, r[1], r[2], Some(r[3]))),
         78 => readlink(r[0], r[1], r[2], r[3]),
         79 => statat(r[0], r[1], r[2], r[3]),
         80 => file(r[0]).and_then(|f| stat(f.target(), r[1])),
@@ -187,6 +191,8 @@ pub fn dispatch(r: &[u64; 31]) -> Option<u64> {
         233 => {
             process::with_current_linux_address_space(|space| space.linux_madvise(r[0], r[1], r[2]))
         }
+        #[cfg(feature = "art-runtime")]
+        279 => memfd_create(r[0], r[1]),
         439 => access(r[0], r[1], r[2], r[3]),
         _ => return None,
     };
@@ -196,10 +202,155 @@ pub fn dispatch(r: &[u64; 31]) -> Option<u64> {
 fn file(fd: u64) -> Result<FileRef, i64> {
     process::with_linux_files(|table| table.file(fd))
 }
+#[cfg(feature = "art-runtime")]
+fn memfd_create(address: u64, flags: u64) -> Result<u64, i64> {
+    if flags & !3 != 0 {
+        return Err(EINVAL);
+    }
+    let mut name = [0; 250];
+    for index in 0..name.len() {
+        input(
+            address.checked_add(index as u64).ok_or(14)?,
+            &mut name[index..index + 1],
+        )?;
+        if name[index] == 0 {
+            let file = FileRef::try_memory(&name[..index], flags as u32)?;
+            return process::with_linux_files(|t| t.insert(file, 0, flags & 1 != 0));
+        }
+    }
+    Err(EINVAL)
+}
+#[cfg(feature = "art-runtime")]
+fn truncate(fd: u64, length: u64) -> Result<u64, i64> {
+    let opened = file(fd)?;
+    if !opened.writable() {
+        return Err(EINVAL);
+    }
+    let memory = opened.memory().ok_or(EINVAL)?;
+    process::with_current_linux_address_space(|space| space.linux_memfd_resize(memory, length))
+}
+#[cfg(feature = "art-runtime")]
+#[inline(never)]
+fn read_memory(file: &FileRef, address: u64, count: u64, offset: Option<u64>) -> Result<u64, i64> {
+    let memory = file.memory().ok_or(EINVAL)?;
+    let position = offset.unwrap_or_else(|| file.position());
+    if position > i64::MAX as u64 {
+        return Err(EINVAL);
+    }
+    let count = count
+        .min(0x7ffff000)
+        .min(memory.len().saturating_sub(position));
+    let mut bytes = [0; 4096];
+    let mut total = 0;
+    while total < count {
+        let length = memory.read(
+            position + total,
+            &mut bytes[..(count - total).min(4096) as usize],
+        );
+        if let Err(error) = address
+            .checked_add(total)
+            .ok_or(14)
+            .and_then(|p| out(p, &bytes[..length]))
+        {
+            if total == 0 {
+                return Err(error);
+            }
+            break;
+        }
+        total += length as u64;
+    }
+    if offset.is_none() {
+        file.set_position(position + total);
+    }
+    Ok(total)
+}
+#[cfg(feature = "art-runtime")]
+#[inline(never)]
+fn write_memory(file: &FileRef, address: u64, count: u64, offset: Option<u64>) -> Result<u64, i64> {
+    if !file.writable() {
+        return Err(EBADF);
+    }
+    let memory = file.memory().ok_or(29)?;
+    let position = if file.flags() & 0x400 != 0 {
+        memory.len()
+    } else {
+        offset.unwrap_or_else(|| file.position())
+    };
+    if position > i64::MAX as u64 {
+        return Err(EINVAL);
+    }
+    let count = count.min(0x7ffff000);
+    if count == 0 {
+        return Ok(0);
+    }
+    if !memory.may_write() {
+        return Err(1);
+    }
+    if position
+        .checked_add(count)
+        .is_none_or(|end| end > bndroid_kernel::linux_memfd::MAX_BYTES)
+    {
+        return Err(27);
+    }
+    let mut bytes = [0; 4096];
+    let mut total = 0;
+    while total < count {
+        let length = (count - total).min(4096) as usize;
+        let result = address
+            .checked_add(total)
+            .ok_or(14)
+            .and_then(|p| input(p, &mut bytes[..length]))
+            .and_then(|_| {
+                let end = position + total + length as u64;
+                if end > memory.len() {
+                    process::with_current_linux_address_space(|space| {
+                        space.linux_memfd_resize(memory, end)
+                    })?;
+                }
+                memory.write(position + total, &bytes[..length])
+            });
+        match result {
+            Ok(written) => total += written as u64,
+            Err(error) => {
+                if total == 0 {
+                    return Err(error);
+                }
+                break;
+            }
+        }
+    }
+    if offset.is_none() {
+        file.set_position(position + total);
+    }
+    Ok(total)
+}
 fn statfs_path(pathname: u64, output: u64) -> Result<u64, i64> {
     let mut buffer = [0; PATH_MAX + 1];
     node(AT_FDCWD as u64, name(pathname, &mut buffer)?, true)?;
     statfs(output)
+}
+fn file_statfs(fd: u64, output: u64) -> Result<u64, i64> {
+    let opened = file(fd)?;
+    if opened.memory().is_none() {
+        return statfs(output);
+    }
+    let mut bytes = [0; 120];
+    let (live, _, _) = bndroid_kernel::linux_pages::snapshot();
+    let capacity = bndroid_kernel::linux_pages::MAX_PAGES as u64;
+    for (offset, value) in [
+        (0, 0x0102_1994_u64),
+        (8, 4096),
+        (16, capacity),
+        (24, capacity.saturating_sub(live)),
+        (32, capacity.saturating_sub(live)),
+        (40, bndroid_kernel::linux_fd::CAPACITY as u64),
+        (56, 2),
+        (64, 255),
+        (72, 4096),
+    ] {
+        bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+    }
+    out(output, &bytes).map(|_| 0)
 }
 fn statfs(output: u64) -> Result<u64, i64> {
     let (length, files) = crate::linux_rootfs::usage();
@@ -336,6 +487,19 @@ fn fcntl(fd: u64, command: u64, argument: u64) -> Result<u64, i64> {
         4 => file(fd)
             .and_then(|f| f.set_status_flags(u32::try_from(argument).map_err(|_| EINVAL)?))
             .map(|_| 0),
+        #[cfg(feature = "art-runtime")]
+        1033 => {
+            let opened = file(fd)?;
+            if !opened.writable() {
+                return Err(1);
+            }
+            let memory = opened.memory().ok_or(EINVAL)?;
+            process::with_current_linux_address_space(|space| {
+                space.linux_memfd_seal(memory, argument)
+            })
+        }
+        #[cfg(feature = "art-runtime")]
+        1034 => file(fd)?.memory().map(|m| m.seals() as u64).ok_or(EINVAL),
         _ => file(fd).and(Err(EINVAL)),
     }
 }
@@ -343,6 +507,10 @@ fn read(fd: u64, address: u64, count: u64, offset: Option<u64>) -> Result<u64, i
     let file = file(fd)?;
     if !file.readable() {
         return Err(EBADF);
+    }
+    #[cfg(feature = "art-runtime")]
+    if file.memory().is_some() {
+        return read_memory(&file, address, count, offset);
     }
     let position = offset.unwrap_or_else(|| file.position());
     if position > i64::MAX as u64 {
@@ -382,6 +550,8 @@ fn write(fd: u64, address: u64, count: u64) -> Result<u64, i64> {
         return Err(EBADF);
     }
     match file.target() {
+        #[cfg(feature = "art-runtime")]
+        Target::Memory { .. } => write_memory(&file, address, count, None),
         #[cfg(feature = "art-runtime")]
         Target::UnixDatagram => write_log_packet(&file, address, count),
         Target::Null => Ok(count.min(0x7ffff000)),
@@ -445,11 +615,17 @@ fn stat(target: Target, address: u64) -> Result<u64, i64> {
         Target::Console => (6, 0o020222, 0, 0),
         Target::Snapshot { inode, .. } => (inode, 0o100444, 0, 0),
         Target::UnixDatagram => (0, 0o140777, 0, 0),
+        Target::Memory { inode, length } => (inode, 0o100777, length, 0),
     };
     bytes[..8].copy_from_slice(&1_u64.to_le_bytes());
     bytes[8..16].copy_from_slice(&inode.to_le_bytes());
     bytes[16..20].copy_from_slice(&mode.to_le_bytes());
     bytes[20..24].copy_from_slice(&1_u32.to_le_bytes());
+    if matches!(target, Target::Memory { .. }) {
+        bytes[20..24].copy_from_slice(&0_u32.to_le_bytes());
+        bytes[24..28].copy_from_slice(&10000_u32.to_le_bytes());
+        bytes[28..32].copy_from_slice(&10000_u32.to_le_bytes());
+    }
     bytes[32..40].copy_from_slice(&device.to_le_bytes());
     bytes[48..56].copy_from_slice(&size.to_le_bytes());
     bytes[56..60].copy_from_slice(&4096_u32.to_le_bytes());
@@ -493,6 +669,17 @@ fn readlink(dir: u64, pathname: u64, output: u64, capacity: u64) -> Result<u64, 
     if let Some(number) = path.as_str().strip_prefix("proc/self/fd/") {
         let fd = number.parse::<u64>().map_err(|_| 2)?;
         let opened = file(fd).map_err(|_| 2)?;
+        if let Some(memory) = opened.memory() {
+            let mut bytes = [0; 280];
+            let prefix = b"/memfd:";
+            let suffix = b" (deleted)";
+            bytes[..prefix.len()].copy_from_slice(prefix);
+            let end = prefix.len() + memory.name().len();
+            bytes[prefix.len()..end].copy_from_slice(memory.name());
+            bytes[end..end + suffix.len()].copy_from_slice(suffix);
+            let length = (end + suffix.len()).min(capacity as usize);
+            return out(output, &bytes[..length]).map(|_| length as u64);
+        }
         let path = match opened.target() {
             Target::Node(node) => node.path,
             Target::Snapshot { path, .. } => path,
@@ -515,6 +702,12 @@ fn mmap_file(args: [u64; 6]) -> Result<u64, i64> {
     let opened = file(args[4])?;
     if !opened.readable() {
         return Err(13);
+    }
+    #[cfg(feature = "art-runtime")]
+    if opened.memory().is_some() {
+        return process::with_current_linux_address_space(|space| {
+            space.linux_mmap_memory(args, &opened)
+        });
     }
     let Target::Node(node) = opened.target() else {
         return Err(19);

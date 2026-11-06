@@ -53,14 +53,14 @@ def main():
     if args.resume_framework:
         if not args.include_framework or not (output / "art-provenance.json").is_file():
             raise SystemExit("--resume-framework requires --include-framework and an existing ART receipt")
-        from android_framework_inputs import validate_inputs
+        from android_framework_inputs import REQUIRED_METADATA, validate_inputs
         verified = validate_inputs(output)
         previous = json.loads((output / "provenance.json").read_text())
         if previous != verified["source"]:
             raise SystemExit("ART and Bionic source receipts are inconsistent")
         if previous["package_properties"] != properties:
             raise SystemExit("Cannot resume from a different SDK system image")
-        if "framework" in verified:
+        if "framework" in verified and all(path in verified["files"] for path in REQUIRED_METADATA):
             print(f"FRAMEWORK_RUNTIME_ALREADY_COMPLETE path={output}", flush=True)
             return
     else:

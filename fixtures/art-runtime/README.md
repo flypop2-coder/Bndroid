@@ -12,6 +12,7 @@ python3 scripts/extract-bionic-runtime.py \
   --output target/android-runtime-inputs/art --include-art
 BNDROID_ART_MODE=help scripts/check-art-runtime.sh
 BNDROID_ART_MODE=memory scripts/check-art-runtime.sh
+BNDROID_ART_MODE=memfd scripts/check-art-runtime.sh
 BNDROID_ART_MODE=properties scripts/check-art-runtime.sh
 scripts/check-art-signals.sh
 scripts/check-art-runtime.sh
@@ -32,6 +33,17 @@ The root includes verified global/ART linker namespace policy and canonical Bion
 
 The memory probe now checks actual anonymous discard/RSS reduction, user/kernel demand-zero faults, retained protections and process/thread CPU clocks across sleep and thread reaping. Shared/file discard and a general demand-paged mapping policy remain unsupported. The managed workload retains a 16 MiB Java heap and performs 64 MiB allocation turnover per generation; this is a measured integration workload, not a broad app-memory guarantee.
 
+The `memfd` gate checks real shared physical backing, positional/shared-offset I/O,
+descriptor reuse, mapped lifetime after close, truncate/SIGBUS and zero growth,
+write/grow/shrink/future-write seals, and generated AArch64 code through separate
+RW/NX and R/X aliases. Each generation must return from three deliberate faults:
+a write to RX, execution from RW, and a load beyond truncated EOF. All six signal
+frames and all process resources must be reclaimed. `shared_memfd_verified` is
+independent of managed Java and Framework acceptance. Single RWX mappings remain
+forbidden; private memfd mappings require future COW work and return ENOSYS.
+[ADR 0002](../../docs/decisions/0002-linux-abi-release-and-code-cache.md) explains
+the partial ABI release string, code publication model and unchanged memory bounds.
+
 See [ART Managed-0](../../docs/milestones/androidbox/ART_MANAGED_0.md) for current APK/GC/JNI evidence and limits. [ART Signals-0](../../docs/milestones/androidbox/ART_SIGNALS_0.md), [ART Process-0](../../docs/milestones/androidbox/ART_PROCESS_0.md) and [ART Frontend-0](../../docs/milestones/androidbox/ART_FRONTEND_0.md) retain earlier milestones. Missing timezone/proc/tracing data and unsupported optional scheduler/directory calls remain visible in the summary; `full_android_apps` remains false.
 
 ## Framework entry
@@ -46,12 +58,12 @@ BNDROID_ART_MODE=framework-help scripts/check-art-runtime.sh
 BNDROID_ART_MODE=framework scripts/check-art-runtime.sh
 ```
 
-The measured input set contains 347 files / 265,049,386 bytes and 46 boot jars. All 66 earlier ART inputs retain their original hashes. Required libraries are selected from the active Android APEX/platform inventory; the original global and ART namespace policy remains in force. This does not acquire Google applications, Play services or vendor APKs. Inputs/notices stay local and are not included in Git.
+The measured input set contains 348 files / 265,050,082 bytes and 46 boot jars, including the source netbpfload version metadata read by libmeminfo. All 66 earlier ART inputs retain their original hashes. Required libraries are selected from the active Android APEX/platform inventory; the original global and ART namespace policy remains in force. This does not acquire Google applications, Play services or vendor APKs. Inputs/notices stay local and are not included in Git.
 
-If the Framework extension is interrupted after its ART receipt was produced, repeat extraction with `--resume-framework --include-framework` and the same output. The helper checks source identity, existing file/metadata hashes and each saved progress entry. It atomically checkpoints successful pulls and replaces the final receipt only after dependencies resolve. A completed, verified receipt returns without starting an emulator. Each actual extraction still uses and stops its own temporary offline AVD.
+If the Framework extension is interrupted after its ART receipt was produced, repeat extraction with `--resume-framework --include-framework` and the same output. This also upgrades an older completed receipt missing the version metadata. The helper checks source identity, existing file/metadata hashes and each saved progress entry. It atomically checkpoints successful pulls and replaces the final receipt only after dependencies resolve. A completed receipt containing all required metadata returns without starting an emulator. Each actual extraction still uses and stops its own temporary offline AVD.
 
-Framework modes select `framework-runtime`: one CPU, 1 GiB guest RAM, a 320 MiB immutable archive / 512-entry catalog, 512 file descriptors, 4,096 mapping regions, 512 MiB of sparse private backing and 512 page-table pages. The ART-only bounds remain unchanged. The Framework guest/host timeouts are 300/360 seconds because loading and reclaiming hundreds of libraries exceeds the earlier two-launch bound. The source boot and compiler boot classpaths are supplied through the startup environment. No alternate Java/Framework implementation or global library search override is supplied.
+Framework modes select `framework-runtime`: one CPU, 1 GiB guest RAM, a 320 MiB immutable archive / 512-entry catalog, 512 file descriptors, 4,096 mapping regions, a combined 512 MiB physical budget for private pages and memfd backing, and 512 page-table pages. Shared aliases do not allocate a second physical copy. The ART-only bounds remain unchanged. The Framework guest/host timeouts are 300/360 seconds because loading and reclaiming hundreds of libraries exceeds the earlier two-launch bound. The source boot and compiler boot classpaths are supplied through the startup environment. No alternate Java/Framework implementation or global library search override is supplied.
 
 `framework-help` requires authenticated AndroidRuntime start/zero-exit and ART help records from both process generations, followed by complete native cleanup. Help is logged through AndroidRuntime's `vm-printf` hook rather than standard output. It proves native loading and argument parsing, not Java VM or Activity startup. `framework` is a separate integration gate: only two actual Parcel/Bundle round trips and delayed Looper callbacks through upstream RuntimeInit may satisfy it. A missing stage remains failure; `full_android_apps` stays false even if this narrower probe eventually passes.
 
-The read-only boot-property area contains only the declared public ABI, native-bridge and Bndroid product values. Unmodified Bionic reads its supported pre-split binary format; there is no writable property service or private property namespace. `properties` independently verifies lookup, callbacks, enumeration, real timed waiting and rejected file/shared-map writes. The memory gate additionally verifies fixed-address anonymous relocation, including equal-size/shrink/growth, preserved read-only access, destination replacement, neighboring mappings and atomic failure.
+The read-only boot-property area contains declared public ABI, native-bridge and Bndroid product values, plus the version metadata of the frozen API 36.1 / Android 16 inputs. The builder rejects a different API source instead of guessing its build version. These values describe the supplied Framework libraries and do not claim full application compatibility. Unmodified Bionic reads its supported pre-split binary format; there is no writable property service or private property namespace. `properties` independently verifies lookup, callbacks, all 13 properties, real timed waiting, CLOCK_BOOTTIME advancement across that wait, and rejected file/shared-map writes. The memory gate additionally verifies fixed-address anonymous relocation, including equal-size/shrink/growth, preserved read-only access, destination replacement, neighboring mappings and atomic failure.

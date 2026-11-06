@@ -2,6 +2,10 @@
 
 Date: November 6, 2026. Native ABI remains 70. A1 and general Android application acceptance remain incomplete.
 
+The later [ART Memfd-0](ART_MEMFD_0.md) update supersedes the code-cache blocker
+below and records the current dynamic-JNI/Binder failures. The observations in
+this document retain the original frontend milestone's evidence.
+
 ## Observed result
 
 The separate Framework profile loads the unmodified local Android 16 `app_process64`, its platform dependencies and `libart.so` through the source linker namespaces. AndroidRuntime reaches ART argument parsing and its own help/exit hooks in two process generations. Both exit zero and release all private pages, page tables, file descriptions and thread resources. The frontend gate authenticates the Android log records against the actual exiting process IDs; ordinary `dalvikvm` stdout cannot satisfy it.
