@@ -6,6 +6,8 @@ from art_runtime_evidence import completion_status, signal_failure_status
 HELP = "dalvikvm: [options] class [argument ...]\nThe following ART arguments are supported:\n"
 MEMORY = "ART_MEMORY_OK low_64m=1 protections=1 holes=1 shared_threads=1 kernel_isolation=1\n"
 MEMORY += "ART_PROC_OK stack=1 maps=1 counters=1 snapshots=1 large_read=1 shared_ro=1 mremap=1 log=1\n"
+MEMORY += "ART_PAGING_OK discard=1 rss=1 zero_fault=1 usercopy=1 protections=1 atomic_failure=1 cpu_time=1\n"
+PAGING = "LINUX_PAGING_OK discarded=5000 demand_zero=3000\n"
 LOG = "ANDROID_LOG pid={} buffer=0 priority=4 tag=bndroid-probe message=PROC_LOG_TRANSPORT_OK\n"
 LOGS = LOG.format(4294967298) + LOG.format(8589934594)
 JAVA = "ART_JAVA_CORE_OK sum=4950 exceptions=1 collections=1\n"
@@ -17,6 +19,18 @@ PROCESS = "LINUX_PROCESS_EXIT pid=4294967298 code=0 native_handles=0\nLINUX_PROC
 
 
 class EvidenceTests(unittest.TestCase):
+    def test_managed_workload_requires_all_stages_and_real_reclaim_and_thread_cleanup(self):
+        marker="ART_MANAGED_OK java_threads=3 monitors=1 interrupt=1 gc=1 jni=1 native_thread=1 clocks=1\n"
+        marker+="ART_APK_INPUT_OK dex=apk native=apk namespace=isolated\n"
+        stages="".join("ART_MANAGED_STAGE "+stage+"\n" for stage in ("clocks","threads","gc","jni"))
+        log=(marker+stages)*2+PROCESS.replace("created=2 reaped=2", "created=20 reaped=20")+PROOF+PAGING
+        self.assertEqual(completion_status(log,"managed"),"managed-passed")
+        self.assertEqual(completion_status(log.replace("native=apk","native=file"),"managed"),"missing-apk-input-proof")
+        self.assertEqual(completion_status(log.replace("ART_MANAGED_STAGE jni\n",""),"managed"),"missing-managed-stage")
+        self.assertEqual(completion_status(log.replace("demand_zero=3000","demand_zero=0"),"managed"),"invalid-managed-runtime-proof")
+        memory=MEMORY*2+LOGS+PROCESS+PROOF+PAGING
+        self.assertEqual(completion_status(memory,"memory"),"memory-passed")
+        self.assertEqual(completion_status(memory.replace("discarded=5000","discarded=0"),"memory"),"invalid-paging-proof")
     def test_signal_proof_requires_returns_and_complete_thread_cleanup(self):
         log=SIGNALS*2+PROCESS+PROOF+SIGNAL_PROOF
         self.assertEqual(completion_status(log,"signals"),"signals-passed")
@@ -41,7 +55,7 @@ class EvidenceTests(unittest.TestCase):
 
     def test_managed_and_memory_results_need_their_own_markers(self):
         for mode, marker in (("java", JAVA), ("memory", MEMORY)):
-            self.assertEqual(completion_status(marker * 2 + LOGS + PROCESS + PROOF, mode), mode + "-passed")
+            self.assertEqual(completion_status(marker * 2 + LOGS + PROCESS + PROOF + PAGING, mode), mode + "-passed")
             self.assertNotEqual(completion_status(marker + PROCESS + PROOF, mode), mode + "-passed")
 
     def test_incomplete_or_duplicate_uart_record_is_not_success(self):
@@ -57,11 +71,11 @@ class EvidenceTests(unittest.TestCase):
 
     def test_repeated_pid_or_insufficient_memory_coverage_is_rejected(self):
         self.assertEqual(completion_status(HELP * 2 + PROCESS.replace("8589934594", "4294967298") + PROOF, "help"), "invalid-process-proof")
-        self.assertEqual(completion_status(MEMORY * 2 + LOGS + PROCESS + PROOF.replace("17000", "100"), "memory"), "invalid-memory-proof")
+        self.assertEqual(completion_status(MEMORY * 2 + LOGS + PROCESS + PROOF.replace("17000", "100") + PAGING, "memory"), "invalid-memory-proof")
 
     def test_prefixed_markers_and_misattributed_logs_cannot_claim_success(self):
         self.assertEqual(completion_status(("ANDROID_LOG message=" + JAVA) * 2 + PROCESS + PROOF, "java"), "exited-without-expected-proof")
-        self.assertEqual(completion_status(MEMORY * 2 + LOGS.replace("8589934594", "4294967298") + PROCESS + PROOF, "memory"), "missing-log-proof")
+        self.assertEqual(completion_status(MEMORY * 2 + LOGS.replace("8589934594", "4294967298") + PROCESS + PROOF + PAGING, "memory"), "missing-log-proof")
 
 
 if __name__ == "__main__":

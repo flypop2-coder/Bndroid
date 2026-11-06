@@ -17,12 +17,20 @@ static LIVE_PAGES: AtomicU64 = AtomicU64::new(0);
 static LIVE_TABLES: AtomicU64 = AtomicU64::new(0);
 static PEAK_PAGES: AtomicU64 = AtomicU64::new(0);
 static RECLAIMED_PAGES: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "art-runtime")]
+static DISCARDED_PAGES: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "art-runtime")]
+static DEMAND_ZERO_PAGES: AtomicU64 = AtomicU64::new(0);
 
 pub struct LinuxMemorySnapshot {
     pub pages: u64,
     pub tables: u64,
     pub peak_pages: u64,
     pub reclaimed_pages: u64,
+    #[cfg(feature = "art-runtime")]
+    pub discarded_pages: u64,
+    #[cfg(feature = "art-runtime")]
+    pub demand_zero_pages: u64,
 }
 pub fn linux_memory_snapshot() -> LinuxMemorySnapshot {
     LinuxMemorySnapshot {
@@ -30,6 +38,10 @@ pub fn linux_memory_snapshot() -> LinuxMemorySnapshot {
         tables: LIVE_TABLES.load(Ordering::Acquire),
         peak_pages: PEAK_PAGES.load(Ordering::Acquire),
         reclaimed_pages: RECLAIMED_PAGES.load(Ordering::Acquire),
+        #[cfg(feature = "art-runtime")]
+        discarded_pages: DISCARDED_PAGES.load(Ordering::Acquire),
+        #[cfg(feature = "art-runtime")]
+        demand_zero_pages: DEMAND_ZERO_PAGES.load(Ordering::Acquire),
     }
 }
 
@@ -77,6 +89,115 @@ impl Drop for Prepared {
 }
 
 impl LinuxMappings {
+    #[cfg(feature = "art-runtime")]
+    fn discard(&mut self, asid: u8, address: u64, length: u64) -> Result<u64, i64> {
+        if length == 0 {
+            return if address.is_multiple_of(linux_vm::PAGE) {
+                Ok(0)
+            } else {
+                Err(EINVAL)
+            };
+        }
+        let end = self.layout.private_anonymous_range(address, length)?;
+        let guard = PageTableGuard::acquire().map_err(|_| ENOMEM)?;
+        for page in &self.pages {
+            if address <= page.address as u64 && (page.address as u64) < end {
+                let leaf = self
+                    .leaf(page.address)
+                    .expect("resident page has a private table");
+                assert_eq!(unsafe { ptr::read_volatile(leaf) }, page_descriptor(page));
+                unsafe {
+                    ptr::write_volatile(leaf, 0);
+                }
+            }
+        }
+        // Remove all translations before any physical frame can be reused.
+        unsafe {
+            invalidate_asid(asid);
+        }
+        drop(guard);
+        let mut index = 0;
+        let mut count = 0;
+        while index < self.pages.len() {
+            let page = &self.pages[index];
+            if address <= page.address as u64 && (page.address as u64) < end {
+                let page = self.pages.swap_remove(index);
+                release_destroyed_address_space_frame(page.frame, "Linux MADV_DONTNEED");
+                count += 1;
+            } else {
+                index += 1;
+            }
+        }
+        reclaim_pages(count);
+        DISCARDED_PAGES.fetch_add(count, Ordering::Relaxed);
+        // Keep the VMA's rights and private empty tables. A later permitted
+        // access repopulates a fresh zero page; PROT_NONE stays inaccessible.
+        Ok(0)
+    }
+
+    #[cfg(feature = "art-runtime")]
+    #[inline(never)]
+    fn demand_zero(
+        &mut self,
+        asid: u8,
+        address: usize,
+        write: bool,
+        execute: bool,
+    ) -> Result<bool, i64> {
+        if self.pages.iter().any(|page| page.address == address) {
+            return Ok(false);
+        }
+        let Some(region) = self
+            .layout
+            .regions
+            .iter()
+            .find(|r| r.start <= address as u64 && (address as u64) < r.end)
+        else {
+            return Ok(false);
+        };
+        let protection = region.protection;
+        if region.file_backed
+            || region.shared
+            || protection == Protection::None
+            || write && protection != Protection::ReadWrite
+            || execute && protection != Protection::ReadExecute
+        {
+            return Ok(false);
+        }
+        if self.pages.len() >= MAX_PAGES {
+            return Err(ENOMEM);
+        }
+        // Only discarded resident pages can reach this path; their tables
+        // remain owned. Never create hierarchy in a privileged arena.
+        let Some(leaf) = self.leaf(address) else {
+            return Ok(false);
+        };
+        self.pages.try_reserve(1).map_err(|_| ENOMEM)?;
+        let guard = PageTableGuard::acquire().map_err(|_| ENOMEM)?;
+        assert_eq!(unsafe { ptr::read_volatile(leaf) }, 0);
+        let frame = memory::allocate_frame().map_err(|_| ENOMEM)?;
+        unsafe {
+            ptr::write_bytes(frame.start_address() as *mut u8, 0, PAGE_SIZE);
+        }
+        if execute {
+            crate::userboot::synchronize_instruction_cache(frame.start_address(), PAGE_SIZE);
+        }
+        let page = Page {
+            address,
+            frame,
+            protection,
+        };
+        unsafe {
+            ptr::write_volatile(leaf, page_descriptor(&page));
+            invalidate_asid(asid);
+        }
+        self.pages.push(page);
+        drop(guard);
+        let live = LIVE_PAGES.fetch_add(1, Ordering::AcqRel) + 1;
+        PEAK_PAGES.fetch_max(live, Ordering::Relaxed);
+        DEMAND_ZERO_PAGES.fetch_add(1, Ordering::Relaxed);
+        Ok(true)
+    }
     #[cfg(feature = "art-runtime")]
     fn remap(
         &mut self,
@@ -458,15 +579,30 @@ impl LinuxMappings {
     }
 
     pub(super) fn access(&self, address: usize) -> Option<UserPageAccess> {
-        self.pages
+        let protection = self
+            .pages
             .iter()
             .find(|page| page.address == address)
-            .and_then(|page| match page.protection {
-                Protection::None => None,
-                Protection::Read => Some(UserPageAccess::ReadOnly),
-                Protection::ReadWrite => Some(UserPageAccess::ReadWrite),
-                Protection::ReadExecute => Some(UserPageAccess::ReadExecute),
-            })
+            .map(|page| page.protection);
+        #[cfg(feature = "art-runtime")]
+        let protection = protection.or_else(|| {
+            self.layout
+                .regions
+                .iter()
+                .find(|r| {
+                    !r.file_backed
+                        && !r.shared
+                        && r.start <= address as u64
+                        && (address as u64) < r.end
+                })
+                .map(|r| r.protection)
+        });
+        protection.and_then(|protection| match protection {
+            Protection::None => None,
+            Protection::Read => Some(UserPageAccess::ReadOnly),
+            Protection::ReadWrite => Some(UserPageAccess::ReadWrite),
+            Protection::ReadExecute => Some(UserPageAccess::ReadExecute),
+        })
     }
 
     pub(super) fn verify(&self, l1: &OwnedFrame) -> bool {
@@ -558,6 +694,25 @@ fn page_descriptor(page: &Page) -> u64 {
 }
 
 impl UserAddressSpace {
+    #[cfg(feature = "art-runtime")]
+    pub fn linux_demand_fault(&mut self, esr: u64, address: u64) -> bool {
+        let class = (esr >> 26) & 63;
+        if !matches!(class, 0x20 | 0x24 | 0x25)
+            || !(4..=7).contains(&(esr & 63))
+            || esr & ((1 << 7) | (1 << 8) | (1 << 9) | (1 << 10)) != 0
+        {
+            return false;
+        }
+        let page = address as usize & !(PAGE_SIZE - 1);
+        self.linux
+            .demand_zero(
+                self.asid(),
+                page,
+                class != 0x20 && esr & (1 << 6) != 0,
+                class == 0x20,
+            )
+            .unwrap_or(false)
+    }
     #[cfg(feature = "art-runtime")]
     pub fn linux_file_eof(&self, address: u64) -> bool {
         self.linux.layout.regions.iter().any(|r| {
@@ -722,6 +877,10 @@ impl UserAddressSpace {
     }
     #[cfg(feature = "bionic-dynamic-runtime")]
     pub fn linux_madvise(&mut self, address: u64, length: u64, advice: u64) -> Result<u64, i64> {
+        #[cfg(feature = "art-runtime")]
+        if advice == 4 {
+            return self.linux.discard(self.asid(), address, length);
+        }
         #[cfg(feature = "art-runtime")]
         if matches!(advice, 0..=2) {
             // NORMAL/RANDOM/SEQUENTIAL are access-pattern hints. This profile

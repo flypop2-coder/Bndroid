@@ -585,11 +585,9 @@ pub fn synchronous(frame: *mut TrapFrame, esr: u64, far: u64) -> Option<*mut Tra
     let class = (esr >> 26) & 63;
     let (signal, code) = match class {
         0x20 | 0x24 => {
+            let address = runtime::user_address(far);
             let (eof, mapped) = crate::process::with_current_linux_address_space(|s| {
-                (
-                    s.linux_file_eof(runtime::user_address(far)),
-                    s.linux_user_mapped(runtime::user_address(far)),
-                )
+                (s.linux_file_eof(address), s.linux_user_mapped(address))
             });
             if eof {
                 (7, 2)

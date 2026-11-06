@@ -84,6 +84,28 @@ pub fn rounded_length(length: u64) -> Result<u64, i64> {
 }
 
 impl Layout {
+    /// Preflight the complete discard before any resident page is released.
+    /// Shared/file-backed objects need their own backing-store semantics.
+    pub fn private_anonymous_range(&self, address: u64, length: u64) -> Result<u64, i64> {
+        let end = checked_range(address, rounded_length(length)?)?;
+        let mut cursor = address;
+        for region in &self.regions {
+            if region.end <= cursor {
+                continue;
+            }
+            if region.start > cursor {
+                return Err(ENOMEM);
+            }
+            if region.file_backed || region.shared {
+                return Err(38);
+            }
+            cursor = region.end;
+            if cursor >= end {
+                return Ok(end);
+            }
+        }
+        Err(ENOMEM)
+    }
     pub fn map(
         &self,
         hint: u64,
@@ -384,6 +406,35 @@ pub fn is_arena_address(address: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn discard_preflight_rejects_holes_shared_backing_and_overflow_without_changes() {
+        let layout = Layout::default().map(0, PAGE * 3, 3, 0x22, 0).unwrap();
+        let start = layout.start;
+        let guarded = layout.layout.protect(start + PAGE, PAGE, 0).unwrap().layout;
+        assert_eq!(
+            guarded.private_anonymous_range(start, PAGE * 3),
+            Ok(start + PAGE * 3)
+        );
+        let hole = guarded.unmap(start + PAGE, PAGE).unwrap().layout;
+        assert_eq!(hole.private_anonymous_range(start, PAGE * 3), Err(ENOMEM));
+        assert_eq!(hole.private_anonymous_range(start + 1, PAGE), Err(EINVAL));
+        assert_eq!(hole.private_anonymous_range(start, u64::MAX), Err(ENOMEM));
+        #[cfg(feature = "art-runtime")]
+        {
+            let shared = Layout::default().map(0, PAGE, 3, 0x21, 0).unwrap();
+            assert_eq!(
+                shared.layout.private_anonymous_range(shared.start, PAGE),
+                Err(38)
+            );
+        }
+        let file = Layout::default()
+            .map_with_backing(0, PAGE, 1, 0x22, 0, Some(file(PAGE)))
+            .unwrap();
+        assert_eq!(
+            file.layout.private_anonymous_range(file.start, PAGE),
+            Err(38)
+        );
+    }
     #[test]
     fn region_limit_failure_preserves_existing_mappings_and_recovers_after_unmap() {
         let mut layout = Layout::default();

@@ -111,6 +111,8 @@ pub fn dispatch(frame: *mut TrapFrame) -> *mut TrapFrame {
             } // sched_priority = 0.
         }
         160 => uname(registers[0]),
+        #[cfg(feature = "art-runtime")]
+        169 => gettimeofday(registers[0], registers[1]),
         163 => getrlimit(registers[0], registers[1]),
         167 => prctl(&registers),
         172 | 178 => crate::process::current_live_user_process_id().unwrap() & 0xffff_ffff,
@@ -364,6 +366,12 @@ pub fn realtime_anchor() -> bndroid_kernel::linux_sync::RealtimeAnchor {
 
 fn clock_gettime(clock: u64, address: u64) -> u64 {
     #[cfg(feature = "art-runtime")]
+    if matches!(clock, 2 | 3) {
+        let counter = crate::scheduler::linux_threads::cpu_counter(clock == 3);
+        return monotonic_timespec(counter, aarch64::timer::frequency_hz())
+            .map_or_else(|| errno(EINVAL), |bytes| copy_out(address, &bytes));
+    }
+    #[cfg(feature = "art-runtime")]
     if matches!(clock, 0 | 5) {
         let anchor = realtime_anchor();
         let frequency = aarch64::timer::frequency_hz();
@@ -389,6 +397,40 @@ fn clock_gettime(clock: u64, address: u64) -> u64 {
         return errno(EINVAL);
     };
     copy_out(address, &bytes)
+}
+
+#[cfg(feature = "art-runtime")]
+fn gettimeofday(address: u64, zone: u64) -> u64 {
+    for (pointer, size) in [(address, 16), (zone, 8)] {
+        if pointer != 0
+            && !crate::process::current_user_range_is_writable(user_address(pointer), size)
+        {
+            bad_address();
+            return errno(EFAULT);
+        }
+    }
+    if address != 0 {
+        let anchor = realtime_anchor();
+        let Some(mut bytes) = anchor.timespec(
+            aarch64::timer::counter_value(),
+            aarch64::timer::frequency_hz(),
+        ) else {
+            return errno(EINVAL);
+        };
+        let micros = u64::from_le_bytes(bytes[8..].try_into().unwrap()) / 1000;
+        bytes[8..].copy_from_slice(&micros.to_le_bytes());
+        let result = copy_out(address, &bytes);
+        if result != 0 {
+            return result;
+        }
+    }
+    // The profile's kernel timezone is UTC, with no settimeofday interface.
+    // This obsolete timezone argument is separate from userspace zoneinfo.
+    if zone != 0 {
+        copy_out(zone, &[0; 8])
+    } else {
+        0
+    }
 }
 
 fn getrlimit(resource: u64, address: u64) -> u64 {
@@ -435,6 +477,12 @@ pub fn monitor() -> ! {
         let processes = crate::process::snapshot();
         if syscalls.failure != 0 || crate::scheduler::user_init_fault_snapshot().count != 0 {
             let memory = aarch64::mmu::linux_memory_snapshot();
+            #[cfg(feature = "art-runtime")]
+            crate::kprintln!(
+                "LINUX_PAGING_OK discarded={} demand_zero={}",
+                memory.discarded_pages,
+                memory.demand_zero_pages
+            );
             #[cfg(feature = "bionic-dynamic-runtime")]
             crate::scheduler::linux_threads::evidence("LINUX_THREADS_FAILURE_CLEANUP");
             crate::kprintln!(
@@ -460,6 +508,12 @@ pub fn monitor() -> ! {
             assert_eq!(syscalls.channels_created, 2);
             assert_eq!(EXITS.load(Ordering::Acquire), 2);
             let memory = aarch64::mmu::linux_memory_snapshot();
+            #[cfg(feature = "art-runtime")]
+            crate::kprintln!(
+                "LINUX_PAGING_OK discarded={} demand_zero={}",
+                memory.discarded_pages,
+                memory.demand_zero_pages
+            );
             assert_eq!(memory.pages, 0);
             assert_eq!(memory.tables, 0);
             #[cfg(feature = "bionic-dynamic-runtime")]

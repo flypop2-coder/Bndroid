@@ -13,6 +13,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/time.h>
 #include <sys/uio.h>
 #include <time.h>
 #include <ucontext.h>
@@ -25,6 +26,7 @@ _Static_assert(sizeof(ucontext_t) == 4560, "AArch64 context size");
 #define H(x) do { if (!(x)) atomic_store(&failure,__LINE__); } while (0)
 static _Atomic int failure, calls, ready, word, nesting;
 static int main_tid, bad_frame, realtime, values[4], value_count, autodisarm;
+static int protection_fault;
 static uintptr_t alternate;
 static const size_t alternate_size=32768;
 extern int signal_register_probe(int pid, int tid, int signal);
@@ -45,7 +47,7 @@ static void handler(int signal, siginfo_t *info, void *opaque) {
         else H(sigaltstack(&disabled,NULL)==-1 && errno==EPERM);
     }
     if (signal==SIGSEGV || signal==SIGBUS) {
-        H(info->si_code==(signal==SIGSEGV ? SEGV_MAPERR : BUS_ADRERR));
+        H(info->si_code==(signal==SIGSEGV ? (protection_fault ? SEGV_ACCERR : SEGV_MAPERR) : BUS_ADRERR));
         context->uc_mcontext.pc+=4; // The fixture's single faulting load.
     } else {
         H(info->si_pid==getpid() && info->si_uid==getuid());
@@ -139,6 +141,12 @@ static int synchronization(void) {
     }
     struct timespec real, coarse, end, later;
     CHECK(clock_gettime(CLOCK_REALTIME,&real)==0 && real.tv_sec>1600000000 && real.tv_nsec>=0 && real.tv_nsec<1000000000);
+    struct timeval wall; int zone[2]={1,1};
+    CHECK(syscall(SYS_gettimeofday,&wall,zone)==0 && zone[0]==0 && zone[1]==0);
+    CHECK(wall.tv_sec>=real.tv_sec && wall.tv_sec<=real.tv_sec+1 && wall.tv_usec>=0 && wall.tv_usec<1000000);
+    CHECK(syscall(SYS_gettimeofday,NULL,NULL)==0);
+    CHECK(syscall(SYS_gettimeofday,(void *)0x40080000,NULL)==-1 && errno==EFAULT);
+    CHECK(syscall(SYS_gettimeofday,NULL,(void *)0x40080000)==-1 && errno==EFAULT);
     CHECK(clock_gettime(CLOCK_REALTIME_COARSE,&coarse)==0 && coarse.tv_sec>=real.tv_sec-1 && coarse.tv_sec<=real.tv_sec+1);
     end=after(real,30000000); long long started=now_ns();
     CHECK(syscall(SYS_futex,&requeue_source,FUTEX_WAIT_BITSET_PRIVATE|FUTEX_CLOCK_REALTIME,0,&end,0,FUTEX_BITSET_MATCH_ANY)==-1 && errno==ETIMEDOUT);
@@ -202,6 +210,15 @@ int main(int argc,char **argv) {
     CHECK(sigprocmask(SIG_SETMASK,&previous,NULL)==0 && value_count==2 && values[0]==10 && values[1]==11);
     CHECK(sigaction(SIGSEGV,&action,NULL)==0 && sigaction(SIGBUS,&action,NULL)==0);
     __asm__ volatile("ldr xzr, [%0]" :: "r"((uintptr_t)0) : "memory");
+    void *read_only=mmap(NULL,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
+    CHECK(read_only!=MAP_FAILED);
+    *(volatile uint32_t *)read_only=0xdeadbeef;
+    CHECK(mprotect(read_only,4096,PROT_READ)==0 && madvise(read_only,4096,MADV_DONTNEED)==0);
+    int before_fault=atomic_load(&calls); protection_fault=1;
+    __asm__ volatile("str %w0, [%1]" :: "r"(0x12345678), "r"(read_only) : "memory");
+    protection_fault=0;
+    CHECK(atomic_load(&calls)==before_fault+1 && *(volatile uint32_t *)read_only==0 && !atomic_load(&failure));
+    CHECK(munmap(read_only,4096)==0);
     int fd=open("/apex/com.android.art/javalib/core-oj.jar",O_RDONLY); struct stat file;
     CHECK(fd>=0 && fstat(fd,&file)==0);
     void *beyond=mmap(NULL,4096,PROT_READ,MAP_PRIVATE,fd,(file.st_size+4095)&~4095LL);

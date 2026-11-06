@@ -2,6 +2,8 @@
 
 This fixture invokes the installed image's unmodified `dalvikvm64` and `libart.so` on Bndroid. The default `java` gate runs the standard DEX program twice, including collections, strings, arithmetic and a caught exception, and verifies normal exits and complete resource cleanup. The `help`, `memory` and `signals` gates separately verify the ART frontend and native kernel prerequisites. These are not APK, ActivityThread or Framework acceptance gates.
 
+The `managed` gate loads DEX and an aligned JNI library directly from an owned, signed APK. Its command-line entry validates Java threads/monitors/interruption, moving GC and weak references, JNI arrays/exceptions and an attached native thread. It verifies classloader namespace isolation and complete cleanup in two generations. This exercises APK contents through ART and the linker; ActivityThread, package installation and app graphics remain separate work.
+
 Prerequisites are the existing arm64 SDK system image, emulator/ADB, NDK r27b, SDK build-tools 36.1.0, JDK, Rust and QEMU. There are no downloads. [ADR 0001](../../docs/decisions/0001-android-runtime-baseline.md) records the frozen baseline and local-only distribution boundary.
 
 ```sh
@@ -12,9 +14,12 @@ BNDROID_ART_MODE=help scripts/check-art-runtime.sh
 BNDROID_ART_MODE=memory scripts/check-art-runtime.sh
 scripts/check-art-signals.sh
 scripts/check-art-runtime.sh
+BNDROID_ART_MODE=managed scripts/check-art-runtime.sh
 ```
 
 The extraction destination must not already exist. Set `BNDROID_ART_RUNTIME_DIR` for another receipt directory. The helper uses an isolated, read-only, offline temporary AVD, pins its own serial and identity, copies only the selected runtime/core-Java inputs, retains notices and provenance, and terminates its owned process. It never operates existing AVDs or physical devices. The measured extraction has 66 named inputs / 74,543,749 bytes, including resolved symlink sources and dependencies from the ART, runtime, i18n and statsd APEXes and platform shared libraries. APEX identities, linker configuration, boot-classpath environment and hashes remain beside the files under ignored `target/`. Receipts predating namespace metadata must be re-extracted into a new directory; the builder rejects missing or altered configuration hashes.
+
+Managed mode also uses the existing Android 36 platform jar, aapt2, zipalign and apksigner. It signs the owned `org.bndroid.runtimeprobe` APK with the repository's public test-only AndroidBox key, verifies APK v2 signing and alignment, and retains `managed.apk`, `apk-signature.txt` and `apk-badging.txt`. The root contains the APK and an intentionally inaccessible system-library copy for the namespace negative check, with no loose managed DEX or extracted application library. The root receipt includes the APK hash. No production signing material or upstream runtime binary is imported.
 
 Each gate builds a verified immutable USTAR root, a standard DEX program, native memory/signal probes, and a separate `art-runtime` kernel. QEMU receives 512 MiB RAM, one CPU, a temporary writable disk overlay, and fresh host entropy. A supervisor retains `serial.log`, input receipts, build logs and `summary.json`, then stops only its QEMU process. Tracing is off by default; `BNDROID_ART_SYSCALL_TRACE=1` enables per-syscall/abort diagnostics, which add substantial overhead and can interleave console output. ART has a 90-second guest limit and a 120-second default host timeout. A missing proof, unexpected exit, fault, panic or timeout fails the command.
 
@@ -24,4 +29,6 @@ Java mode currently uses ART's interpreter option, a 4 MiB initial / 16 MiB maxi
 
 The root includes verified global/ART linker namespace policy and canonical Bionic aliases; it no longer uses a global diagnostic library search path. The memory probe also covers process snapshots/accounting, stack guards, large reads, shared read-only files, anonymous remapping and the bounded Android log endpoint.
 
-See [ART Signals-0](../../docs/milestones/androidbox/ART_SIGNALS_0.md) for current behavior, actual Java evidence and remaining limits. [ART Process-0](../../docs/milestones/androidbox/ART_PROCESS_0.md) and [ART Frontend-0](../../docs/milestones/androidbox/ART_FRONTEND_0.md) retain the preceding milestones. Missing timezone/proc/tracing data and unsupported optional scheduler/time calls remain visible in the Java summary; `full_android_apps` remains false.
+The memory probe now checks actual anonymous discard/RSS reduction, user/kernel demand-zero faults, retained protections and process/thread CPU clocks across sleep and thread reaping. Shared/file discard and a general demand-paged mapping policy remain unsupported. The managed workload retains a 16 MiB Java heap and performs 64 MiB allocation turnover per generation; this is a measured integration workload, not a broad app-memory guarantee.
+
+See [ART Managed-0](../../docs/milestones/androidbox/ART_MANAGED_0.md) for current APK/GC/JNI evidence and limits. [ART Signals-0](../../docs/milestones/androidbox/ART_SIGNALS_0.md), [ART Process-0](../../docs/milestones/androidbox/ART_PROCESS_0.md) and [ART Frontend-0](../../docs/milestones/androidbox/ART_FRONTEND_0.md) retain earlier milestones. Missing timezone/proc/tracing data and unsupported optional scheduler/directory calls remain visible in the summary; `full_android_apps` remains false.

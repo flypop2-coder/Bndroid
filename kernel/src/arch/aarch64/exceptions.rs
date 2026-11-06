@@ -200,6 +200,15 @@ extern "C" fn lower_sync_dispatch(frame: *mut TrapFrame) -> *mut TrapFrame {
     }
     if source_mode == 0 {
         #[cfg(feature = "art-runtime")]
+        if crate::process::current_live_user_image_id() == Some(bndr_abi::UserImageId::LinuxApp) {
+            let address = crate::linux_runtime::user_address(far);
+            if crate::process::with_current_linux_address_space(|space| {
+                space.linux_demand_fault(esr, address)
+            }) {
+                return frame;
+            }
+        }
+        #[cfg(feature = "art-runtime")]
         if let Some(next) = crate::scheduler::linux_threads::signals::synchronous(frame, esr, far) {
             return next;
         }

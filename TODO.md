@@ -157,7 +157,9 @@ Tasks follow dependencies, not optimistic calendar dates. Each stage requires co
 - [x] Load unmodified local ART through its own `dalvikvm64` frontend, verify two normal help/cleanup cycles, and validate low-address/shared memory prerequisites. This does not complete A1.
 - [x] Supply real process/VM snapshots and accounting, stack guards, large reads, shared read-only runtime files, private anonymous remapping and bounded log transport; load ICU/core/OpenJDK native libraries using verified Android linker namespaces.
 - [x] Implement real AArch64 signal actions, alternate stacks, queued/synchronous delivery, safe return, interrupted waits, futex requeue and RTC-backed realtime deadlines; pass the unchanged Java gate and signal fault-containment gates with complete cleanup.
-- [ ] Expand managed validation to GC pressure, Java threads, JNI/native libraries, timezone/properties and real runtime storage; complete missing memory-discard, proc/time and scheduling semantics before general APK claims.
+- [x] Run packaged APK DEX/JNI through upstream ART/linker with Java threads/monitors/interruption, moving GC/weak references, attached native threads, isolated library namespaces and complete cleanup; implement anonymous discard/demand-zero memory and wall/CPU clocks. This command-line APK entry does not complete A1 or the full JNI-APK gate.
+- [ ] Inspect and integrate the frozen image's upstream Framework/ActivityThread dependencies; connect real app startup to Binder and native service bridges.
+- [ ] Complete timezone/properties, writable runtime storage, directory/proc/scheduling interfaces, shared/file paging and broader managed-runtime/API stress before general APK claims.
 - [ ] Implement Binder identity, transaction/reply/death, and capability mapping.
 - [ ] Run a non-customized managed APK through ActivityThread and Framework.
 - [ ] Run a JNI/native-library APK with W^X, RELRO, ASLR, and crash-isolation checks.

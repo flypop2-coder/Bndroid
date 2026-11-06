@@ -2,6 +2,8 @@
 
 Date: November 6, 2026. The isolated ABI 70 profile now runs the owned standard DEX program on unmodified Android 16 ART. ActivityThread, Framework and general APK acceptance remain incomplete.
 
+Historical snapshot: [ART Managed-0](ART_MANAGED_0.md) adds APK-contained DEX/JNI, Java-thread/GC checks, anonymous discard/demand-zero memory, gettimeofday and process/thread CPU clocks. The limits and next steps below describe the Signals-0 run.
+
 ## Observed behavior
 
 `scripts/check-art-runtime.sh` completes two cold interpreter launches of the installed image's `dalvikvm64`, shared Bionic, ART and core Java jars. Both run the unchanged `Main.java`, verify arithmetic, collections, strings and a caught Java exception, print `ART_JAVA_CORE_OK sum=4950 exceptions=1 collections=1`, and exit with status zero. The supervisor reaps both process generations and all ten runtime threads, leaving zero owned sparse pages, page tables, file descriptions or waiters. The temporary disk base is unchanged.

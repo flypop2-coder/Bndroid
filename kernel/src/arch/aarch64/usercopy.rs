@@ -307,6 +307,17 @@ pub(crate) fn try_fixup_data_abort(frame: &mut TrapFrame, esr: u64, far: u64) ->
         return false;
     }
 
+    #[cfg(feature = "art-runtime")]
+    if crate::process::current_live_user_image_id() == Some(bndr_abi::UserImageId::LinuxApp)
+        && crate::process::with_current_linux_address_space(|space| {
+            space.linux_demand_fault(esr, far)
+        })
+    {
+        // Retry only the exact validated copy instruction/range. Other EL1
+        // faults still require the existing fixup or fail-stop handling.
+        return true;
+    }
+
     frame.elr_el1 = entry.fixup_pc;
     FIXUPS.fetch_add(1, Ordering::Relaxed);
     match direction {

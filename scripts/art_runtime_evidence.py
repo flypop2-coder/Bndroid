@@ -30,6 +30,7 @@ def completion_status(text, mode):
         "memory": "ART_MEMORY_OK low_64m=1 protections=1 holes=1 shared_threads=1 kernel_isolation=1\n",
         "help": "dalvikvm: [options] class [argument ...]\n",
         "java": "ART_JAVA_CORE_OK sum=4950 exceptions=1 collections=1\n",
+        "managed": "ART_MANAGED_OK java_threads=3 monitors=1 interrupt=1 gc=1 jni=1 native_thread=1 clocks=1\n",
         "signals": "ART_SIGNALS_OK handlers=1 altstack=1 registers=1 masks=1 realtime=1 faults=1 threads=1 restart=1 waits=1\n",
     }[mode]
     if complete_lines(text, expected.rstrip("\n")) != 2 or (mode == "help" and complete_lines(text, "The following ART arguments are supported:") != 2):
@@ -44,6 +45,17 @@ def completion_status(text, mode):
         return "invalid-process-proof"
     if not threads.get("created") or threads["created"] != threads.get("reaped"):
         return "invalid-thread-proof"
+    if mode == "managed":
+        if complete_lines(text, "ART_APK_INPUT_OK dex=apk native=apk namespace=isolated") != 2:
+            return "missing-apk-input-proof"
+        if any(complete_lines(text, "ART_MANAGED_STAGE " + stage) != 2 for stage in ("clocks", "threads", "gc", "jni")):
+            return "missing-managed-stage"
+        try:
+            paging = parse_marker(text, "LINUX_PAGING_OK")
+            if int(threads["created"]) < 20 or not paging or int(paging.get("discarded", 0)) == 0 or int(paging.get("demand_zero", 0)) == 0:
+                return "invalid-managed-runtime-proof"
+        except ValueError:
+            return "invalid-managed-runtime-proof"
     if mode == "signals":
         if complete_lines(text, "ART_SYNC_OK requeue=1 realtime_clock=1 absolute_wait=1") != 2:
             return "missing-sync-proof"
@@ -54,6 +66,14 @@ def completion_status(text, mode):
         except ValueError:
             return "invalid-signal-proof"
     if mode == "memory":
+        if complete_lines(text, "ART_PAGING_OK discard=1 rss=1 zero_fault=1 usercopy=1 protections=1 atomic_failure=1 cpu_time=1") != 2:
+            return "missing-paging-proof"
+        try:
+            paging = parse_marker(text, "LINUX_PAGING_OK")
+            if not paging or int(paging.get("discarded", 0)) < 4096 or int(paging.get("demand_zero", 0)) < 2048:
+                return "invalid-paging-proof"
+        except ValueError:
+            return "invalid-paging-proof"
         if complete_lines(text, "ART_PROC_OK stack=1 maps=1 counters=1 snapshots=1 large_read=1 shared_ro=1 mremap=1 log=1") != 2:
             return "missing-proc-proof"
         logged = re.findall(r"^ANDROID_LOG pid=(\d+) buffer=0 priority=4 tag=bndroid-probe message=PROC_LOG_TRANSPORT_OK\n", text, re.MULTILINE)
@@ -106,7 +126,7 @@ def main():
     text = ""
     status = "timeout"
     mode = os.environ.get("BNDROID_ART_MODE", "java")
-    if mode not in ("java", "memory", "help", "signals", "signal-bad-frame", "signal-bad-pc", "signal-bad-fp", "signal-default", "signal-guard"):
+    if mode not in ("java", "managed", "memory", "help", "signals", "signal-bad-frame", "signal-bad-pc", "signal-bad-fp", "signal-default", "signal-guard"):
         raise SystemExit("Unknown ART mode")
     with tempfile.NamedTemporaryFile(prefix="bndroid-art-entropy-") as entropy:
         entropy.write(os.urandom(65536))
@@ -145,13 +165,16 @@ def main():
     unchanged = hashlib.sha256(disk.read_bytes()).hexdigest() == original_hash
     summary = {"status": status, "mode": mode, "full_android_apps": False, "disk_unchanged": unchanged,
                "art_frontend_verified": mode == "help" and status == "help-passed",
-               "managed_java_verified": mode == "java" and status == "java-passed",
+               "managed_java_verified": mode in ("java", "managed") and status == mode + "-passed",
+               "managed_runtime_verified": mode == "managed" and status == "managed-passed",
+               "apk_dex_jni_verified": mode == "managed" and status == "managed-passed",
                "abort_messages": re.findall(r"^LINUX_ABORT_MESSAGE pid=\d+ message=(.*)$", text, re.MULTILINE),
                "android_errors": re.findall(r"^ANDROID_LOG pid=\d+ buffer=\d+ priority=[67] tag=(.*)\n", text, re.MULTILINE)[-16:],
                "unsupported_syscalls": sorted(set(map(int, re.findall(r"LINUX_SYSCALL_UNSUPPORTED pid=\d+ number=(\d+)", text)))),
                "fault": diagnostic_record(text, "LINUX_USER_FAULT"),
                "cleanup": diagnostic_record(text, "LINUX_RUNTIME_FAILURE_CLEANUP"),
                "signals": diagnostic_record(text, "LINUX_SIGNALS_OK"),
+               "paging": diagnostic_record(text, "LINUX_PAGING_OK"),
                "runtime": diagnostic_record(text, "BIONIC_DYNAMIC_RUNTIME_OK")}
     (artifacts / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     print(f"ART_RUNTIME_RESULT status={status} evidence={artifacts}")

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="org.bndroid.runtimeprobe" android:versionCode="1" android:versionName="1.0">
+    <uses-sdk android:minSdkVersion="35" android:targetSdkVersion="36" />
+    <!-- A runtime test package with a command-line entry, not an Activity. -->
+    <application android:label="Bndroid Runtime Probe" android:hasCode="true"
+        android:extractNativeLibs="false" android:allowBackup="false" />
+</manifest>

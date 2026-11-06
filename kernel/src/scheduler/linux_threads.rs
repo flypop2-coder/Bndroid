@@ -21,6 +21,10 @@ struct Local {
     #[cfg(feature = "art-runtime")]
     kernel_counter: u64,
     #[cfg(feature = "art-runtime")]
+    retired_user_counter: u64,
+    #[cfg(feature = "art-runtime")]
+    retired_kernel_counter: u64,
+    #[cfg(feature = "art-runtime")]
     resumed_counter: u64,
 }
 impl Local {
@@ -35,6 +39,10 @@ impl Local {
         user_counter: 0,
         #[cfg(feature = "art-runtime")]
         kernel_counter: 0,
+        #[cfg(feature = "art-runtime")]
+        retired_user_counter: 0,
+        #[cfg(feature = "art-runtime")]
+        retired_kernel_counter: 0,
         #[cfg(feature = "art-runtime")]
         resumed_counter: 0,
     };
@@ -112,14 +120,43 @@ extern "C" fn linux_account_leave(frame: *mut TrapFrame) -> *mut TrapFrame {
 }
 
 #[cfg(feature = "art-runtime")]
+pub fn cpu_counter(per_thread: bool) -> u64 {
+    let current = current_running_context();
+    let process = owner(current);
+    let mut total = 0u64;
+    for context in DYNAMIC_USER_CONTEXT_START..CONTEXT_COUNT {
+        if owner(context) == process && (!per_thread || context == current) {
+            total = total
+                .saturating_add(local(context).user_counter)
+                .saturating_add(local(context).kernel_counter);
+        }
+    }
+    if !per_thread {
+        let main = local(leader(process));
+        total = total
+            .saturating_add(main.retired_user_counter)
+            .saturating_add(main.retired_kernel_counter);
+    }
+    if ACCOUNT_DEPTH.load(Ordering::Relaxed) != 0
+        && ACCOUNT_CONTEXT.load(Ordering::Relaxed) == current as u64
+    {
+        total = total.saturating_add(
+            crate::arch::aarch64::timer::counter_value()
+                .wrapping_sub(ACCOUNT_START.load(Ordering::Relaxed)),
+        );
+    }
+    total
+}
+
+#[cfg(feature = "art-runtime")]
 pub fn proc_stat(process: u64, parent: u32, started: u64) -> bndroid_kernel::linux_proc::Stat {
     let main = leader(process);
     let mut name = local(main).name;
     if name[0] == 0 {
         name[..8].copy_from_slice(b"linker64");
     }
-    let mut user = 0u64;
-    let mut kernel = 0u64;
+    let mut user = local(main).retired_user_counter;
+    let mut kernel = local(main).retired_kernel_counter;
     let mut threads = 0;
     for (context, state) in CONTEXTS.iter().enumerate().skip(DYNAMIC_USER_CONTEXT_START) {
         if owner(context) != process {
@@ -719,11 +756,11 @@ pub fn reap() {
         {
             let main = leader(owner(context));
             let retired = *local(context);
-            local(main).user_counter = local(main)
-                .user_counter
+            local(main).retired_user_counter = local(main)
+                .retired_user_counter
                 .saturating_add(retired.user_counter);
-            local(main).kernel_counter = local(main)
-                .kernel_counter
+            local(main).retired_kernel_counter = local(main)
+                .retired_kernel_counter
                 .saturating_add(retired.kernel_counter);
         }
         transition_state(context, ThreadState::Zombie, ThreadState::Inactive);

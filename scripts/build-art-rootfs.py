@@ -6,6 +6,7 @@ import io
 import json
 from pathlib import Path, PurePosixPath
 import tarfile
+import zipfile
 
 
 def main():
@@ -13,7 +14,7 @@ def main():
     parser.add_argument("--runtime", required=True, type=Path)
     parser.add_argument("--dex", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--mode", choices=("java", "memory", "help", "signals", "signal-bad-frame", "signal-bad-pc", "signal-bad-fp", "signal-default", "signal-guard"), default="java")
+    parser.add_argument("--mode", choices=("java", "managed", "memory", "help", "signals", "signal-bad-frame", "signal-bad-pc", "signal-bad-fp", "signal-default", "signal-guard"), default="java")
     args = parser.parse_args()
     provenance = json.loads((args.runtime / "art-provenance.json").read_text())
     inputs = {}
@@ -52,6 +53,10 @@ def main():
             if inputs.pop(name) != inputs[destination.lstrip("/")]:
                 raise SystemExit(f"Bionic alias differs from canonical input: {name}")
     inputs["system/framework/bndroid-probe.dex"] = args.dex.read_bytes()
+    if args.mode == "managed":
+        inputs["system/framework/bndroid-probe.dex"] = (args.dex.parent / "managed.dex").read_bytes()
+        inputs["system/lib64/libbndroidjni.so"] = (args.dex.parent / "libbndroidjni.so").read_bytes()
+        inputs["data/app/bndroid.runtime/base.apk"] = (args.dex.parent / "managed.apk").read_bytes()
     # Bndroid's initial public native-library policy lists actual supplied
     # libraries. It does not advertise missing Android graphics/media APIs.
     inputs["system/etc/public.libraries.txt"] = b"libc.so\nlibdl.so\nlibm.so\nliblog.so\nlibz.so\n"
@@ -61,6 +66,16 @@ def main():
         inputs["system/bin/art-signals-probe"] = (args.dex.parent / "signals-probe").read_bytes()
     if not inputs["system/framework/bndroid-probe.dex"].startswith(b"dex\n"):
         raise SystemExit("Expected a standard DEX input")
+    selected_dex = inputs["system/framework/bndroid-probe.dex"]
+    if args.mode == "managed":
+        with zipfile.ZipFile(io.BytesIO(inputs["data/app/bndroid.runtime/base.apk"])) as apk:
+            if apk.testzip() or len(apk.namelist()) != len(set(apk.namelist())):
+                raise SystemExit("Corrupt or duplicate APK input")
+            if apk.read("classes.dex") != selected_dex or apk.read("lib/arm64-v8a/libbndroidjni.so") != inputs["system/lib64/libbndroidjni.so"]:
+                raise SystemExit("APK payload differs from the owned DEX/JNI build")
+        # The runtime must actually load DEX from the APK. There is no loose
+        # managed DEX or extracted application library on its positive path.
+        del inputs["system/framework/bndroid-probe.dex"]
     if len(inputs) + len(aliases) + 4 + 7 > 128:
         raise SystemExit("Rootfs exceeds catalog capacity")
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -84,6 +99,10 @@ def main():
     jars.append("/apex/com.android.i18n/javalib/core-icu4j.jar")
     arguments = ["/apex/com.android.runtime/bin/linker64", "/apex/com.android.art/bin/dalvikvm64"]
     arguments += ["-help"] if args.mode == "help" else ["-Xint", "-Xusejit:false", "-Xms4m", "-Xmx16m", "-Xnoimage-dex2oat", "-Xbootclasspath:" + ":".join(jars), "-cp", "/system/framework/bndroid-probe.dex", "Main"]
+    if args.mode == "managed":
+        arguments[-1] = "ManagedMain"
+        arguments[-2] = "/data/app/bndroid.runtime/base.apk"
+        arguments.insert(2, "-Djava.library.path=/data/app/bndroid.runtime/base.apk!/lib/arm64-v8a")
     if args.mode == "memory":
         arguments = [arguments[0], "/system/bin/art-memory-probe"]
     if args.mode.startswith("signal"):
@@ -93,9 +112,11 @@ def main():
                    "ANDROID_DATA=/data"]
     args.output.with_suffix(".launch").write_text("\n".join(["arg=" + s for s in arguments] + ["env=" + s for s in environment]) + "\n")
     receipt = {"source": provenance, "rootfs_sha256": hashlib.sha256(args.output.read_bytes()).hexdigest(),
-               "dex_sha256": hashlib.sha256(args.dex.read_bytes()).hexdigest(), "mode": args.mode,
+               "dex_sha256": hashlib.sha256(selected_dex).hexdigest(), "mode": args.mode,
                "files": len(inputs) + len(aliases) + 4, "bytes": args.output.stat().st_size,
                "aliases": aliases, "namespace_mode": "verified source global and ART linker configuration"}
+    if args.mode == "managed":
+        receipt["apk_sha256"] = hashlib.sha256(inputs["data/app/bndroid.runtime/base.apk"]).hexdigest()
     args.output.with_suffix(".json").write_text(json.dumps(receipt, indent=2) + "\n")
     print(f"ART_ROOTFS_BUILD_OK files={receipt['files']} bytes={receipt['bytes']} path={args.output}")
 
