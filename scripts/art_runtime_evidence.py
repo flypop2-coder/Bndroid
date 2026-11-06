@@ -47,12 +47,18 @@ def completion_status(text, mode):
         if mode == "framework-identities":
             if complete_lines(text, "LAUNCH_PPOLL_OK invalid=1 ignored=1 timer_wake=1 timeout=1") != 2:
                 return "missing-ppoll-proof"
+            if complete_lines(text, "LAUNCH_POLICY_OK context=1 find=1 add_authority=1 unknown_denied=1 property_authority=1 shared_property=1") != 2:
+                return "missing-native-policy-proof"
             for role, uid in (("system", 1000), ("app", 10000)):
                 if complete_lines(text, f"LAUNCH_IDENTITY_OK role={role} uid={uid} gid={uid} auxv=1 signals=1 binder=1 authority=1") != 1:
                     return "missing-distinct-identity-proof"
+        elif complete_lines(text, "SERVICE_MANAGER_POLICY_OK ready=1 spoof_denied=1 unknown_service_denied=1") != 1:
+            return "missing-native-policy-proof"
         try:
             binder = parse_marker(text, "LINUX_BINDER_OK")
             poll = parse_marker(text, "LINUX_POLL_OK")
+            if not binder or int(binder.get("security_contexts", 0)) < 1:
+                return "missing-binder-security-proof"
             if not binder or any(binder.get(key) != "0" for key in ("connections", "transactions", "buffers", "nodes", "references", "call_frames", "pending_fds")) or int(binder.get("submitted", 0)) < 1 or int(binder.get("replied", 0)) < 1 or binder.get("opened") != binder.get("closed"):
                 return "invalid-service-binder-proof"
             if not poll or any(poll.get(key) != "0" for key in ("live", "watches")) or int(poll["closed"]) != sum(int(poll.get(k, 0)) for k in ("eventfds", "epolls", "external", "timers")):

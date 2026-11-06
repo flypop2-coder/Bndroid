@@ -70,7 +70,10 @@ def main():
     if framework:
         inputs["system/framework/bndroid-probe.dex"] = (args.dex.parent / "framework.dex").read_bytes()
     if framework or args.mode == "properties":
-        inputs["dev/__properties__"] = encode_properties(runtime_properties(provenance["source"]))
+        properties = runtime_properties(provenance["source"])
+        if service_mode:
+            properties.update({"ro.property_service.version": "2", "servicemanager.ready": ""})
+        inputs["dev/__properties__"] = encode_properties(properties, mutable=("servicemanager.ready",) if service_mode else ())
     if args.mode == "memfd":
         inputs["system/bin/memfd-probe"] = (args.dex.parent / "memfd-probe").read_bytes()
     if args.mode == "binder":
@@ -167,6 +170,9 @@ def main():
         ]):
             launch += [f"profile={index}", f"uid={uid}", f"gid={uid}", f"binder_managers={1 if index == 0 else 0}",
                        "arg=/apex/com.android.runtime/bin/linker64", "arg=" + executable]
+            launch += [f"service_grant={3 if index == 0 else 2} u:object_r:service_manager_service:s0"]
+            if index == 0:
+                launch += ["service_grant=4 u:r:bndroid_profile_0:s0", "property_grant=servicemanager.ready"]
             if executable.endswith("launch-probe"):
                 launch.append("arg=" + role)
             launch += ["env=" + entry for entry in environment if not entry.startswith(("CLASSPATH=", "BOOTCLASSPATH=", "DEX2OATBOOTCLASSPATH="))]
@@ -184,7 +190,7 @@ def main():
         receipt["launch_profiles"] = [{"index": 0, "uid": 1000, "gid": 1000, "binder_managers": 1},
                                       {"index": 1, "uid": 10000, "gid": 10000, "binder_managers": 0}]
     if framework or args.mode == "properties":
-        receipt["boot_properties"] = runtime_properties(provenance["source"])
+        receipt["boot_properties"] = properties
     args.output.with_suffix(".json").write_text(json.dumps(receipt, indent=2) + "\n")
     print(f"ART_ROOTFS_BUILD_OK files={receipt['files']} bytes={receipt['bytes']} path={args.output}")
 

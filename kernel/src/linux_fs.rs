@@ -367,6 +367,39 @@ impl<'a> Archive<'a> {
             .find(|entry| entry.path == path)
             .copied()
     }
+
+    pub fn children(&self, path: &str) -> Result<alloc::vec::Vec<(&'a str, Node<'a>)>, i64> {
+        let directory = self.node(path).ok_or(ENOENT)?;
+        if directory.kind != Kind::Directory {
+            return Err(20);
+        }
+        let mut result = alloc::vec::Vec::new();
+        result.try_reserve(self.count + 2).map_err(|_| 12)?;
+        result.push((".", directory));
+        let parent = path.rsplit_once('/').map_or("", |(p, _)| p);
+        result.push(("..", self.node(parent).ok_or(ENOENT)?));
+        for entry in self.entries[..self.count].iter().flatten() {
+            let tail = if path.is_empty() {
+                entry.path
+            } else {
+                let Some(tail) = entry
+                    .path
+                    .strip_prefix(path)
+                    .and_then(|p| p.strip_prefix('/'))
+                else {
+                    continue;
+                };
+                tail
+            };
+            let name = tail.split('/').next().unwrap();
+            if name.is_empty() || result.iter().any(|(n, _)| *n == name) {
+                continue;
+            }
+            let end = entry.path.len() - tail.len() + name.len();
+            result.push((name, self.node(&entry.path[..end]).ok_or(ENOENT)?));
+        }
+        Ok(result)
+    }
 }
 
 fn string(bytes: &[u8]) -> Result<&str, ArchiveError> {

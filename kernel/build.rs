@@ -899,6 +899,13 @@ fn configure_linux_launch() {
             }
             source.push_str("],\n");
         }
+        source.push_str(
+            &format!(
+                "service_grants: &{:?}, property_grants: &{:?},\n",
+                profile.service_grants, profile.property_grants
+            )
+            .replace("Grant {", "bndr_sm::service_authority::Grant {"),
+        );
         source.push_str(&format!("credentials: bndroid_kernel::linux_launch::Credentials {{ uid: {}, gid: {} }}, manager_domains: {},\n}},\n",
             profile.credentials.uid, profile.credentials.gid, profile.manager_domains));
     }

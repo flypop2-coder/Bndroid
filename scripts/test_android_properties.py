@@ -4,6 +4,13 @@ from android_properties import BOOT_PROPERTIES, encode_properties, runtime_prope
 
 
 class PropertyEncodingTests(unittest.TestCase):
+    def test_mutable_keys_require_explicit_native_publication_and_start_empty(self):
+        values = {**BOOT_PROPERTIES, "ro.property_service.version": "2", "servicemanager.ready": ""}
+        with self.assertRaises(ValueError):
+            encode_properties(values)
+        area = encode_properties(values, mutable=("servicemanager.ready",))
+        self.assertIn(b"servicemanager.ready\0", area)
+        self.assertNotIn(b"true", area)
     def test_framework_version_requires_the_frozen_source(self):
         props = runtime_properties({"package_properties": "AndroidVersion.ApiLevel=36.1\nPkg.Revision=3\n"})
         self.assertEqual(len(props), 13)

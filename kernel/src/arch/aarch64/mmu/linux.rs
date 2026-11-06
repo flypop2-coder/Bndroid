@@ -917,6 +917,16 @@ impl UserAddressSpace {
         })
     }
     #[cfg(feature = "art-runtime")]
+    pub fn linux_shared_futex(&self, address: u64) -> Option<(u64, u64)> {
+        let regions = &self.linux.layout.regions;
+        let r = regions.get(regions.partition_point(|r| r.end <= address))?;
+        if !r.shared || address < r.start || address.checked_add(4)? > r.end {
+            return None;
+        }
+        let file = r.file.filter(|f| f.memory)?;
+        Some((file.inode, file.offset + address - r.file_origin))
+    }
+    #[cfg(feature = "art-runtime")]
     pub fn linux_mmap_memory(
         &mut self,
         args: [u64; 6],

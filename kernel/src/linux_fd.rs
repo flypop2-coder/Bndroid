@@ -3,6 +3,7 @@
 //! dup/close and are released automatically when the owning table is dropped.
 use crate::linux_fs::{Kind, Node};
 use alloc::alloc::{alloc, dealloc};
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::{
     alloc::Layout,
@@ -37,6 +38,8 @@ pub enum Target {
     EventFd,
     TimerFd,
     Epoll,
+    Control(crate::linux_control::Kind),
+    Properties { inode: u64, length: u64 },
 }
 
 struct Description {
@@ -47,8 +50,10 @@ struct Description {
     snapshot: Option<Vec<u8>>,
     log_connected: AtomicBool,
     memory: Option<crate::linux_memfd::MemoryFile>,
+    native_backing: Option<FileRef>,
     binder: Option<BinderFile>,
     poll: Option<PollFile>,
+    control: Option<Box<crate::linux_control::Control>>,
 }
 pub struct PollFile {
     pub id: u64,
@@ -107,6 +112,31 @@ impl FileRef {
             None,
             None,
         )
+    }
+    pub fn try_properties() -> Result<Self, i64> {
+        let memory = crate::linux_memfd::MemoryFile::new(b"native-properties", 0)?;
+        Self::create(
+            Target::Properties {
+                inode: memory.inode(),
+                length: 0,
+            },
+            0,
+            None,
+            Some(memory),
+            None,
+            None,
+        )
+    }
+    pub fn property_view(&self, flags: u32) -> Result<Self, i64> {
+        if !matches!(self.target(), Target::Properties { .. }) || flags & 3 != 0 {
+            return Err(13);
+        }
+        let file = Self::try_new(self.target(), flags)?;
+        // A fresh, unpublished description; the shared bytes have one owner.
+        unsafe {
+            (*file.0.as_ptr()).native_backing = Some(self.clone());
+        }
+        Ok(file)
     }
     pub fn try_binder(
         owner: crate::linux_binder::Identity,
@@ -169,6 +199,21 @@ impl FileRef {
         binder: Option<BinderFile>,
         poll: Option<PollFile>,
     ) -> Result<Self, i64> {
+        // Most runtime descriptors are immutable ELF/JAR files. Allocate the
+        // exchange state only for endpoints that actually use it.
+        let control = if matches!(target, Target::Control(_)) {
+            let p = NonNull::new(
+                unsafe { alloc(Layout::new::<crate::linux_control::Control>()) }
+                    .cast::<crate::linux_control::Control>(),
+            )
+            .ok_or(ENOMEM)?;
+            unsafe {
+                p.as_ptr().write(crate::linux_control::Control::default());
+                Some(Box::from_raw(p.as_ptr()))
+            }
+        } else {
+            None
+        };
         let pointer =
             NonNull::new(unsafe { alloc(Layout::new::<Description>()) }.cast::<Description>())
                 .ok_or(ENOMEM)?;
@@ -181,8 +226,10 @@ impl FileRef {
                 snapshot,
                 log_connected: AtomicBool::new(false),
                 memory,
+                native_backing: None,
                 binder,
                 poll,
+                control,
             });
         }
         LIVE_DESCRIPTIONS.fetch_add(1, Ordering::Relaxed);
@@ -192,6 +239,13 @@ impl FileRef {
         unsafe { self.0.as_ref() }
     }
     pub fn target(&self) -> Target {
+        if let Target::Properties { .. } = self.inner().target {
+            let memory = self.memory().unwrap();
+            return Target::Properties {
+                inode: memory.inode(),
+                length: memory.len(),
+            };
+        }
         match self.memory() {
             Some(memory) => Target::Memory {
                 inode: memory.inode(),
@@ -201,13 +255,22 @@ impl FileRef {
         }
     }
     pub fn memory(&self) -> Option<&crate::linux_memfd::MemoryFile> {
-        self.inner().memory.as_ref()
+        self.inner()
+            .memory
+            .as_ref()
+            .or_else(|| self.inner().native_backing.as_ref().and_then(Self::memory))
     }
     pub fn binder(&self) -> Option<&BinderFile> {
         self.inner().binder.as_ref()
     }
     pub fn poll(&self) -> Option<&PollFile> {
         self.inner().poll.as_ref()
+    }
+    pub fn control(&self) -> &crate::linux_control::Control {
+        self.inner()
+            .control
+            .as_deref()
+            .expect("native endpoint description")
     }
     pub fn snapshot(&self) -> Option<&[u8]> {
         self.inner().snapshot.as_deref()
@@ -257,7 +320,7 @@ impl FileRef {
             Target::Node(node) if node.kind == Kind::File => Some(node.data.len() as u64),
             Target::Node(_) => return Err(EBADF),
             Target::Snapshot { .. } => None, // proc seq-file: SEEK_SET/CUR only.
-            Target::Memory { length, .. } => Some(length),
+            Target::Memory { length, .. } | Target::Properties { length, .. } => Some(length),
             _ => return Err(ESPIPE),
         };
         let base = match whence {

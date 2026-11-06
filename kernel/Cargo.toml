@@ -22,6 +22,7 @@ bndr-ui = { path = "../crates/bndr-ui" }
 
 [build-dependencies]
 bndr-abi = { path = "../crates/bndr-abi" }
+bndr-sm = { path = "../crates/bndr-sm" }
 
 [features]
 default = []

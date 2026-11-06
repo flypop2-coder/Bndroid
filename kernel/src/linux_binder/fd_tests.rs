@@ -6,12 +6,14 @@ fn setup(accept: bool) -> (Router, u64, u64) {
     let mut r = Router::new();
     let s = r
         .open(Identity {
+            security_context: "",
             process: 1,
             uid: 1000,
         })
         .unwrap();
     let c = r
         .open(Identity {
+            security_context: "",
             process: 2,
             uid: 10000,
         })
@@ -264,6 +266,7 @@ fn malformed_fd_arrays_and_unpublished_transfers_release_buffer_holds() {
     // A Binder descriptor would create a recursive router ownership cycle.
     let file = FileRef::try_binder(
         Identity {
+            security_context: "",
             process: 99,
             uid: 10000,
         },

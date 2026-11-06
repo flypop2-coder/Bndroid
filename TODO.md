@@ -170,7 +170,8 @@ Tasks follow dependencies, not optimistic calendar dates. Each stage requires co
 - [x] Connect Binder to epoll with process/thread-specific readiness, nested/edge/one-shot notification, non-consuming snapshots and close cleanup.
 - [x] Add Init-selected Linux launch profiles with distinct UID/GID, matching auxiliary-vector/signal/Binder identities and explicit context-manager domain authority.
 - [x] Add timerfd expiration accounting and event waits; supply bounded ppoll readiness for existing files, timers, Binder and epoll.
-- [ ] Complete original ServiceManager startup, writable readiness properties and native permission/security-context mapping; retain the separate daemon/client acceptance gate.
+- [x] Start the original ServiceManager with Init-issued service grants, authenticated Binder security contexts and a live shared readiness property; verify original NDK lookup/ping, denied property spoofing and full teardown.
+- [ ] Extend service grants into CoreSystem-owned dynamic application policy; register native/Framework providers through the original ServiceManager, and verify lookup/calls/death/restart across separate provider and app processes.
 - [ ] Extend readiness to socket/pipe and other devices, add select and ppoll remaining-time writeback, and implement clock-change cancellation, alarm wakeups and native power policy.
 - [ ] Run a non-customized managed APK through ActivityThread and Framework.
 - [ ] Run a JNI/native-library APK with W^X, RELRO, ASLR, and crash-isolation checks.

@@ -33,6 +33,7 @@ fn device_domains_route_handle_zero_and_pin_manager_uids_independently() {
     let hardware = r
         .open_in(
             Identity {
+                security_context: "",
                 process: 0x100000004,
                 uid: 2000,
             },
@@ -42,6 +43,7 @@ fn device_domains_route_handle_zero_and_pin_manager_uids_independently() {
     let hw_client = r
         .open_in(
             Identity {
+                security_context: "",
                 process: 0x100000005,
                 uid: 10000,
             },
@@ -51,6 +53,7 @@ fn device_domains_route_handle_zero_and_pin_manager_uids_independently() {
     let vendor = r
         .open_in(
             Identity {
+                security_context: "",
                 process: 0x100000006,
                 uid: 3000,
             },
@@ -114,12 +117,14 @@ fn setup() -> (Router, u64, u64) {
     let mut r = Router::new();
     let service = r
         .open(Identity {
+            security_context: "",
             process: 0x100000002,
             uid: 1000,
         })
         .unwrap();
     let client = r
         .open(Identity {
+            security_context: "",
             process: 0x100000003,
             uid: 10000,
         })
@@ -254,6 +259,7 @@ fn closing_service_wakes_callers_and_death_cookie_survives_replacement() {
     assert_eq!(opcode(&receive(&mut r, c, 3)), BR_CLEAR_DEATH_DONE);
     let replacement = r
         .open(Identity {
+            security_context: "",
             process: 0x200000002,
             uid: 1000,
         })
@@ -346,6 +352,7 @@ fn accepted_oneway_survives_sender_exit_and_bad_reply_unblocks_caller() {
     r.free_buffer(s, transaction(&message).data).unwrap();
     let client = r
         .open(Identity {
+            security_context: "",
             process: 0x200000003,
             uid: 10000,
         })

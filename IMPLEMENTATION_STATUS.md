@@ -2,6 +2,33 @@
 
 This page records implemented behavior and validation, with a September 9, 2026 platform baseline and dated updates below. Historical test counts belong to the indicated development runs; they are not a claim that every historical gate was rerun during publication. The [complete original status log](docs/archive/originals/IMPLEMENTATION_STATUS.txt) preserves detailed evidence and earlier milestones. Future tasks belong only in [TODO.md](TODO.md).
 
+## Original ServiceManager and native policy update — November 6, 2026
+
+The unmodified local ServiceManager starts on Bndroid and answers the original
+libbinder_ndk lookup/ping path. Init-issued service/property grants supply native
+authority; the SELinux service-query ABI exposes those decisions without a
+permissive bypass. Binder delivers authenticated sender security contexts.
+Bionic writes the actual readiness property through a bounded native endpoint;
+shared read-only mappings and inode/offset futex keys publish and wake correctly.
+Application spoofing and unknown-service access are denied.
+
+Final identity/policy evidence (`check.kavy9Z`) and original daemon/client evidence
+(`check.bj4Ejz`) pass with syscall tracing and complete resource reclamation.
+The latter has four authenticated Binder request/reply/SID exchanges, real daemon
+readiness, and distinct successful-client/terminated-daemon cleanup. Binder
+regression (`check.mWZCh0`) passes. Framework repeat (`check.Jy0dCA`) completes both
+normal VM shutdowns and reclaims all 16 workers; an earlier second-shutdown
+deadline (`check.xmjHo2`) remains recorded as a failure. The repeat preserves the
+original limits and does not establish broad performance stability.
+
+Host validation covers 1,177 workspace library tests, 445 service-profile kernel
+tests and 40 Python checks, with host/AArch64 Clippy warnings denied. All
+successful native gates retain unchanged disks
+and zero live pages/tables/files/events/Binder resources. The 354-file source set
+is unchanged and remains local. See [Service Policy-1](docs/milestones/androidbox/SERVICE_POLICY_1.md)
+for the grant/property ABI, retained diagnostics and evidence. Dynamic CoreSystem
+policy, separate service providers, ActivityThread and A1–A6 remain incomplete.
+
 ## System-service launch and timer update — November 6, 2026
 
 Init now selects immutable Linux executable/argument profiles with distinct

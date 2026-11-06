@@ -27,9 +27,13 @@ class EvidenceTests(unittest.TestCase):
         binder = "LINUX_BINDER_OK opened=2 closed=2 submitted=1 replied=1 connections=0 transactions=0 buffers=0 nodes=0 references=0 call_frames=0 pending_fds=0\n"
         poll = "LINUX_POLL_OK eventfds=0 epolls=2 external=2 timers=10 closed=14 ready=4 cancelled=2 live=0 watches=0\n"
         signals = "LINUX_SIGNALS_OK delivered=4 returned=4 pending=0\n"
-        log = timers * 2 + ppoll * 2 + identities + binder + poll + signals + PROCESS + PROOF
+        policy = "LAUNCH_POLICY_OK context=1 find=1 add_authority=1 unknown_denied=1 property_authority=1 shared_property=1\n"
+        binder = binder.rstrip("\n") + " security_contexts=1\n"
+        log = policy * 2 + timers * 2 + ppoll * 2 + identities + binder + poll + signals + PROCESS + PROOF
         self.assertEqual(completion_status(log, "framework-identities"), "framework-identities-passed")
         for old, new, expected in ((ppoll, "", "missing-ppoll-proof"),
+                                   (policy, "", "missing-native-policy-proof"),
+                                   ("security_contexts=1", "security_contexts=0", "missing-binder-security-proof"),
                                    ("role=app uid=10000", "role=app uid=1000", "missing-distinct-identity-proof"),
                                    ("pending_fds=0", "pending_fds=1", "invalid-service-binder-proof"),
                                    ("closed=14", "closed=13", "invalid-service-poll-proof"),
@@ -42,9 +46,12 @@ class EvidenceTests(unittest.TestCase):
         poll = "LINUX_POLL_OK eventfds=1 epolls=1 external=2 timers=1 closed=5 external_delivered=2 live=0 watches=0\n"
         processes = PROCESS.replace("LINUX_PROCESS_EXIT pid=4294967298 code=0 native_handles=0\n", "")
         proof = PROOF.replace("native_exits=2", "native_exits=1 native_killed=1")
-        log = marker + binder + poll + processes + proof
+        binder = binder.rstrip("\n") + " security_contexts=2\n"
+        log = "SERVICE_MANAGER_POLICY_OK ready=1 spoof_denied=1 unknown_service_denied=1\n" + marker + binder + poll + processes + proof
         self.assertEqual(completion_status(log, "framework-services"), "framework-services-passed")
         for old, new, expected in (("native_killed=1", "native_killed=0", "invalid-cleanup-proof"),
+                                   ("SERVICE_MANAGER_POLICY_OK", "REMOVED", "missing-native-policy-proof"),
+                                   ("security_contexts=2", "security_contexts=0", "missing-binder-security-proof"),
                                    ("external_delivered=2", "external_delivered=0", "missing-upstream-service-loop-proof"),
                                    (marker, "SERVICE_MANAGER_CLIENT_TIMEOUT\n", "missing-service-launch-proof")):
             self.assertEqual(completion_status(log.replace(old, new), "framework-services"), expected)

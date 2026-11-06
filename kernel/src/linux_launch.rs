@@ -3,6 +3,16 @@
 use alloc::vec::Vec;
 
 pub const MAX_PROFILES: usize = 8;
+pub const SECURITY_CONTEXTS: [&str; 8] = [
+    "u:r:bndroid_profile_0:s0",
+    "u:r:bndroid_profile_1:s0",
+    "u:r:bndroid_profile_2:s0",
+    "u:r:bndroid_profile_3:s0",
+    "u:r:bndroid_profile_4:s0",
+    "u:r:bndroid_profile_5:s0",
+    "u:r:bndroid_profile_6:s0",
+    "u:r:bndroid_profile_7:s0",
+];
 pub use bndr_abi::PROCESS_SPAWN_LINUX_PROFILE_SHIFT as PROFILE_SHIFT;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -23,6 +33,8 @@ pub struct Profile {
     pub environment: &'static [&'static [u8]],
     pub credentials: Credentials,
     pub manager_domains: u8,
+    pub service_grants: &'static [bndr_sm::service_authority::Grant<'static>],
+    pub property_grants: &'static [&'static str],
 }
 
 pub fn profile_index(flags: u64, linux: bool, count: usize) -> Option<usize> {
@@ -35,6 +47,8 @@ pub struct Parsed<'a> {
     pub environment: Vec<&'a str>,
     pub credentials: Credentials,
     pub manager_domains: u8,
+    pub service_grants: Vec<bndr_sm::service_authority::Grant<'a>>,
+    pub property_grants: Vec<&'a str>,
 }
 impl Default for Parsed<'_> {
     fn default() -> Self {
@@ -43,6 +57,8 @@ impl Default for Parsed<'_> {
             environment: Vec::new(),
             credentials: Credentials::APPLICATION,
             manager_domains: 7,
+            service_grants: Vec::new(),
+            property_grants: Vec::new(),
         }
     }
 }
@@ -73,6 +89,8 @@ pub fn parse(input: &str) -> Result<Vec<Parsed<'_>>, &'static str> {
                     || uid_seen
                     || gid_seen
                     || domains_seen
+                    || !current.service_grants.is_empty()
+                    || !current.property_grants.is_empty()
                 {
                     validate(&current)?;
                     profiles.push(current);
@@ -87,6 +105,39 @@ pub fn parse(input: &str) -> Result<Vec<Parsed<'_>>, &'static str> {
                 domains_seen = false;
             }
             "arg" => current.arguments.push(value),
+            "service_grant" => {
+                let (rights, target) = value
+                    .split_once(' ')
+                    .ok_or("service grant needs mask and context")?;
+                let rights = rights
+                    .parse::<u32>()
+                    .map_err(|_| "invalid service rights")?;
+                if rights == 0
+                    || rights & !bndr_sm::service_authority::ALL != 0
+                    || target.len() > 160
+                    || !target.starts_with("u:")
+                    || !target
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"_:,.".contains(&b))
+                    || current.service_grants.len() >= 32
+                    || current.service_grants.iter().any(|g| g.target == target)
+                {
+                    return Err("invalid or duplicate service grant");
+                }
+                current
+                    .service_grants
+                    .push(bndr_sm::service_authority::Grant { target, rights });
+            }
+            "property_grant" => {
+                if !bndr_sm::service_authority::property_name(value)
+                    || value.starts_with("ro.")
+                    || current.property_grants.len() >= 16
+                    || current.property_grants.contains(&value)
+                {
+                    return Err("invalid or duplicate property grant");
+                }
+                current.property_grants.push(value);
+            }
             "env" => {
                 let (name, _) = value
                     .split_once('=')
@@ -226,5 +277,28 @@ mod tests {
             text += &format!("profile={index}\n{BASE}");
         }
         assert!(parse(&text).is_err());
+    }
+    #[test]
+    fn grants_are_bounded_explicit_and_never_implied_by_uid() {
+        let text = format!(
+            "{BASE}uid=1000\nservice_grant=2 u:object_r:service_manager_service:s0\nproperty_grant=servicemanager.ready\n"
+        );
+        let p = parse(&text).unwrap();
+        assert_eq!(p[0].service_grants[0].rights, 2);
+        assert_eq!(p[0].property_grants, ["servicemanager.ready"]);
+        assert!(
+            parse(&format!("{BASE}uid=0\n")).unwrap()[0]
+                .service_grants
+                .is_empty()
+        );
+        for field in [
+            "service_grant=8 u:r:invalid:s0\n",
+            "service_grant=1 invalid\n",
+            "property_grant=ro.secret\n",
+            "property_grant=a..b\n",
+            "property_grant=servicemanager.ready\n",
+        ] {
+            assert!(parse(&format!("{text}{field}")).is_err());
+        }
     }
 }

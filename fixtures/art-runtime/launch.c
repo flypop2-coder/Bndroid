@@ -17,6 +17,7 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/timerfd.h>
+#include <sys/system_properties.h>
 #include <unistd.h>
 
 #define CHECK(x) do { if (!(x)) { fprintf(stderr,"LAUNCH_FAIL line=%d errno=%d uid=%u\n",__LINE__,errno,getuid());exit(61); } } while (0)
@@ -100,6 +101,12 @@ static uint32_t receive(int fd,struct binder_transaction_data *tx) {
         while(at<io.read_consumed) {
             uint32_t code;memcpy(&code,bytes+at,4);at+=4;
             if(code==BR_NOOP || code==BR_TRANSACTION_COMPLETE) continue;
+            if(code==BR_TRANSACTION_SEC_CTX) {
+                struct binder_transaction_data_secctx secured;
+                CHECK(at+sizeof(secured)<=io.read_consumed);memcpy(&secured,bytes+at,sizeof(secured));
+                CHECK(strcmp((const char *)(uintptr_t)secured.secctx,"u:r:bndroid_profile_1:s0")==0);
+                *tx=secured.transaction_data;return BR_TRANSACTION;
+            }
             if(code==BR_TRANSACTION || code==BR_REPLY) {CHECK(at+sizeof(*tx)<=io.read_consumed);memcpy(tx,bytes+at,sizeof(*tx));return code;}
             CHECK(code==BR_DEAD_REPLY || code==BR_FAILED_REPLY);return code;
         }
@@ -109,7 +116,10 @@ static void identity_binder(int system) {
     int fd=open("/dev/binder",O_RDWR|O_CLOEXEC);CHECK(fd>=0);
     void *pool=mmap(NULL,65536,PROT_READ,MAP_PRIVATE,fd,0);CHECK(pool!=MAP_FAILED);
     command(fd,BC_ENTER_LOOPER,NULL,0);
-    if(system) CHECK(ioctl(fd,BINDER_SET_CONTEXT_MGR,0)==0);
+    if(system) {
+        struct flat_binder_object manager={.hdr.type=BINDER_TYPE_BINDER,.flags=FLAT_BINDER_FLAG_TXN_SECURITY_CTX};
+        CHECK(ioctl(fd,BINDER_SET_CONTEXT_MGR_EXT,&manager)==0);
+    }
     else CHECK(ioctl(fd,BINDER_SET_CONTEXT_MGR,0)==-1 && errno==EPERM);
     struct binder_transaction_data tx={0};uint32_t code;
     if(system) {
@@ -127,18 +137,56 @@ static void identity_binder(int system) {
     CHECK(munmap(pool,65536)==0 && close(fd)==0);
     printf("LAUNCH_IDENTITY_OK role=%s uid=%u gid=%u auxv=1 signals=1 binder=1 authority=1\n",system?"system":"app",getuid(),getgid());
 }
+static void service_policy(int system) {
+    void *library=dlopen("libselinux.so",RTLD_NOW);CHECK(library!=NULL);
+    int (*get_context)(char **)=dlsym(library,"getcon");
+    void (*free_context)(char *)=dlsym(library,"freecon");
+    int (*check_access)(const char *,const char *,const char *,const char *,void *)=dlsym(library,"selinux_check_access");
+    CHECK(get_context && free_context && check_access);
+    char *context=NULL;CHECK(get_context(&context)==0 && context);
+    CHECK(strcmp(context,system?"u:r:bndroid_profile_0:s0":"u:r:bndroid_profile_1:s0")==0);
+    CHECK(check_access(context,"u:object_r:service_manager_service:s0","service_manager","find",NULL)==0);
+    int add=check_access(context,"u:object_r:service_manager_service:s0","service_manager","add",NULL);
+    CHECK(system?add==0:add<0);
+    CHECK(check_access(context,"u:object_r:default_android_service:s0","service_manager","find",NULL)<0);
+    CHECK(open("/sys/fs/selinux/enforce",O_WRONLY)==-1);
+    CHECK(open("/proc/self/attr/current",O_WRONLY)==-1);
+    free_context(context);CHECK(dlclose(library)==0);
+    const prop_info *property=__system_property_find("servicemanager.ready");CHECK(property);
+    uint32_t (*property_serial)(const prop_info *)=dlsym(RTLD_DEFAULT,"__system_property_serial");CHECK(property_serial);
+    if(system) {
+        usleep(150000);
+        CHECK(__system_property_set("servicemanager.ready","true")==0);
+        CHECK(__system_property_set("ro.product.name","forged")==-1);
+    } else {
+        CHECK(__system_property_set("servicemanager.ready","forged")==-1);
+        char value[PROP_VALUE_MAX];
+        for(int i=0;i<20;++i) {
+            uint32_t serial=property_serial(property),next;
+            if(__system_property_get("servicemanager.ready",value)==4 && strcmp(value,"true")==0)break;
+            struct timespec timeout={1,0};CHECK(__system_property_wait(property,serial,&next,&timeout));
+        }
+        CHECK(__system_property_get("servicemanager.ready",value)==4 && strcmp(value,"true")==0);
+    }
+    puts("LAUNCH_POLICY_OK context=1 find=1 add_authority=1 unknown_denied=1 property_authority=1 shared_property=1");
+}
 static void lookup_manager(void) {
     pthread_t watchdog;CHECK(pthread_create(&watchdog,NULL,lookup_watchdog,NULL)==0);
+    CHECK(__system_property_set("servicemanager.ready","forged")==-1);
     void *library=dlopen("libbinder_ndk.so",RTLD_NOW);CHECK(library!=NULL);
     AIBinder *(*check)(const char *)=dlsym(library,"AServiceManager_checkService");CHECK(check!=NULL);
     AIBinder *manager=NULL;
     for(int attempt=0;attempt<100 && manager==NULL;++attempt) {manager=check("manager");if(!manager)usleep(10000);}
     CHECK(manager!=NULL && AIBinder_ping(manager)==STATUS_OK);
+    char ready[PROP_VALUE_MAX];CHECK(__system_property_get("servicemanager.ready",ready)==4 && strcmp(ready,"true")==0);
+    CHECK(check("bndroid.nonexistent")==NULL);
     AIBinder_decStrong(manager);
     atomic_store(&lookup_done,1);CHECK(pthread_join(watchdog,NULL)==0);
     puts("SERVICE_MANAGER_CLIENT_OK upstream=1 lookup=1 ping=1 uid=10000");
+    puts("SERVICE_MANAGER_POLICY_OK ready=1 spoof_denied=1 unknown_service_denied=1");
 }
 int main(int argc,char **argv) {
+    CHECK(setvbuf(stdout,NULL,_IOLBF,0)==0);
     CHECK(argc==2);int system=strcmp(argv[1],"system")==0;uid_t expected=system?1000:10000;
     CHECK(getuid()==expected && geteuid()==expected && getgid()==expected && getegid()==expected);
     CHECK(getauxval(AT_UID)==expected && getauxval(AT_EUID)==expected && getauxval(AT_GID)==expected && getauxval(AT_EGID)==expected);
@@ -147,5 +195,5 @@ int main(int argc,char **argv) {
     if(strcmp(argv[1],"lookup")==0) {lookup_manager();return 0;}
     CHECK(system || strcmp(argv[1],"app")==0);
     struct sigaction action={.sa_sigaction=handler,.sa_flags=SA_SIGINFO};CHECK(sigaction(SIGUSR1,&action,NULL)==0 && raise(SIGUSR1)==0 && signals_seen==1);
-    timers();identity_binder(system);return 0;
+    timers();service_policy(system);identity_binder(system);return 0;
 }

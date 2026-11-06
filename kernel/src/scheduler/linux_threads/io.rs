@@ -407,6 +407,18 @@ fn pollfds_ready(
                 match f.target() {
                     Target::Random => poll::IN as u16,
                     Target::Console => poll::OUT as u16,
+                    Target::Control(kind) => f.control().with(|s| {
+                        if s.response.is_some() {
+                            (poll::IN
+                                | if kind == bndroid_kernel::linux_control::Kind::Property {
+                                    0x10
+                                } else {
+                                    0
+                                }) as u16
+                        } else {
+                            poll::OUT as u16
+                        }
+                    }),
                     _ => (poll::IN | poll::OUT) as u16,
                 }
             };
@@ -534,6 +546,7 @@ fn suspend(frame: *mut TrapFrame, call: Call) -> *mut TrapFrame {
     if let Err(e) = queue().insert(
         c,
         Wait {
+            shared: false,
             process: owner(c),
             address: 0,
             bitset: !0,

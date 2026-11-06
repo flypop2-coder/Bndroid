@@ -35,13 +35,13 @@ def runtime_properties(source):
     }
 
 
-def encode_properties(properties):
+def encode_properties(properties, mutable=()):
     # Header is 128 bytes; offsets are relative to its data section. Reserve
     # the 20-byte root node and 92-byte dirty backup even though no writes occur.
     data = bytearray(112)
     trie = {}
     for name, value in properties.items():
-        if not re.fullmatch(r"ro(?:\.[A-Za-z0-9_-]+)+", name):
+        if not re.fullmatch(r"[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*", name) or not (name.startswith("ro.") or name in mutable):
             raise ValueError("Only canonical read-only properties are supported")
         raw = value.encode("utf-8")
         if len(raw) >= 92 or b"\0" in raw:

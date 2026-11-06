@@ -1,9 +1,38 @@
 use super::*;
 use alloc::vec;
 
+#[test]
+fn requesting_sid_captures_native_identity_and_preserves_short_failed_reads() {
+    let mut r = Router::new();
+    let server = endpoint(&mut r, 1);
+    let client = endpoint(&mut r, 2);
+    let c = r.index(client).unwrap();
+    r.connections[c].identity.security_context = "u:r:source:s0";
+    r.set_manager_with_flags(server, 0x100, 0x200, 0x1000)
+        .unwrap();
+    send(&mut r, client, 2, packet(0, &[]));
+    assert_eq!(r.read(server, 1, 72).err(), Some(22));
+    let first = r.read(server, 1, 80).unwrap().unwrap();
+    assert_eq!(code(&first), BR_TRANSACTION_SEC_CTX);
+    let offset = (u64_at(&first.bytes, 72) - tx(&first).data) as usize;
+    let context = b"u:r:source:s0\0";
+    assert_eq!(
+        &first.payload.as_ref().unwrap()[offset..offset + context.len()],
+        context
+    );
+    r.discard_delivery(server, &first);
+    assert_eq!(r.stats().security_contexts, 0);
+    // The failed delivery is an actual failed transaction, not a fabricated
+    // successful SID event. All reserved receive data is released on close.
+    r.close(client);
+    r.close(server);
+    assert_eq!(r.stats().buffers, 0);
+}
+
 fn endpoint(r: &mut Router, pid: u64) -> u64 {
     let id = r
         .open(Identity {
+            security_context: "",
             process: pid,
             uid: pid as u32 + 1000,
         })

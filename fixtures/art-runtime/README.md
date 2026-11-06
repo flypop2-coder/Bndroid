@@ -75,10 +75,13 @@ The `framework-identities` mode uses two Init-selected profiles (UID/GID 1000 an
 application context-manager registration, and checks timerfd/ppoll waits and
 complete cleanup. `framework-services` instead launches the original
 ServiceManager and a client using the original libbinder_ndk lookup/ping path.
-This separate gate currently fails at `selinux_status_open`; it does not claim
-working Android system services. Its client watchdog and Init cleanup bound the
-failure and reclaim both processes. See [Service Bootstrap-0](../../docs/milestones/androidbox/SERVICE_BOOTSTRAP_0.md)
-for offline input preparation, the commands and exact evidence.
+The daemon now starts with Init-issued native service permissions, authenticated
+Binder SIDs and its own live readiness-property publication. The client verifies
+lookup/ping and denied property spoofing/unknown-service access. Init reaps the
+client and terminates/reaps its owned daemon. ActivityThread and broader provider
+integration remain open. See [Service Policy-1](../../docs/milestones/androidbox/SERVICE_POLICY_1.md)
+for current limits/evidence and [Service Bootstrap-0](../../docs/milestones/androidbox/SERVICE_BOOTSTRAP_0.md)
+for offline input preparation.
 
 `check-art-signals.sh` runs one positive handler/synchronization gate and five deliberately failing programs. They test corrupt PSTATE, kernel PC, malformed FPSIMD data, an inaccessible alternate stack and group SIGKILL with a waiting sibling and full realtime queue. Negative modes pass only when the expected group fault is followed by complete cleanup. They can be selected individually with `BNDROID_ART_MODE=signals`, `signal-bad-frame`, `signal-bad-pc`, `signal-bad-fp`, `signal-guard` or `signal-default`. Run ART gates sequentially: they share a build directory but own separate disks and QEMU processes.
 

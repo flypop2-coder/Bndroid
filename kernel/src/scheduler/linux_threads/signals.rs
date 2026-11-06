@@ -400,6 +400,7 @@ fn wait_signal(frame: *mut TrapFrame, r: &[u64; 31]) -> *mut TrapFrame {
         queue().insert(
             c,
             Wait {
+                shared: false,
                 process: owner(c),
                 address: 0,
                 bitset: !0,
@@ -430,6 +431,7 @@ fn suspend(frame: *mut TrapFrame, r: &[u64; 31]) -> *mut TrapFrame {
         queue().insert(
             c,
             Wait {
+                shared: false,
                 process: owner(c),
                 address: 0,
                 bitset: !0,

@@ -87,6 +87,9 @@ pub fn deadline(
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Wait {
+    /// Shared keys use a retained memory-file inode and byte offset. Private
+    /// keys use a generation-qualified process and virtual address.
+    pub shared: bool,
     pub process: u64,
     pub address: u64,
     pub bitset: u32,
@@ -121,6 +124,10 @@ impl<const N: usize> FutexQueue<N> {
         self.slots[context].take().is_some()
     }
     pub fn wake(&mut self, process: u64, address: u64, count: u32, bitset: u32) -> u64 {
+        self.wake_key((false, process, address), count, bitset)
+    }
+    pub fn wake_key(&mut self, key: (bool, u64, u64), count: u32, bitset: u32) -> u64 {
+        let (shared, process, address) = key;
         let mut selected = 0;
         let mut remaining = count;
         for (index, slot) in self.slots.iter_mut().enumerate() {
@@ -128,7 +135,10 @@ impl<const N: usize> FutexQueue<N> {
                 break;
             }
             if slot.is_some_and(|w| {
-                w.process == process && w.address == address && w.bitset & bitset != 0
+                w.shared == shared
+                    && w.process == process
+                    && w.address == address
+                    && w.bitset & bitset != 0
             }) {
                 *slot = None;
                 selected |= 1 << index;
@@ -147,14 +157,28 @@ impl<const N: usize> FutexQueue<N> {
         wake_count: u32,
         move_count: u32,
     ) -> (u64, u32) {
-        let selected = self.wake(process, source, wake_count, !0);
+        self.requeue_keys(
+            (false, process, source),
+            (false, process, target),
+            wake_count,
+            move_count,
+        )
+    }
+    pub fn requeue_keys(
+        &mut self,
+        source: (bool, u64, u64),
+        target: (bool, u64, u64),
+        wake_count: u32,
+        move_count: u32,
+    ) -> (u64, u32) {
+        let selected = self.wake_key(source, wake_count, !0);
         let mut moved = 0;
         for wait in self.slots.iter_mut().flatten() {
             if moved == move_count {
                 break;
             }
-            if wait.process == process && wait.address == source {
-                wait.address = target;
+            if (wait.shared, wait.process, wait.address) == source {
+                (wait.shared, wait.process, wait.address) = target;
                 moved += 1;
             }
         }
@@ -184,6 +208,37 @@ impl<const N: usize> FutexQueue<N> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn shared_keys_separate_private_addresses_and_requeue_between_files() {
+        let mut q = FutexQueue::<4>::new();
+        q.insert(
+            0,
+            Wait {
+                shared: true,
+                process: 9,
+                address: 4,
+                bitset: 1,
+                deadline: Some(20),
+            },
+        )
+        .unwrap();
+        q.insert(
+            1,
+            Wait {
+                shared: false,
+                process: 9,
+                address: 4,
+                bitset: 1,
+                deadline: Some(20),
+            },
+        )
+        .unwrap();
+        assert_eq!(q.requeue_keys((true, 9, 4), (true, 10, 8), 0, 3), (0, 1));
+        assert_eq!(q.wake_key((true, 9, 4), 4, !0), 0);
+        assert_eq!(q.wake_key((true, 10, 8), 4, !0), 1);
+        assert_eq!(q.wake(9, 4, 4, !0), 2);
+        assert!(q.is_empty());
+    }
     #[test]
     fn rtc_epoch_and_counter_share_read_and_absolute_wait_time() {
         let anchor = RealtimeAnchor {
@@ -239,6 +294,7 @@ mod tests {
             q.insert(
                 context,
                 Wait {
+                    shared: false,
                     process,
                     address: 4096,
                     bitset,
@@ -266,6 +322,7 @@ mod tests {
         q.insert(
             1,
             Wait {
+                shared: false,
                 process: 2,
                 address: 4096,
                 bitset: !0,
@@ -279,6 +336,7 @@ mod tests {
         q.insert(
             1,
             Wait {
+                shared: false,
                 process: 2,
                 address: 4096,
                 bitset: !0,
@@ -296,6 +354,7 @@ mod tests {
             q.insert(
                 context,
                 Wait {
+                    shared: false,
                     process,
                     address: 4096,
                     bitset,
@@ -313,6 +372,7 @@ mod tests {
         q.insert(
             0,
             Wait {
+                shared: false,
                 process: 2,
                 address: 4096,
                 bitset: 1,

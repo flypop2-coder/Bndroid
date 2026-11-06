@@ -2,6 +2,10 @@
 
 Date: November 6, 2026.
 
+The subsequent [Service Policy-1](SERVICE_POLICY_1.md) milestone completes the
+original daemon lookup/ping gate. This earlier bootstrap record retains its
+initial failures and boundaries.
+
 This extends [Binder Files-2](BINDER_FILES_2.md) toward real Android service
 startup. It adds Init-selected executable/credential profiles, native authority
 over Binder context-manager registration, timerfd and direct ppoll readiness.

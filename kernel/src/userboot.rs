@@ -431,6 +431,8 @@ pub(crate) fn linux_launch(index: usize) -> Option<bndroid_kernel::linux_launch:
             environment: &[b"LANG=C"],
             credentials: Credentials::APPLICATION,
             manager_domains: 7,
+            service_grants: &[],
+            property_grants: &[],
         })
     }
 }

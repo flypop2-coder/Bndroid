@@ -48,6 +48,7 @@ impl Domain {
 pub struct Identity {
     pub process: u64,
     pub uid: u32,
+    pub security_context: &'static str,
 }
 #[derive(Clone, Copy, Debug)]
 pub struct Mapping {
@@ -82,6 +83,7 @@ pub struct Stats {
     pub transactions: usize,
     pub buffers: usize,
     pub first_sender: u64,
+    pub security_contexts: u64,
     pub first_receiver: u64,
 }
 
@@ -118,6 +120,7 @@ struct Buffer {
     holds: Vec<Hold>,
     files: Vec<FileTransfer>,
     file_count: usize,
+    security_context: u64,
 }
 struct Connection {
     id: u64,
@@ -150,7 +153,7 @@ struct Manager {
 }
 
 pub struct Delivery {
-    pub bytes: [u8; 80],
+    pub bytes: [u8; 88],
     pub length: usize,
     pub offset: Option<u64>,
     pub payload: Option<Vec<u8>>,
@@ -179,7 +182,7 @@ impl Delivery {
         delivery
     }
     fn code(code: u32) -> Self {
-        let mut bytes = [0; 80];
+        let mut bytes = [0; 88];
         put32(&mut bytes, 0, BR_NOOP);
         put32(&mut bytes, 4, code);
         Self {
@@ -263,6 +266,7 @@ impl Router {
                 transactions: 0,
                 buffers: 0,
                 first_sender: 0,
+                security_contexts: 0,
                 first_receiver: 0,
             },
         }
@@ -521,6 +525,17 @@ impl Router {
         mut payload: Parcel,
         transaction_id: Option<u64>,
     ) -> Result<u64, i64> {
+        let security = if node.is_some_and(|n| self.objects.requests_security(n).unwrap_or(false)) {
+            let source = self.connections[self.index(from)?]
+                .identity
+                .security_context;
+            if source.is_empty() || source.len() > 160 || source.as_bytes().contains(&0) {
+                return Err(95);
+            }
+            Some(source)
+        } else {
+            None
+        };
         let connection = &mut self.connections[c];
         let mapping = connection.mapping.ok_or(12)?;
         if connection.buffers.len() >= MAX_BUFFERS
@@ -528,7 +543,16 @@ impl Router {
         {
             return Err(12);
         }
-        let length = (payload.bytes.len().max(1) as u64 + 7) & !7;
+        let context_offset = (payload.bytes.len().max(1) + 7) & !7;
+        let length = if let Some(context) = security {
+            payload
+                .bytes
+                .try_reserve(context_offset + context.len() + 1 - payload.bytes.len())
+                .map_err(|_| 12)?;
+            ((context_offset + context.len() + 1 + 7) & !7) as u64
+        } else {
+            context_offset as u64
+        };
         let mut offset = 0;
         for b in &connection.buffers {
             if offset + length <= b.offset {
@@ -547,6 +571,14 @@ impl Router {
         let holds = self
             .objects
             .translate(from, connection.id, transaction, &mut payload, node)?;
+        let security_context = if let Some(context) = security {
+            payload.bytes.resize(length as usize, 0);
+            payload.bytes[context_offset..context_offset + context.len()]
+                .copy_from_slice(context.as_bytes());
+            mapping.base + offset + context_offset as u64
+        } else {
+            0
+        };
         self.stats.fds_submitted += payload.files.len() as u64;
         let at = connection.buffers.partition_point(|b| b.offset < offset);
         connection.buffers.insert(
@@ -564,6 +596,7 @@ impl Router {
                 asynchronous: transaction.flags & ONE_WAY != 0,
                 node,
                 holds,
+                security_context,
             },
         );
         Ok(offset)
@@ -970,6 +1003,7 @@ impl Router {
         }
         let own = self.connections[c].threads[t].events.pop_front();
         let idle = self.connections[c].threads[t].stack.is_empty();
+        let thread_event = own.is_some();
         let event = own.or_else(|| {
             if !idle || self.connections[c].threads[t].looper == 3 {
                 return None;
@@ -992,6 +1026,17 @@ impl Router {
             }
             return Ok(None);
         };
+        if capacity < 80
+            && matches!(event, Event::Request(tx) if self.pending.iter().find(|p| p.id == tx).is_some_and(|p| self.connections[c].buffers.iter().any(|b| b.offset == p.offset && b.security_context != 0)))
+        {
+            if thread_event {
+                self.connections[c].threads[t].events.push_front(event);
+            } else {
+                self.connections[c].process_events.push_front(event);
+            }
+            self.connections[c].threads[t].need_return |= flushed;
+            return Err(22);
+        }
         let (command, offset, transaction) = match event {
             Event::Code(code) => return Ok(Some(Delivery::code(code))),
             Event::Reply(offset) => (BR_REPLY, offset, None),
@@ -1027,13 +1072,18 @@ impl Router {
         let mut result = Delivery::code(command);
         result.bytes[8..72].copy_from_slice(&b.transaction.encode());
         result.length = 72;
+        if command == BR_TRANSACTION && b.security_context != 0 {
+            put32(&mut result.bytes, 4, BR_TRANSACTION_SEC_CTX);
+            put64(&mut result.bytes, 72, b.security_context);
+            result.length = 80;
+        }
         result.offset = Some(offset);
         result.payload = b.payload.take();
         result.files = core::mem::take(&mut b.files);
         result.transaction = transaction;
         result.buffer_id = Some(b.id);
         let connection = &mut self.connections[c];
-        if capacity >= 76
+        if capacity >= result.length + 4
             && !connection.process_events.is_empty()
             && !connection.requested
             && !connection.threads.iter().any(|t| t.waiting)
@@ -1041,8 +1091,8 @@ impl Router {
                 < connection.max_threads as usize
         {
             connection.requested = true;
-            put32(&mut result.bytes, 72, BR_SPAWN_LOOPER);
-            result.length = 76;
+            put32(&mut result.bytes, result.length, BR_SPAWN_LOOPER);
+            result.length += 4;
         }
         Ok(Some(result))
     }
@@ -1116,6 +1166,9 @@ impl Router {
             buffer.delivered = true;
             buffer.file_count = 0;
             self.stats.fds_delivered += delivery.files.len() as u64;
+            if u32_at(&delivery.bytes, 4) == BR_TRANSACTION_SEC_CTX {
+                self.stats.security_contexts += 1;
+            }
         }
         Ok(())
     }

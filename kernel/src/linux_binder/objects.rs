@@ -102,8 +102,8 @@ impl Objects {
         manager: bool,
     ) -> Result<u64, i64> {
         // FD transfer follows the node acceptance flag; SG remains unsupported.
-        // Security contexts and RT inheritance require a separate policy.
-        if flags & !0x1ff != 0 {
+        // SID uses the captured native identity; RT inheritance stays absent.
+        if flags & !0x11ff != 0 {
             return Err(95);
         }
         if let Some(n) = self
@@ -143,6 +143,9 @@ impl Objects {
     }
     pub fn accepts_files(&self, node: u64) -> Result<bool, i64> {
         Ok(self.nodes[self.node_index(node)?].flags & 0x100 != 0)
+    }
+    pub fn requests_security(&self, node: u64) -> Result<bool, i64> {
+        Ok(self.nodes[self.node_index(node)?].flags & 0x1000 != 0)
     }
     pub fn target(&self, node: u64) -> Result<(u64, u64, u64), i64> {
         let n = &self.nodes[self.node_index(node)?];

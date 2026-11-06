@@ -22,6 +22,7 @@ pub const BC_REQUEST_DEATH: u32 = 0x400c_630e;
 pub const BC_CLEAR_DEATH: u32 = 0x400c_630f;
 pub const BC_DEAD_DONE: u32 = 0x4008_6310;
 pub const BR_TRANSACTION: u32 = 0x8040_7202;
+pub const BR_TRANSACTION_SEC_CTX: u32 = 0x8048_7202;
 pub const BR_REPLY: u32 = 0x8040_7203;
 pub const BR_DEAD_REPLY: u32 = 0x0000_7205;
 pub const BR_COMPLETE: u32 = 0x0000_7206;

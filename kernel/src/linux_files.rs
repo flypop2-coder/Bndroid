@@ -21,19 +21,28 @@ fn unix_socket(domain: u64, kind: u64, protocol: u64) -> Result<u64, i64> {
     if domain != 1 {
         return Err(97);
     }
-    if kind & !(0x80000 | 0x800) != 2 {
+    let socket_kind = kind & !(0x80000 | 0x800);
+    if socket_kind != 2 && !(cfg!(feature = "linux-launch-runtime") && socket_kind == 1) {
         return Err(94);
     }
     if protocol != 0 {
         return Err(93);
     }
-    let socket = FileRef::try_new(Target::UnixDatagram, 2 | (kind as u32 & 0x800))?;
+    let target = if socket_kind == 1 {
+        Target::Control(bndroid_kernel::linux_control::Kind::Property)
+    } else {
+        Target::UnixDatagram
+    };
+    let socket = FileRef::try_new(target, 2 | (kind as u32 & 0x800))?;
     process::with_linux_files(|table| table.insert(socket, 0, kind & 0x80000 != 0))
 }
 #[cfg(feature = "art-runtime")]
 fn unix_connect(fd: u64, address: u64, length: u64) -> Result<u64, i64> {
     let socket = file(fd)?;
-    if !matches!(socket.target(), Target::UnixDatagram) {
+    if !matches!(
+        socket.target(),
+        Target::UnixDatagram | Target::Control(bndroid_kernel::linux_control::Kind::Property)
+    ) {
         return Err(88);
     }
     if !(3..=110).contains(&length) {
@@ -49,6 +58,22 @@ fn unix_connect(fd: u64, address: u64, length: u64) -> Result<u64, i64> {
         .iter()
         .position(|byte| *byte == 0)
         .unwrap_or(path.len());
+    #[cfg(feature = "linux-launch-runtime")]
+    if matches!(
+        socket.target(),
+        Target::Control(bndroid_kernel::linux_control::Kind::Property)
+    ) {
+        if &path[..end] != b"/dev/socket/property_service" {
+            return Err(2);
+        }
+        return socket.control().with(|s| {
+            if s.connected {
+                return Err(106);
+            }
+            s.connected = true;
+            Ok(0)
+        });
+    }
     // A registered Bndroid log endpoint. Other Unix endpoints remain absent;
     // this is not an implementation of arbitrary Unix-domain IPC/networking.
     if &path[..end] != b"/dev/socket/logdw" {
@@ -173,6 +198,8 @@ pub fn dispatch(r: &[u64; 31]) -> Option<u64> {
         48 => access(r[0], r[1], r[2], 0),
         56 => open(r[0], r[1], r[2]),
         57 => process::with_linux_files(|t| t.close(r[0])).map(|_| 0),
+        #[cfg(feature = "linux-launch-runtime")]
+        61 => file(r[0]).and_then(|f| crate::linux_security::directory(&f, r[1], r[2])),
         62 => file(r[0]).and_then(|f| f.seek(r[1] as i64, r[2])),
         63 => read(r[0], r[1], r[2], None),
         64 => write(r[0], r[1], r[2]),
@@ -187,6 +214,19 @@ pub fn dispatch(r: &[u64; 31]) -> Option<u64> {
         198 => unix_socket(r[0], r[1], r[2]),
         #[cfg(feature = "art-runtime")]
         203 => unix_connect(r[0], r[1], r[2]),
+        #[cfg(feature = "linux-launch-runtime")]
+        207 => file(r[0]).and_then(|f| {
+            if !matches!(
+                f.target(),
+                Target::Control(bndroid_kernel::linux_control::Kind::Property)
+            ) {
+                return Err(88);
+            }
+            if r[4] != 0 || r[5] != 0 {
+                return Err(95);
+            }
+            crate::linux_property_service::recv(&f, r[1], r[2], r[3])
+        }),
         222 if r[3] & 0x20 == 0 => mmap_file(r[..6].try_into().unwrap()),
         233 => {
             process::with_current_linux_address_space(|space| space.linux_madvise(r[0], r[1], r[2]))
@@ -324,11 +364,27 @@ fn write_memory(file: &FileRef, address: u64, count: u64, offset: Option<u64>) -
 }
 fn statfs_path(pathname: u64, output: u64) -> Result<u64, i64> {
     let mut buffer = [0; PATH_MAX + 1];
-    node(AT_FDCWD as u64, name(pathname, &mut buffer)?, true)?;
+    let node = node(AT_FDCWD as u64, name(pathname, &mut buffer)?, true)?;
+    #[cfg(feature = "linux-launch-runtime")]
+    if node.path == "sys/fs/selinux" || node.path.starts_with("sys/fs/selinux/") {
+        return security_statfs(output);
+    }
+    let _ = node;
     statfs(output)
 }
 fn file_statfs(fd: u64, output: u64) -> Result<u64, i64> {
     let opened = file(fd)?;
+    #[cfg(feature = "linux-launch-runtime")]
+    if matches!(
+        opened.target(),
+        Target::Control(
+            bndroid_kernel::linux_control::Kind::Access
+                | bndroid_kernel::linux_control::Kind::Context
+        )
+    ) || matches!(opened.target(), Target::Node(n) if n.path.starts_with("sys/fs/selinux"))
+    {
+        return security_statfs(output);
+    }
     if opened.memory().is_none() {
         return statfs(output);
     }
@@ -368,6 +424,20 @@ fn statfs(output: u64) -> Result<u64, i64> {
     }
     out(output, &bytes).map(|_| 0)
 }
+#[cfg(feature = "linux-launch-runtime")]
+fn security_statfs(output: u64) -> Result<u64, i64> {
+    let mut bytes = [0; 120];
+    for (offset, value) in [
+        (0, 0xf97cff8c_u64),
+        (8, 4096),
+        (64, 255),
+        (72, 4096),
+        (80, 2),
+    ] {
+        bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+    }
+    out(output, &bytes).map(|_| 0)
+}
 fn out(address: u64, bytes: &[u8]) -> Result<(), i64> {
     let result = runtime::copy_out(address, bytes) as i64;
     if result < 0 { Err(-result) } else { Ok(()) }
@@ -399,6 +469,10 @@ fn path(dir: u64, name: &str) -> Result<Path, i64> {
 }
 fn node(dir: u64, name: &str, follow: bool) -> Result<Node<'static>, i64> {
     let path = path(dir, name)?;
+    #[cfg(feature = "linux-launch-runtime")]
+    if let Some(node) = crate::linux_security::proc_node(path.as_str())? {
+        return Ok(node);
+    }
     // The kernel image for a direct linker invocation remains the interpreter.
     if path.as_str() == "proc/self/exe" {
         if follow {
@@ -419,6 +493,10 @@ fn node(dir: u64, name: &str, follow: bool) -> Result<Node<'static>, i64> {
 }
 fn target(node: Node<'static>) -> Target {
     match node.path {
+        #[cfg(feature = "linux-launch-runtime")]
+        "sys/fs/selinux/access" => Target::Control(bndroid_kernel::linux_control::Kind::Access),
+        #[cfg(feature = "linux-launch-runtime")]
+        "sys/fs/selinux/context" => Target::Control(bndroid_kernel::linux_control::Kind::Context),
         "dev/null" => Target::Null,
         "dev/urandom" => Target::Random,
         #[cfg(feature = "art-runtime")]
@@ -456,7 +534,7 @@ fn open(dir: u64, address: u64, raw_flags: u64) -> Result<u64, i64> {
     let target = target(node);
     if flags & O_PATH == 0 && flags & 3 != 0 {
         match target {
-            Target::Null | Target::Binder(_) => {}
+            Target::Null | Target::Binder(_) | Target::Control(_) => {}
             Target::Node(n) if n.kind == Kind::Directory => return Err(21),
             _ => return Err(30),
         }
@@ -466,6 +544,11 @@ fn open(dir: u64, address: u64, raw_flags: u64) -> Result<u64, i64> {
     } else {
         flags & !0x80000
     };
+    #[cfg(feature = "linux-launch-runtime")]
+    if node.path == "dev/__properties__" && flags & O_PATH == 0 {
+        let f = crate::linux_property_service::open()?.property_view(stored)?;
+        return process::with_linux_files(|t| t.insert(f, 0, flags & 0x80000 != 0));
+    }
     #[cfg(feature = "art-runtime")]
     if let Target::Binder(domain) = target
         && flags & O_PATH == 0
@@ -473,6 +556,17 @@ fn open(dir: u64, address: u64, raw_flags: u64) -> Result<u64, i64> {
         let identity = bndroid_kernel::linux_binder::Identity {
             process: process::current_live_user_process_id().ok_or(3)?,
             uid: process::linux_current_credentials().uid,
+            security_context: {
+                #[cfg(feature = "linux-launch-runtime")]
+                {
+                    bndroid_kernel::linux_launch::SECURITY_CONTEXTS
+                        [process::linux_security_profile(None).ok_or(3)?]
+                }
+                #[cfg(not(feature = "linux-launch-runtime"))]
+                {
+                    ""
+                }
+            },
         };
         let file = FileRef::try_binder(identity, domain, stored)?;
         return process::with_linux_files(|t| t.insert(file, 0, flags & 0x80000 != 0));
@@ -521,6 +615,19 @@ fn read(fd: u64, address: u64, count: u64, offset: Option<u64>) -> Result<u64, i
     if !file.readable() {
         return Err(EBADF);
     }
+    #[cfg(feature = "linux-launch-runtime")]
+    if matches!(file.target(), Target::Control(_)) {
+        if offset.is_some() {
+            return Err(29);
+        }
+        if matches!(
+            file.target(),
+            Target::Control(bndroid_kernel::linux_control::Kind::Property)
+        ) {
+            return crate::linux_property_service::recv(&file, address, count, 0);
+        }
+        return crate::linux_security::read(&file, address, count);
+    }
     #[cfg(feature = "art-runtime")]
     if file.memory().is_some() {
         return read_memory(&file, address, count, offset);
@@ -563,6 +670,18 @@ fn write(fd: u64, address: u64, count: u64) -> Result<u64, i64> {
         return Err(EBADF);
     }
     match file.target() {
+        #[cfg(feature = "linux-launch-runtime")]
+        Target::Control(kind) => {
+            if count > 512 {
+                return Err(90);
+            }
+            let mut bytes = [0; 512];
+            input(address, &mut bytes[..count as usize])?;
+            if kind == bndroid_kernel::linux_control::Kind::Property {
+                return crate::linux_property_service::write(&file, &bytes[..count as usize]);
+            }
+            crate::linux_security::write(&file, kind, &bytes[..count as usize])
+        }
         #[cfg(feature = "art-runtime")]
         Target::Memory { .. } => write_memory(&file, address, count, None),
         #[cfg(feature = "art-runtime")]
@@ -628,7 +747,10 @@ fn stat(target: Target, address: u64) -> Result<u64, i64> {
         Target::Console => (6, 0o020222, 0, 0),
         Target::Snapshot { inode, .. } => (inode, 0o100444, 0, 0),
         Target::UnixDatagram => (0, 0o140777, 0, 0),
+        Target::Control(bndroid_kernel::linux_control::Kind::Property) => (0x20201, 0o140666, 0, 0),
+        Target::Control(_) => (0x20200, 0o100666, 0, 0),
         Target::Memory { inode, length } => (inode, 0o100777, length, 0),
+        Target::Properties { inode, length } => (inode, 0o100444, length, 0),
         Target::Binder(domain) => (7 + domain as u64, 0o020666, 0, 0),
         Target::EventFd | Target::TimerFd | Target::Epoll => (8, 0o600, 0, 0),
     };
@@ -742,6 +864,9 @@ fn mmap_file(args: [u64; 6]) -> Result<u64, i64> {
     #[cfg(feature = "art-runtime")]
     if opened.memory().is_some() {
         return process::with_current_linux_address_space(|space| {
+            if matches!(opened.target(), Target::Properties { .. }) {
+                return space.linux_mmap_binder(args, &opened, "/dev/__properties__");
+            }
             space.linux_mmap_memory(args, &opened)
         });
     }

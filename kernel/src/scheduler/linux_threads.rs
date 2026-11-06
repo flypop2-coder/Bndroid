@@ -463,8 +463,8 @@ fn futex(frame: *mut TrapFrame, r: &[u64; 31]) -> *mut TrapFrame {
     let operation = r[1];
     let command = operation & !(128 | 256);
     let realtime = operation & 256 != 0;
-    // Both forms key by the full address-space owner. Other processes cannot
-    // alias these mappings. Priority inheritance remains unsupported.
+    // Shared memory-file aliases key by inode/offset; private operations keep
+    // the full process generation and VA. Priority inheritance is unsupported.
     if !matches!(command, 0 | 1 | 3 | 4 | 9 | 10)
         || (realtime && (command != 9 || !cfg!(feature = "art-runtime")))
     {
@@ -488,6 +488,7 @@ fn futex(frame: *mut TrapFrame, r: &[u64; 31]) -> *mut TrapFrame {
     }
     let context = current_running_context();
     let process = owner(context);
+    let key = futex_key(process, address, operation & 128 != 0);
     if matches!(command, 3 | 4) {
         let target = runtime::user_address(r[4]);
         if (r[2] as i32) < 0 || (r[3] as i32) < 0 || !target.is_multiple_of(4) {
@@ -502,7 +503,8 @@ fn futex(frame: *mut TrapFrame, r: &[u64; 31]) -> *mut TrapFrame {
         }
         // IRQs stay masked throughout comparison, migration and wakeup on
         // this single-CPU profile; no waiter can be lost between these steps.
-        let (selected, moved) = queue().requeue(process, address, target, r[2] as u32, r[3] as u32);
+        let target = futex_key(process, target, operation & 128 != 0);
+        let (selected, moved) = queue().requeue_keys(key, target, r[2] as u32, r[3] as u32);
         wake(selected, 0);
         WAKES.fetch_add(selected.count_ones() as u64, Ordering::Relaxed);
         return runtime::complete(frame, selected.count_ones() as u64 + u64::from(moved));
@@ -511,7 +513,7 @@ fn futex(frame: *mut TrapFrame, r: &[u64; 31]) -> *mut TrapFrame {
         if (r[2] as i32) < 0 {
             return runtime::complete(frame, errno(22));
         }
-        let selected = queue().wake(process, address, r[2] as u32, bitset);
+        let selected = queue().wake_key(key, r[2] as u32, bitset);
         wake(selected, 0);
         WAKES.fetch_add(selected.count_ones() as u64, Ordering::Relaxed);
         return runtime::complete(frame, selected.count_ones() as u64);
@@ -535,8 +537,9 @@ fn futex(frame: *mut TrapFrame, r: &[u64; 31]) -> *mut TrapFrame {
         return runtime::complete(frame, errno(110));
     }
     let wait = Wait {
-        process,
-        address,
+        shared: key.0,
+        process: key.1,
+        address: key.2,
         bitset,
         deadline: timeout,
     };
@@ -567,6 +570,7 @@ fn sleep(frame: *mut TrapFrame, r: &[u64; 31]) -> *mut TrapFrame {
     }
     let context = current_running_context();
     let wait = Wait {
+        shared: false,
         process: owner(context),
         address: 0,
         bitset: !0,
@@ -589,6 +593,25 @@ fn sleep(frame: *mut TrapFrame, r: &[u64; 31]) -> *mut TrapFrame {
     );
     runtime::complete(frame, 0);
     block(frame, ThreadState::Waiting)
+}
+fn futex_key(process: u64, address: u64, private: bool) -> (bool, u64, u64) {
+    #[cfg(feature = "art-runtime")]
+    if !private {
+        let shared = crate::process::with_current_linux_address_space(|space| {
+            space.linux_shared_futex(address)
+        });
+        if let Some((inode, offset)) = shared {
+            return (true, inode, offset);
+        }
+    }
+    let _ = private;
+    (false, process, address)
+}
+#[cfg(feature = "linux-launch-runtime")]
+pub fn wake_shared(inode: u64, offset: u64) {
+    let selected = queue().wake_key((true, inode, offset), u32::MAX, u32::MAX);
+    wake(selected, 0);
+    WAKES.fetch_add(selected.count_ones() as u64, Ordering::Relaxed);
 }
 fn block(frame: *mut TrapFrame, state: ThreadState) -> *mut TrapFrame {
     let context = current_running_context();
@@ -822,7 +845,7 @@ pub fn evidence(marker: &str) {
         io::evidence();
         let stats = bndroid_kernel::linux_binder::with(|r| r.stats());
         crate::kprintln!(
-            "LINUX_BINDER_OK opened={} closed={} submitted={} replied={} oneway={} failed={} deaths={} connections={} transactions={} buffers={} first_sender={} first_receiver={} flushes={} flush_returns={} nodes={} references={} objects={} reference_events={} nested={} max_depth={} call_frames={} fds_submitted={} fds_delivered={} fd_install_failures={} pending_fds={}",
+            "LINUX_BINDER_OK opened={} closed={} submitted={} replied={} oneway={} failed={} deaths={} connections={} transactions={} buffers={} first_sender={} first_receiver={} flushes={} flush_returns={} nodes={} references={} objects={} reference_events={} nested={} max_depth={} call_frames={} fds_submitted={} fds_delivered={} fd_install_failures={} pending_fds={} security_contexts={}",
             stats.opened,
             stats.closed,
             stats.submitted,
@@ -847,7 +870,8 @@ pub fn evidence(marker: &str) {
             stats.fds_submitted,
             stats.fds_delivered,
             stats.fd_install_failures,
-            stats.pending_fds
+            stats.pending_fds,
+            stats.security_contexts
         );
         assert_eq!(
             (

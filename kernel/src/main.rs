@@ -183,10 +183,14 @@ mod linux_binder_driver;
 mod linux_entropy;
 #[cfg(feature = "bionic-dynamic-runtime")]
 mod linux_files;
+#[cfg(feature = "linux-launch-runtime")]
+mod linux_property_service;
 #[cfg(feature = "bionic-dynamic-runtime")]
 mod linux_rootfs;
 #[cfg(feature = "linux-abi-runtime")]
 mod linux_runtime;
+#[cfg(feature = "linux-launch-runtime")]
+mod linux_security;
 mod log;
 #[cfg(feature = "androidbox-apk-install0")]
 mod package_manager;

@@ -96,8 +96,8 @@ fn start(file: FileRef, tid: u32, request: u64, address: u64) -> Result<Call, i6
         SET_CONTEXT_MGR_EXT => {
             let mut b = [0; 24];
             runtime::copy_in(address, &mut b)?;
-            // Security contexts and RT inheritance need separate policy.
-            if u32_at(&b, 4) & !0x1ff != 0 {
+            // SID comes from the sender's native launch profile.
+            if u32_at(&b, 4) & !0x11ff != 0 {
                 return Err(95);
             }
             binder::with(|r| {

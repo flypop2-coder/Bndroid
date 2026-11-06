@@ -28,6 +28,7 @@ fn complete_or_wait(frame: *mut TrapFrame, result: Result<Call, i64>) -> *mut Tr
             if let Err(error) = queue().insert(
                 context,
                 Wait {
+                    shared: false,
                     process: owner(context),
                     address: 0,
                     bitset: !0,

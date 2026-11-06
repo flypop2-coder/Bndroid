@@ -55,6 +55,7 @@ This index follows the milestone locations established on GitHub. English pages 
 | [Binder Objects-1](docs/milestones/androidbox/BINDER_OBJECTS_1.md) | Strong/weak object translation, connection-scoped handles, reference/death ownership and nested callbacks; FD/service integration remains open |
 | [Binder Files-2](docs/milestones/androidbox/BINDER_FILES_2.md) | Flat FD transfer, atomic receive/rollback, cross-process memory-file lifetime and Binder epoll readiness; service/policy integration remains open |
 | [Service Bootstrap-0](docs/milestones/androidbox/SERVICE_BOOTSTRAP_0.md) | Init-selected executables/identities, Binder manager authority, timerfd/ppoll and verified original service inputs; original ServiceManager acceptance remains open |
+| [Service Policy-1](docs/milestones/androidbox/SERVICE_POLICY_1.md) | Original ServiceManager startup, native service authority, authenticated Binder SIDs and shared property publication; original lookup/ping and denied spoofing |
 
 ## Historical OS design records
 

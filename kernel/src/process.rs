@@ -271,6 +271,8 @@ struct Process {
     linux_credentials: bndroid_kernel::linux_launch::Credentials,
     #[cfg(feature = "linux-abi-runtime")]
     linux_manager_domains: u8,
+    #[cfg(feature = "linux-launch-runtime")]
+    linux_profile: usize,
     #[cfg(feature = "linux-abi-runtime")]
     linux_clear_child_tid: u64,
     #[cfg(feature = "linux-abi-runtime")]
@@ -882,6 +884,8 @@ pub fn install_init(prepared: Box<PreparedUserProcess>) {
         linux_credentials: bndroid_kernel::linux_launch::Credentials { uid: 0, gid: 0 },
         #[cfg(feature = "linux-abi-runtime")]
         linux_manager_domains: 0,
+        #[cfg(feature = "linux-launch-runtime")]
+        linux_profile: 0,
         #[cfg(feature = "linux-abi-runtime")]
         linux_clear_child_tid: 0,
         #[cfg(feature = "linux-abi-runtime")]
@@ -1085,6 +1089,8 @@ fn commit_prepared_spawn(
         } else {
             0
         },
+        #[cfg(feature = "linux-launch-runtime")]
+        linux_profile: info.linux_profile,
         #[cfg(feature = "linux-abi-runtime")]
         linux_clear_child_tid: 0,
         #[cfg(feature = "linux-abi-runtime")]
@@ -1310,6 +1316,14 @@ pub fn reap_terminal_children() -> usize {
         };
         reap_terminal_child(terminal);
         reaped += 1;
+    }
+    #[cfg(feature = "linux-launch-runtime")]
+    if !slots_ref()
+        .iter()
+        .filter_map(|s| s.process.as_deref())
+        .any(|p| p.image_id == UserImageId::LinuxApp)
+    {
+        crate::linux_property_service::reset();
     }
     crate::arch::aarch64::restore_daif(saved_daif);
     reaped
@@ -2606,6 +2620,23 @@ pub fn linux_current_credentials() -> bndroid_kernel::linux_launch::Credentials 
     lookup(ProcessId(id))
         .expect("live Linux process")
         .linux_credentials
+}
+
+#[cfg(feature = "linux-launch-runtime")]
+pub fn linux_security_profile(pid: Option<u32>) -> Option<usize> {
+    assert!(crate::arch::aarch64::irq_is_masked());
+    let current = current_live_user_process_id()?;
+    slots_ref()
+        .iter()
+        .filter_map(|s| s.process.as_deref())
+        .find(|p| {
+            p.image_id == UserImageId::LinuxApp
+                && match pid {
+                    Some(pid) => p.id.raw() as u32 == pid,
+                    None => p.id.raw() == current,
+                }
+        })
+        .map(|p| p.linux_profile)
 }
 
 #[cfg(feature = "art-runtime")]

@@ -45,6 +45,7 @@ Public Markdown documentation is maintained in English. Paths already establishe
 - [Framework Looper, event notification and normal VM shutdown](milestones/androidbox/FRAMEWORK_LOOPER_0.md)
 - [Binder objects, handle ownership and nested callbacks](milestones/androidbox/BINDER_OBJECTS_1.md)
 - [Binder file transfer, shared-memory ownership and epoll](milestones/androidbox/BINDER_FILES_2.md)
+- [Original ServiceManager, native service grants and live readiness properties](milestones/androidbox/SERVICE_POLICY_1.md)
 - [System-service launch identities, timerfd and ppoll](milestones/androidbox/SERVICE_BOOTSTRAP_0.md)
 
 Historical pages report their original profile and validation date, not universal compatibility or a fresh test run. See [the archive policy](archive/README.md) for source preservation.

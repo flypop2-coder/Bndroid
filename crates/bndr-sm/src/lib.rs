@@ -13,6 +13,7 @@ pub mod health;
 pub mod maintenance_authorization;
 pub mod maintenance_plan;
 pub mod manifest;
+pub mod service_authority;
 pub mod verified_manifest;
 
 pub const FRAME_SIZE: usize = 64;

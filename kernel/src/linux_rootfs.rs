@@ -132,6 +132,12 @@ pub fn init(region: Option<FwCfgMmioRegion>) -> Result<(), &'static str> {
             })
             .map_err(|_| "reserved proc path")?;
     }
+    #[cfg(feature = "linux-launch-runtime")]
+    for node in crate::linux_security::nodes() {
+        catalog
+            .insert(node)
+            .map_err(|_| "reserved security interface")?;
+    }
     let files = catalog.len();
     READY.store(true, Ordering::Release);
     crate::kprintln!(
@@ -151,4 +157,10 @@ pub fn usage() -> (usize, usize) {
     assert!(READY.load(Ordering::Acquire));
     let catalog = unsafe { &*CATALOG.0.get() };
     (catalog.file_bytes(), catalog.len())
+}
+
+#[cfg(feature = "linux-launch-runtime")]
+pub fn children(path: &str) -> Result<alloc::vec::Vec<(&'static str, Node<'static>)>, i64> {
+    assert!(READY.load(Ordering::Acquire));
+    unsafe { &*CATALOG.0.get() }.children(path)
 }
