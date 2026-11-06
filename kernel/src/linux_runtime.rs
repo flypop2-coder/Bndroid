@@ -116,8 +116,32 @@ pub fn dispatch(frame: *mut TrapFrame) -> *mut TrapFrame {
         163 => getrlimit(registers[0], registers[1]),
         167 => prctl(&registers),
         172 | 178 => crate::process::current_live_user_process_id().unwrap() & 0xffff_ffff,
-        173 => 1,           // This entry profile is spawned only by Init.
-        174..=177 => 10000, // One application principal in this first profile.
+        173 => 1, // This entry profile is spawned only by Init.
+        174 | 175 => crate::process::linux_current_credentials().uid as u64,
+        176 | 177 => crate::process::linux_current_credentials().gid as u64,
+        148 | 150 => {
+            let credentials = crate::process::linux_current_credentials();
+            let id = if registers[8] == 148 {
+                credentials.uid
+            } else {
+                credentials.gid
+            };
+            let mut result = 0;
+            for &address in &registers[..3] {
+                result = copy_out(address, &id.to_le_bytes());
+                if result as i64 != 0 {
+                    break;
+                }
+            }
+            result
+        }
+        158 => {
+            if registers[0] as i32 >= 0 {
+                0
+            } else {
+                errno(22)
+            }
+        }
         number => {
             UNKNOWN.fetch_add(1, Ordering::Relaxed);
             crate::kprintln!(
@@ -377,6 +401,18 @@ pub fn realtime_anchor() -> bndroid_kernel::linux_sync::RealtimeAnchor {
     }
 }
 
+#[cfg(feature = "art-runtime")]
+pub fn event_clock_times() -> (u128, u128) {
+    let anchor = realtime_anchor();
+    let counter = aarch64::timer::counter_value();
+    let frequency = aarch64::timer::frequency_hz() as u128;
+    (
+        counter as u128 * 1_000_000_000 / frequency,
+        anchor.seconds as u128 * 1_000_000_000
+            + counter.wrapping_sub(anchor.counter) as u128 * 1_000_000_000 / frequency,
+    )
+}
+
 fn clock_gettime(clock: u64, address: u64) -> u64 {
     #[cfg(feature = "art-runtime")]
     if matches!(clock, 2 | 3) {
@@ -518,14 +554,20 @@ pub fn monitor() -> ! {
         if syscalls.ready {
             assert_eq!(processes.created, 3);
             assert_eq!(processes.reaped, 2);
-            assert_eq!(processes.terminated_exited, 2);
+            let exits = if cfg!(feature = "service-manager-runtime") {
+                1
+            } else {
+                2
+            };
+            assert_eq!(processes.terminated_exited, exits);
+            assert_eq!(processes.terminated_killed, 2 - exits);
             assert_eq!(processes.terminated_faulted, 0);
             assert_eq!(processes.live, 1);
             assert_eq!(processes.linux_app_live, 0);
             assert_eq!(processes.linux_app_handles, 0);
             assert_eq!(processes.total_handles, 0);
             assert_eq!(syscalls.channels_created, 2);
-            assert_eq!(EXITS.load(Ordering::Acquire), 2);
+            assert_eq!(EXITS.load(Ordering::Acquire), exits);
             let memory = aarch64::mmu::linux_memory_snapshot();
             #[cfg(feature = "art-runtime")]
             crate::kprintln!(
@@ -543,12 +585,14 @@ pub fn monitor() -> ! {
                 #[cfg(feature = "bionic-dynamic-runtime")]
                 assert_eq!(bndroid_kernel::linux_fd::live_descriptions(), 0);
                 crate::kprintln!(
-                    "{} abi=70 native_processes=2 native_exits=2 native_reaped=2 remaining_processes=1 native_handles=0 linux_calls={} unsupported={} bad_address={} live_anonymous_pages={} live_anonymous_tables={} peak_anonymous_pages={} reclaimed_anonymous_pages={} entropy_bytes={} loader={} live_file_descriptions={} bionic_startup=1 art=0",
+                    "{} abi=70 native_processes=2 native_exits={} native_killed={} native_reaped=2 remaining_processes=1 native_handles=0 linux_calls={} unsupported={} bad_address={} live_anonymous_pages={} live_anonymous_tables={} peak_anonymous_pages={} reclaimed_anonymous_pages={} entropy_bytes={} loader={} live_file_descriptions={} bionic_startup=1 art=0",
                     if cfg!(feature = "bionic-dynamic-runtime") {
                         "BIONIC_DYNAMIC_RUNTIME_OK"
                     } else {
                         "BIONIC_RUNTIME_OK"
                     },
+                    exits,
+                    2 - exits,
                     CALLS.load(Ordering::Relaxed),
                     UNKNOWN.load(Ordering::Relaxed),
                     BAD_ADDRESS.load(Ordering::Relaxed),

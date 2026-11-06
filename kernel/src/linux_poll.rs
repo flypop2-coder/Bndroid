@@ -24,6 +24,7 @@ const MAX_COUNTER: u64 = u64::MAX - 1;
 pub struct Stats {
     pub eventfds: u64,
     pub epolls: u64,
+    pub timers: u64,
     pub external: u64,
     pub external_delivered: u64,
     pub closed: u64,
@@ -47,6 +48,7 @@ enum Object {
     Counter { value: u64, semaphore: bool },
     Epoll { watches: Vec<Watch>, cursor: usize },
     External { key: u64 },
+    Timer(crate::linux_timerfd::Timer),
 }
 struct Entry {
     id: u64,
@@ -90,6 +92,7 @@ impl Hub {
             stats: Stats {
                 eventfds: 0,
                 epolls: 0,
+                timers: 0,
                 external: 0,
                 external_delivered: 0,
                 closed: 0,
@@ -139,6 +142,60 @@ impl Hub {
         self.stats.epolls += 1;
         Ok(id)
     }
+    pub fn timerfd(&mut self, clock: u32) -> Result<u64, i64> {
+        let id = self.create(Object::Timer(crate::linux_timerfd::Timer::new(clock)?))?;
+        self.stats.timers += 1;
+        Ok(id)
+    }
+    pub fn has_timers(&self) -> bool {
+        self.entries
+            .iter()
+            .any(|entry| matches!(entry.object, Object::Timer(_)))
+    }
+    pub fn advance_timers(&mut self, monotonic: u128, realtime: u128) {
+        for i in 0..self.entries.len() {
+            if let Object::Timer(timer) = &mut self.entries[i].object
+                && timer.advance(monotonic, realtime)
+            {
+                self.notify(self.entries[i].id, IN);
+            }
+        }
+    }
+    pub fn timer_setting(
+        &mut self,
+        id: u64,
+        monotonic: u128,
+        realtime: u128,
+    ) -> Result<crate::linux_timerfd::Setting, i64> {
+        let i = self.index(id)?;
+        let Object::Timer(timer) = &mut self.entries[i].object else {
+            return Err(22);
+        };
+        let changed = timer.advance(monotonic, realtime);
+        let setting = timer.setting(monotonic, realtime);
+        if changed {
+            self.notify(id, IN);
+        }
+        Ok(setting)
+    }
+    pub fn set_timer(
+        &mut self,
+        id: u64,
+        flags: u32,
+        setting: crate::linux_timerfd::Setting,
+        monotonic: u128,
+        realtime: u128,
+    ) -> Result<crate::linux_timerfd::Setting, i64> {
+        let i = self.index(id)?;
+        let Object::Timer(timer) = &mut self.entries[i].object else {
+            return Err(22);
+        };
+        let old = timer.set(flags, setting, monotonic, realtime)?;
+        if timer.advance(monotonic, realtime) {
+            self.notify(id, IN);
+        }
+        Ok(old)
+    }
     pub fn external(&mut self, key: u64) -> Result<u64, i64> {
         let id = self.create(Object::External { key })?;
         self.stats.external += 1;
@@ -160,6 +217,7 @@ impl Hub {
     pub fn can_read(&self, id: u64) -> Result<bool, i64> {
         match self.entries[self.index(id)?].object {
             Object::Counter { value, .. } => Ok(value != 0),
+            Object::Timer(ref timer) => Ok(timer.ready()),
             _ => Err(22),
         }
     }
@@ -174,6 +232,11 @@ impl Hub {
     }
     pub fn read(&mut self, id: u64) -> Result<Option<u64>, i64> {
         let i = self.index(id)?;
+        if let Object::Timer(timer) = &mut self.entries[i].object {
+            let value = timer.read();
+            self.stats.reads += u64::from(value.is_some());
+            return Ok(value);
+        }
         let Object::Counter { value, semaphore } = &mut self.entries[i].object else {
             return Err(22);
         };
@@ -347,6 +410,9 @@ impl Hub {
             if let Object::External { key } = e.object {
                 ready[i] = external(key);
             }
+            if let Object::Timer(ref timer) = e.object {
+                ready[i] = if timer.ready() { IN } else { 0 };
+            }
         }
         // The acyclic graph has at most MAX_DEPTH epoll levels. Bounded passes
         // avoid exponential recursion through shared nested interest lists.
@@ -369,6 +435,9 @@ impl Hub {
     }
     pub fn epoll_ready(&self, id: u64) -> Result<bool, i64> {
         self.epoll_ready_using(id, |_| 0)
+    }
+    pub fn mask_using(&self, id: u64, external: impl Fn(u64) -> u32) -> Result<u32, i64> {
+        Ok(self.readiness(&external)[self.index(id)?])
     }
     pub fn epoll_ready_using(&self, id: u64, external: impl Fn(u64) -> u32) -> Result<bool, i64> {
         self.watches(id)?;

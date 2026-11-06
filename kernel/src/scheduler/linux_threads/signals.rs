@@ -252,7 +252,7 @@ fn send(r: &[u64; 31]) -> Result<u64, i64> {
         signal,
         code: if directed { -6 } else { 0 },
         pid: process as u32,
-        uid: 10000,
+        uid: crate::process::linux_current_credentials().uid,
         address: 0,
         value: 0,
     };

@@ -34,12 +34,38 @@ def completion_status(text, mode):
         "properties": "ART_PROPERTIES_OK bionic_reader=1 callback=1 enumerate=1 wait=1 immutable=1\n",
         "help": "dalvikvm: [options] class [argument ...]\n",
         "framework-help": "dalvikvm: [options] class [argument ...]\n",
+        "framework-identities": "LAUNCH_TIMERS_OK periodic=1 absolute=1 poll=1 lifetime=1 interrupted=1\n",
+        "framework-services": "SERVICE_MANAGER_CLIENT_OK upstream=1 lookup=1 ping=1 uid=10000\n",
         "framework": "FRAMEWORK_MAIN_OK parcel=1 bundle=1 looper=1 delayed=1 wake=1\n",
         "java": "ART_JAVA_CORE_OK sum=4950 exceptions=1 collections=1\n",
         "managed": "ART_MANAGED_OK java_threads=3 monitors=1 interrupt=1 gc=1 jni=1 native_thread=1 clocks=1\n",
         "signals": "ART_SIGNALS_OK handlers=1 altstack=1 registers=1 masks=1 realtime=1 faults=1 threads=1 restart=1 waits=1\n",
     }[mode]
-    if mode == "framework-help":
+    if mode in ("framework-identities", "framework-services"):
+        if complete_lines(text, expected.rstrip("\n")) != (2 if mode == "framework-identities" else 1):
+            return "missing-service-launch-proof"
+        if mode == "framework-identities":
+            if complete_lines(text, "LAUNCH_PPOLL_OK invalid=1 ignored=1 timer_wake=1 timeout=1") != 2:
+                return "missing-ppoll-proof"
+            for role, uid in (("system", 1000), ("app", 10000)):
+                if complete_lines(text, f"LAUNCH_IDENTITY_OK role={role} uid={uid} gid={uid} auxv=1 signals=1 binder=1 authority=1") != 1:
+                    return "missing-distinct-identity-proof"
+        try:
+            binder = parse_marker(text, "LINUX_BINDER_OK")
+            poll = parse_marker(text, "LINUX_POLL_OK")
+            if not binder or any(binder.get(key) != "0" for key in ("connections", "transactions", "buffers", "nodes", "references", "call_frames", "pending_fds")) or int(binder.get("submitted", 0)) < 1 or int(binder.get("replied", 0)) < 1 or binder.get("opened") != binder.get("closed"):
+                return "invalid-service-binder-proof"
+            if not poll or any(poll.get(key) != "0" for key in ("live", "watches")) or int(poll["closed"]) != sum(int(poll.get(k, 0)) for k in ("eventfds", "epolls", "external", "timers")):
+                return "invalid-service-poll-proof"
+            if mode == "framework-identities":
+                signals = parse_marker(text, "LINUX_SIGNALS_OK")
+                if int(poll.get("timers", 0)) < 10 or int(poll.get("ready", 0)) < 4 or int(poll.get("cancelled", 0)) < 2 or not signals or any(signals.get(k) != v for k, v in (("delivered", "4"), ("returned", "4"), ("pending", "0"))):
+                    return "invalid-launch-timer-proof"
+            elif int(poll.get("timers", 0)) < 1 or int(poll.get("external_delivered", 0)) < 1:
+                return "missing-upstream-service-loop-proof"
+        except (ValueError, KeyError):
+            return "invalid-service-record"
+    elif mode == "framework-help":
         records = re.findall(r"^ANDROID_LOG pid=(\d+) buffer=0 priority=(\d+) tag=([^ ]+) message=(.*)\n", text, re.MULTILINE)
         successes = [pid for pid, priority, tag, message in records
                      if priority == "4" and tag == "vm-printf" and message.rstrip() == expected.rstrip()]
@@ -69,7 +95,7 @@ def completion_status(text, mode):
             binder = parse_marker(text, "LINUX_BINDER_OK")
             if not binder or any(binder.get(key) != "0" for key in ("connections", "transactions", "buffers", "nodes", "references", "call_frames", "pending_fds")) or int(binder.get("opened", 0)) < 4 or binder["opened"] != binder.get("closed") or int(binder.get("flush_returns", 0)) < 2:
                 return "missing-framework-shutdown-proof"
-            if int(poll["closed"]) != int(poll["eventfds"]) + int(poll["epolls"]) + int(poll.get("external", 0)):
+            if int(poll["closed"]) != int(poll["eventfds"]) + int(poll["epolls"]) + int(poll.get("external", 0)) + int(poll.get("timers", 0)):
                 return "missing-framework-shutdown-proof"
         except (ValueError, KeyError):
             return "invalid-poll-record"
@@ -93,7 +119,7 @@ def completion_status(text, mode):
             poll = parse_marker(text, "LINUX_POLL_OK")
             if not poll or any(poll.get(key) != "0" for key in ("live", "watches")) or any(int(poll.get(key,0)) < count for key,count in (("external",5),("external_delivered",2),("epolls",4),("eventfds",1))):
                 return "missing-binder-poll-proof"
-            if int(poll["closed"]) != int(poll["eventfds"]) + int(poll["epolls"]) + int(poll["external"]):
+            if int(poll["closed"]) != int(poll["eventfds"]) + int(poll["epolls"]) + int(poll["external"]) + int(poll.get("timers", 0)):
                 return "invalid-binder-poll-cleanup"
         except (ValueError, KeyError):
             return "invalid-binder-record"
@@ -102,12 +128,14 @@ def completion_status(text, mode):
     required = {"abi": "70", "native_processes": "2", "native_exits": "2", "native_reaped": "2",
                 "remaining_processes": "1", "native_handles": "0", "live_anonymous_pages": "0",
                 "live_anonymous_tables": "0", "live_file_descriptions": "0", "loader": "upstream-android-linker"}
+    if mode == "framework-services":
+        required.update(native_exits="1", native_killed="1")
     if any(proof.get(key) != value for key, value in required.items()):
         return "invalid-cleanup-proof"
     exits = re.findall(r"^LINUX_PROCESS_EXIT pid=(\d+) code=0 native_handles=0$", text, re.MULTILINE)
-    if len(exits) != 2 or len(set(exits)) != 2 or not threads or any(threads.get(key) != "0" for key in ("live", "waiting")):
+    if len(exits) != int(required["native_exits"]) or len(set(exits)) != len(exits) or not threads or any(threads.get(key) != "0" for key in ("live", "waiting")):
         return "invalid-process-proof"
-    if mode.startswith("framework") and set(successes) != set(exits):
+    if mode in ("framework", "framework-help") and set(successes) != set(exits):
         return "invalid-process-proof"
     if not threads.get("created") or threads["created"] != threads.get("reaped"):
         return "invalid-thread-proof"
@@ -115,7 +143,7 @@ def completion_status(text, mode):
         try:
             poll = parse_marker(text, "LINUX_POLL_OK")
             signals = parse_marker(text, "LINUX_SIGNALS_OK")
-            if not poll or poll.get("live") != "0" or poll.get("watches") != "0" or int(poll["closed"]) != int(poll["eventfds"]) + int(poll["epolls"]) + int(poll.get("external", 0)):
+            if not poll or poll.get("live") != "0" or poll.get("watches") != "0" or int(poll["closed"]) != int(poll["eventfds"]) + int(poll["epolls"]) + int(poll.get("external", 0)) + int(poll.get("timers", 0)):
                 return "invalid-poll-cleanup"
             if any(int(poll.get(key, 0)) < count for key, count in (("eventfds", 20), ("epolls", 10), ("reads", 30), ("writes", 30), ("delivered", 20), ("blocked", 16), ("ready", 10), ("expired", 4), ("cancelled", 8))) or int(threads["created"]) < 20:
                 return "missing-poll-transport-proof"
@@ -230,7 +258,7 @@ def main():
     process = None
     text = ""
     status = "timeout"
-    if mode not in ("java", "managed", "memory", "memfd", "binder", "poll", "properties", "help", "framework", "framework-help", "signals", "signal-bad-frame", "signal-bad-pc", "signal-bad-fp", "signal-default", "signal-guard"):
+    if mode not in ("java", "managed", "memory", "memfd", "binder", "poll", "properties", "help", "framework", "framework-help", "framework-identities", "framework-services", "signals", "signal-bad-frame", "signal-bad-pc", "signal-bad-fp", "signal-default", "signal-guard"):
         raise SystemExit("Unknown ART mode")
     with tempfile.NamedTemporaryFile(prefix="bndroid-art-entropy-") as entropy:
         entropy.write(os.urandom(65536))
@@ -272,6 +300,8 @@ def main():
                "managed_java_verified": mode in ("java", "managed") and status == mode + "-passed",
                "managed_runtime_verified": mode == "managed" and status == "managed-passed",
                "apk_dex_jni_verified": mode == "managed" and status == "managed-passed",
+               "launch_profiles_verified": mode == "framework-identities" and status == "framework-identities-passed",
+               "service_manager_verified": mode == "framework-services" and status == "framework-services-passed",
                "framework_frontend_verified": mode == "framework-help" and status == "framework-help-passed",
                "shared_memfd_verified": mode == "memfd" and status == "memfd-passed",
                "binder_transport_verified": mode == "binder" and status == "binder-passed",

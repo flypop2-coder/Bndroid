@@ -20,6 +20,9 @@ bndr-package-store = { path = "../crates/bndr-package-store", optional = true }
 bndr-sm = { path = "../crates/bndr-sm" }
 bndr-ui = { path = "../crates/bndr-ui" }
 
+[build-dependencies]
+bndr-abi = { path = "../crates/bndr-abi" }
+
 [features]
 default = []
 linux-abi-runtime = ["bndr-abi/linux-abi-runtime"]
@@ -28,6 +31,8 @@ bionic-dynamic-runtime = ["bionic-runtime"]
 art-runtime = ["bionic-dynamic-runtime"]
 framework-runtime = ["art-runtime"]
 binder-runtime = ["art-runtime"]
+linux-launch-runtime = ["framework-runtime", "binder-runtime"]
+service-manager-runtime = ["linux-launch-runtime"]
 linux-syscall-trace = ["linux-abi-runtime"]
 cooperative-block-recovery = []
 app-lifecycle-runtime = []

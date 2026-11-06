@@ -16,10 +16,9 @@ use bndr_abi::{
     GRAPHICS_BUFFER_WRITE_MAX_BYTES, HandleValue, OBJECT_WAIT_MANY_ARRAY_ITEM_WIRE_SIZE,
     OBJECT_WAIT_MANY_ARRAY_MAX_ITEMS, OBJECT_WAIT_MANY_ARRAY_MAX_WIRE_SIZE,
     OBJECT_WAIT_MANY_ITEM_COUNT, OBJECT_WAIT_TIMEOUT_INFINITE, OBJECT_WAIT_TIMEOUT_POLL,
-    ObjectSignals, PROCESS_SPAWN_FLAGS_NONE, PROCESS_TERMINATE_FLAGS_NONE, Rights,
-    SYSTEM_FILE_PATH_MAX_BYTES, Status, SyscallNumber, UserImageId, VMO_READ_MAX_BYTES,
-    unpack_graphics_buffer_geometry, unpack_graphics_buffer_write, unpack_transfer,
-    unpack_vmo_read, unpack_wait_item,
+    ObjectSignals, PROCESS_TERMINATE_FLAGS_NONE, Rights, SYSTEM_FILE_PATH_MAX_BYTES, Status,
+    SyscallNumber, UserImageId, VMO_READ_MAX_BYTES, unpack_graphics_buffer_geometry,
+    unpack_graphics_buffer_write, unpack_transfer, unpack_vmo_read, unpack_wait_item,
 };
 #[cfg(feature = "androidbox-process0")]
 use bndr_abi::{
@@ -5140,12 +5139,24 @@ fn process_spawn(
         bndroid_kernel::shutdown::record_spawn_rejection();
         return complete(frame, Status::InvalidState, 0, 0);
     }
-    if flags != PROCESS_SPAWN_FLAGS_NONE {
-        return complete(frame, Status::InvalidArgument, 0, 0);
-    }
     let Some(image_id) = UserImageId::from_raw(raw_image_id) else {
         return complete(frame, Status::InvalidArgument, 0, 0);
     };
+    #[cfg(feature = "linux-abi-runtime")]
+    let linux = image_id == UserImageId::LinuxApp;
+    #[cfg(not(feature = "linux-abi-runtime"))]
+    let linux = false;
+    let Some(profile) = bndroid_kernel::linux_launch::profile_index(
+        flags,
+        linux,
+        bndroid_kernel::linux_launch::MAX_PROFILES,
+    ) else {
+        return complete(frame, Status::InvalidArgument, 0, 0);
+    };
+    #[cfg(feature = "linux-abi-runtime")]
+    if linux && crate::userboot::linux_launch(profile).is_none() {
+        return complete(frame, Status::InvalidArgument, 0, 0);
+    }
     if !image_id.is_spawnable() {
         return complete(frame, Status::PermissionDenied, 0, 0);
     }
@@ -5160,7 +5171,7 @@ fn process_spawn(
     let Some(startup_handle) = parse_handle(raw_startup_handle) else {
         return complete(frame, Status::InvalidArgument, 0, 0);
     };
-    match crate::process::spawn_image(startup_handle, image_id) {
+    match crate::process::spawn_image_profile(startup_handle, image_id, profile) {
         Ok(id) => complete(frame, Status::Ok, id.raw(), 0),
         Err(crate::process::SpawnError::ShouldWait) => complete(frame, Status::ShouldWait, 0, 0),
         Err(crate::process::SpawnError::OutOfMemory) => complete(frame, Status::OutOfMemory, 0, 0),

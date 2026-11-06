@@ -98,6 +98,8 @@ impl UserBootError {
 #[derive(Clone, Copy)]
 pub struct UserBootInfo {
     pub image_id: UserImageId,
+    #[cfg(feature = "linux-abi-runtime")]
+    pub linux_profile: usize,
     pub image_digest: u64,
     pub is_elf: bool,
     pub elf_bytes: usize,
@@ -192,6 +194,23 @@ pub fn start() -> Result<UserBootInfo, UserBootError> {
 pub(crate) fn prepare_image(
     image_id: UserImageId,
 ) -> Result<Box<PreparedUserProcess>, UserBootError> {
+    prepare_image_profile(image_id, 0)
+}
+
+pub(crate) fn prepare_image_profile(
+    image_id: UserImageId,
+    profile: usize,
+) -> Result<Box<PreparedUserProcess>, UserBootError> {
+    #[cfg(feature = "linux-abi-runtime")]
+    if (image_id != UserImageId::LinuxApp && profile != 0)
+        || (image_id == UserImageId::LinuxApp && linux_launch(profile).is_none())
+    {
+        return Err(UserBootError::InvalidImage);
+    }
+    #[cfg(not(feature = "linux-abi-runtime"))]
+    if profile != 0 {
+        return Err(UserBootError::InvalidImage);
+    }
     let image = embedded_image(image_id)?;
     if !boot_pages_are_unmapped(&image)? {
         return Err(UserBootError::AddressInUse);
@@ -239,7 +258,7 @@ pub(crate) fn prepare_image(
     let address_space_tlb_invalidations = mmu::address_space_tlb_invalidations();
     #[cfg(feature = "linux-abi-runtime")]
     let initial_stack_pointer = if image_id == UserImageId::LinuxApp {
-        match populate_linux_stack(&address_space, &image) {
+        match populate_linux_stack(&address_space, &image, profile) {
             Ok(pointer) => pointer,
             Err(error) => {
                 release_unpublished_address_space(address_space)?;
@@ -253,6 +272,8 @@ pub(crate) fn prepare_image(
     let initial_stack_pointer = USER_STACK_END;
     let info = UserBootInfo {
         image_id: image.image_id,
+        #[cfg(feature = "linux-abi-runtime")]
+        linux_profile: profile,
         image_digest: image.image_digest,
         is_elf: image.is_elf,
         elf_bytes: image.elf_bytes,
@@ -390,9 +411,35 @@ fn parse_linux_image(bytes: &[u8]) -> Result<ElfImage<'_>, bndr_elf::ElfError> {
 }
 
 #[cfg(feature = "linux-abi-runtime")]
+pub(crate) fn linux_launch(index: usize) -> Option<bndroid_kernel::linux_launch::Profile> {
+    #[cfg(feature = "bionic-dynamic-runtime")]
+    {
+        mod launch {
+            include!(env!("BNDR_LINUX_LAUNCH_RS"));
+        }
+        launch::PROFILES.get(index).copied()
+    }
+    #[cfg(not(feature = "bionic-dynamic-runtime"))]
+    {
+        use bndroid_kernel::linux_launch::{Credentials, Profile};
+        (index == 0).then_some(Profile {
+            arguments: if cfg!(feature = "bionic-runtime") {
+                &[b"/system/bin/bionic-probe", b"--verify"]
+            } else {
+                &[b"/system/bin/linux-probe", b"--verify"]
+            },
+            environment: &[b"LANG=C"],
+            credentials: Credentials::APPLICATION,
+            manager_domains: 7,
+        })
+    }
+}
+
+#[cfg(feature = "linux-abi-runtime")]
 fn populate_linux_stack(
     address_space: &UserAddressSpace,
     image: &EmbeddedImage<'_>,
+    profile: usize,
 ) -> Result<usize, UserBootError> {
     let elf = parse_linux_image(crate::user_images::get(image.image_id).bytes)
         .map_err(UserBootError::Elf)?;
@@ -415,20 +462,8 @@ fn populate_linux_stack(
     } else {
         0
     };
-    #[cfg(feature = "bionic-dynamic-runtime")]
-    mod launch {
-        include!(env!("BNDR_LINUX_LAUNCH_RS"));
-    }
-    #[cfg(feature = "bionic-dynamic-runtime")]
-    let (arguments, environment) = (launch::ARGUMENTS, launch::ENVIRONMENT);
-    #[cfg(not(feature = "bionic-dynamic-runtime"))]
-    let arguments: &[&[u8]] = if cfg!(feature = "bionic-runtime") {
-        &[b"/system/bin/bionic-probe", b"--verify"]
-    } else {
-        &[b"/system/bin/linux-probe", b"--verify"]
-    };
-    #[cfg(not(feature = "bionic-dynamic-runtime"))]
-    let environment: &[&[u8]] = &[b"LANG=C"];
+    let launch = linux_launch(profile).ok_or(UserBootError::InvalidImage)?;
+    let (arguments, environment) = (launch.arguments, launch.environment);
     bndroid_kernel::linux_abi::initial_stack_with_random(
         output,
         pointer as u64,
@@ -452,10 +487,10 @@ fn populate_linux_stack(
                     .checked_add(bias)
                     .ok_or(UserBootError::InvalidImage)?,
             ),
-            (11, 10000),
-            (12, 10000),
-            (13, 10000),
-            (14, 10000),
+            (11, launch.credentials.uid as u64),
+            (12, launch.credentials.uid as u64),
+            (13, launch.credentials.gid as u64),
+            (14, launch.credentials.gid as u64),
             (16, 0),
             (17, 100),
             (23, 0),

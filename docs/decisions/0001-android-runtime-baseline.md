@@ -10,6 +10,15 @@ Reuse the image's unmodified ART, Bionic, linker, core Java libraries, and their
 
 Read these inputs through an isolated temporary, offline, read-only SDK emulator. Select only the owned emulator serial, retain per-file paths/sizes/SHA-256 hashes and source metadata, and stop the owned process after extraction. Keep all extracted binaries, archives and source notices in ignored local test directories. Do not modify the installed SDK, import third-party source/binaries into Git, download AOSP, or operate physical devices under this decision.
 
+For platform binaries that the SDK user image denies to adb shell, the service
+extension reads the same installed image offline. It validates both GPT and liblp
+metadata copies, extracts only bounded system/system_ext partition copies, and
+uses read-only erofs-utils inspection/extraction. Existing app_process and
+libbinder hashes must match before new files are retained; the whole source image
+is hashed before and after. Preserve the preceding receipt separately. Temporary
+partition copies are removed, and no filesystem is mounted or source image
+modified. This extension keeps the same local-only runtime boundary.
+
 ## Provenance, licensing and distribution
 
 Preserve the installed image's notices alongside local inputs. Record component identities and dependencies before using them. The source image also contains proprietary services; do not copy Play services or other Google application/service packages into the runtime root. The extraction manifest is an inventory and reproducibility record, not a license grant.

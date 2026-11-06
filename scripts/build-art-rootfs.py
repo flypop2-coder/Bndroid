@@ -9,7 +9,7 @@ import tarfile
 import zipfile
 
 from android_properties import encode_properties, runtime_properties
-from android_framework_inputs import framework_inputs_complete
+from android_framework_inputs import framework_inputs_complete, service_inputs_complete
 
 
 def main():
@@ -17,7 +17,7 @@ def main():
     parser.add_argument("--runtime", required=True, type=Path)
     parser.add_argument("--dex", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--mode", choices=("java", "managed", "memory", "memfd", "binder", "poll", "properties", "help", "framework", "framework-help", "signals", "signal-bad-frame", "signal-bad-pc", "signal-bad-fp", "signal-default", "signal-guard"), default="java")
+    parser.add_argument("--mode", choices=("java", "managed", "memory", "memfd", "binder", "poll", "properties", "help", "framework", "framework-help", "framework-identities", "framework-services", "signals", "signal-bad-frame", "signal-bad-pc", "signal-bad-fp", "signal-default", "signal-guard"), default="java")
     args = parser.parse_args()
     provenance = json.loads((args.runtime / "art-provenance.json").read_text())
     framework = args.mode.startswith("framework")
@@ -25,6 +25,9 @@ def main():
         raise SystemExit("Framework mode requires inputs extracted with --include-framework")
     if framework and not framework_inputs_complete(provenance):
         raise SystemExit("Framework metadata/JNI inputs are incomplete; re-run extraction with --resume-framework --include-framework")
+    service_mode = args.mode in ("framework-identities", "framework-services")
+    if service_mode and not service_inputs_complete(provenance):
+        raise SystemExit("Service mode requires verified inputs from extract-android-services.py")
     inputs = {}
     for name, receipt in provenance["files"].items():
         path = PurePosixPath(name)
@@ -74,6 +77,8 @@ def main():
         inputs["system/bin/binder-probe"] = (args.dex.parent / "binder-probe").read_bytes()
     if args.mode == "poll":
         inputs["system/bin/poll-probe"] = (args.dex.parent / "poll-probe").read_bytes()
+    if service_mode:
+        inputs["system/bin/launch-probe"] = (args.dex.parent / "launch-probe").read_bytes()
     if args.mode == "properties":
         inputs["system/bin/properties-probe"] = (args.dex.parent / "properties-probe").read_bytes()
     if args.mode == "managed":
@@ -153,7 +158,19 @@ def main():
         environment += ["BOOTCLASSPATH=" + ":".join(provenance["framework"]["bootclasspath"]),
                         "DEX2OATBOOTCLASSPATH=" + compiler_classpath,
                         "CLASSPATH=/system/framework/bndroid-probe.dex"]
-    args.output.with_suffix(".launch").write_text("\n".join(["arg=" + s for s in arguments] + ["env=" + s for s in environment]) + "\n")
+    launch = ["arg=" + s for s in arguments] + ["env=" + s for s in environment]
+    if service_mode:
+        launch = []
+        for index, (uid, executable, role) in enumerate([
+            (1000, "/system/bin/servicemanager" if args.mode == "framework-services" else "/system/bin/launch-probe", "system"),
+            (10000, "/system/bin/launch-probe", "lookup" if args.mode == "framework-services" else "app"),
+        ]):
+            launch += [f"profile={index}", f"uid={uid}", f"gid={uid}", f"binder_managers={1 if index == 0 else 0}",
+                       "arg=/apex/com.android.runtime/bin/linker64", "arg=" + executable]
+            if executable.endswith("launch-probe"):
+                launch.append("arg=" + role)
+            launch += ["env=" + entry for entry in environment if not entry.startswith(("CLASSPATH=", "BOOTCLASSPATH=", "DEX2OATBOOTCLASSPATH="))]
+    args.output.with_suffix(".launch").write_text("\n".join(launch) + "\n")
     receipt = {"source": provenance, "rootfs_sha256": hashlib.sha256(args.output.read_bytes()).hexdigest(),
                "dex_sha256": hashlib.sha256(selected_dex).hexdigest(), "mode": args.mode,
                "files": len(inputs) + len(aliases) + 4, "bytes": args.output.stat().st_size,
@@ -162,6 +179,10 @@ def main():
         receipt["apk_sha256"] = hashlib.sha256(inputs["data/app/bndroid.runtime/base.apk"]).hexdigest()
     if framework:
         receipt["entrypoint"] = "/system/bin/app_process64"
+    if service_mode:
+        receipt["entrypoint"] = "/system/bin/servicemanager" if args.mode == "framework-services" else "/system/bin/launch-probe"
+        receipt["launch_profiles"] = [{"index": 0, "uid": 1000, "gid": 1000, "binder_managers": 1},
+                                      {"index": 1, "uid": 10000, "gid": 10000, "binder_managers": 0}]
     if framework or args.mode == "properties":
         receipt["boot_properties"] = runtime_properties(provenance["source"])
     args.output.with_suffix(".json").write_text(json.dumps(receipt, indent=2) + "\n")

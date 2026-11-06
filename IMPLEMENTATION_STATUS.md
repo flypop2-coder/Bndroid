@@ -2,6 +2,30 @@
 
 This page records implemented behavior and validation, with a September 9, 2026 platform baseline and dated updates below. Historical test counts belong to the indicated development runs; they are not a claim that every historical gate was rerun during publication. The [complete original status log](docs/archive/originals/IMPLEMENTATION_STATUS.txt) preserves detailed evidence and earlier milestones. Future tasks belong only in [TODO.md](TODO.md).
 
+## System-service launch and timer update — November 6, 2026
+
+Init now selects immutable Linux executable/argument profiles with distinct
+UID/GID and Binder context-manager domain authority. Syscall identities,
+auxiliary-vector credentials, signal senders and Binder calls use the owning
+process identity. Timerfd supplies real expiration counting, blocking and epoll
+wakes; ppoll covers the existing file/event/Binder targets with signal masks and
+timeouts. Native authority checks reject application manager registration.
+
+The same installed SDK supplies five additional original service inputs through
+checked offline GPT/liblp/EROFS extraction. All 349 prior file records remain
+unchanged; the source set is 354 files / 265,938,573 bytes. Inputs and evidence stay
+local. No source image is modified or mounted.
+
+The owned identity/timer/ppoll gate passes (`check.5ahc7q`). Full Framework (`check.5PPxia`), Binder
+(`check.sOj8Xg`), eventfd/epoll (`check.6TGEzH`) and default native boot regressions
+pass. Host checks cover 1,171 workspace tests, 440 service-profile library tests
+and 39 Python checks, with host/AArch64 Clippy warnings denied. The unmodified
+ServiceManager now gets past Perfetto's ppoll requirement but still fails at
+`selinux_status_open` (`check.XqLSfG`); failure cleanup reclaims both processes and
+all resources. This does not complete ServiceManager, ActivityThread or A1–A6.
+See [Service Bootstrap-0](docs/milestones/androidbox/SERVICE_BOOTSTRAP_0.md) for
+input boundaries, failure evidence, current limits and final native receipts.
+
 ## Binder file transfer and service event-loop update — November 6, 2026
 
 Binder now captures actual open descriptions, installs whole FD batches in the

@@ -472,7 +472,7 @@ fn open(dir: u64, address: u64, raw_flags: u64) -> Result<u64, i64> {
     {
         let identity = bndroid_kernel::linux_binder::Identity {
             process: process::current_live_user_process_id().ok_or(3)?,
-            uid: 10000,
+            uid: process::linux_current_credentials().uid,
         };
         let file = FileRef::try_binder(identity, domain, stored)?;
         return process::with_linux_files(|t| t.insert(file, 0, flags & 0x80000 != 0));
@@ -630,7 +630,7 @@ fn stat(target: Target, address: u64) -> Result<u64, i64> {
         Target::UnixDatagram => (0, 0o140777, 0, 0),
         Target::Memory { inode, length } => (inode, 0o100777, length, 0),
         Target::Binder(domain) => (7 + domain as u64, 0o020666, 0, 0),
-        Target::EventFd | Target::Epoll => (8, 0o600, 0, 0),
+        Target::EventFd | Target::TimerFd | Target::Epoll => (8, 0o600, 0, 0),
     };
     bytes[..8].copy_from_slice(&1_u64.to_le_bytes());
     bytes[8..16].copy_from_slice(&inode.to_le_bytes());
@@ -701,9 +701,11 @@ fn readlink(dir: u64, pathname: u64, output: u64, capacity: u64) -> Result<u64, 
             return out(output, &bytes[..length]).map(|_| length as u64);
         }
         let path = match opened.target() {
-            Target::EventFd | Target::Epoll => {
+            Target::EventFd | Target::TimerFd | Target::Epoll => {
                 let name: &[u8] = if matches!(opened.target(), Target::EventFd) {
                     b"anon_inode:[eventfd]"
+                } else if matches!(opened.target(), Target::TimerFd) {
+                    b"anon_inode:[timerfd]"
                 } else {
                     b"anon_inode:[eventpoll]"
                 };

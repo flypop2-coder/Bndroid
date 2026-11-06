@@ -77,6 +77,14 @@ pub fn ioctl(r: &[u64; 31], tid: u32) -> Option<Result<Call, i64>> {
 #[inline(never)]
 fn start(file: FileRef, tid: u32, request: u64, address: u64) -> Result<Call, i64> {
     let id = authenticate(&file)?;
+    if matches!(request, SET_CONTEXT_MGR | SET_CONTEXT_MGR_EXT) {
+        let bndroid_kernel::linux_fd::Target::Binder(domain) = file.target() else {
+            return Err(9);
+        };
+        if !process::linux_may_manage_binder(domain) {
+            return Err(1);
+        }
+    }
     match request {
         VERSION => output(address, &8_u32.to_le_bytes())?,
         SET_MAX_THREADS => {

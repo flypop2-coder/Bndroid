@@ -18,6 +18,27 @@ REQUIRED_METADATA = ("/system/etc/init/netbpfload.rc",)
 RUNTIME_JNI_ENTRYPOINTS = (
     "/apex/com.android.tethering/lib64/libframework-connectivity-tiramisu-jni.so",
 )
+SERVICE_ENTRYPOINTS = ("/system/bin/servicemanager", "/system/lib64/libbinder_ndk.so")
+SERVICE_METADATA = ("/system/etc/init/servicemanager.rc",
+                    "/system/etc/selinux/plat_service_contexts",
+                    "/system_ext/etc/selinux/system_ext_service_contexts")
+
+
+def service_inputs_complete(receipt):
+    if not framework_inputs_complete(receipt) or "services" not in receipt:
+        return False
+    if not all(path in receipt["files"] for path in SERVICE_METADATA):
+        return False
+    pending, visited = list(SERVICE_ENTRYPOINTS), set()
+    while pending:
+        path = pending.pop()
+        if path in visited:
+            continue
+        if path not in receipt["files"] or path not in receipt["dependencies"]:
+            return False
+        visited.add(path)
+        pending.extend(receipt["dependencies"][path])
+    return True
 
 
 def framework_inputs_complete(receipt):

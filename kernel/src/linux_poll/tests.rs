@@ -1,6 +1,62 @@
 use super::*;
 
 #[test]
+fn timers_wake_nested_edge_watches_and_disappear_on_last_close() {
+    use crate::linux_timerfd::Setting;
+    let mut h = Hub::new();
+    let timer = h.timerfd(1).unwrap();
+    let inner = h.epoll().unwrap();
+    let outer = h.epoll().unwrap();
+    h.control(inner, 1, 3, timer, IN | EDGE | ONESHOT, 91)
+        .unwrap();
+    h.control(outer, 1, 4, inner, IN | EDGE, 92).unwrap();
+    h.set_timer(
+        timer,
+        0,
+        Setting {
+            value: 20,
+            interval: 0,
+        },
+        0,
+        0,
+    )
+    .unwrap();
+    h.advance_timers(19, 100);
+    assert!(!h.epoll_ready(outer).unwrap());
+    h.advance_timers(20, 100);
+    let event = h.prepare(outer, 1).unwrap()[0];
+    h.commit(outer, event).unwrap();
+    let event = h.prepare(inner, 1).unwrap()[0];
+    h.commit(inner, event).unwrap();
+    assert_eq!(h.read(timer), Ok(Some(1)));
+    h.set_timer(
+        timer,
+        0,
+        Setting {
+            value: 1,
+            interval: 1,
+        },
+        20,
+        100,
+    )
+    .unwrap();
+    h.advance_timers(25, 100);
+    assert!(!h.epoll_ready(outer).unwrap());
+    h.control(inner, 3, 3, timer, IN | EDGE | ONESHOT, 91)
+        .unwrap();
+    assert!(h.epoll_ready(outer).unwrap());
+    assert_eq!(h.read(timer), Ok(Some(5)));
+    h.close(timer);
+    assert!(!h.has_timers());
+    h.close(inner);
+    h.close(outer);
+    assert_eq!(
+        (h.stats().live, h.stats().watches, h.stats().closed),
+        (0, 0, 3)
+    );
+}
+
+#[test]
 fn external_readiness_rechecks_context_and_wakes_nested_edge_and_oneshot_watches() {
     let mut h = Hub::new();
     let fd = h.external(99).unwrap();

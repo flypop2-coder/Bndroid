@@ -27,6 +27,13 @@ if [[ "$BNDROID_ART_MODE" == framework* ]]; then
   FEATURES=framework-runtime
   MEMORY=1G
 fi
+if [[ "$BNDROID_ART_MODE" == framework-identities ]]; then
+  FEATURES+=,linux-launch-runtime
+  USER_FEATURES+=,linux-launch-runtime
+elif [[ "$BNDROID_ART_MODE" == framework-services ]]; then
+  FEATURES+=,service-manager-runtime
+  USER_FEATURES+=,service-manager-runtime
+fi
 [[ "${BNDROID_ART_SYSCALL_TRACE:-0}" != 1 ]] || FEATURES+=,linux-syscall-trace
 CARGO_TARGET_DIR="$ROOT/target/art-build" BNDROID_PROFILE=release \
   BNDROID_KERNEL_FEATURES="$FEATURES" BNDROID_USERSPACE_FEATURES="$USER_FEATURES" \

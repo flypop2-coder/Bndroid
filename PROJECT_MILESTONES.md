@@ -54,6 +54,7 @@ This index follows the milestone locations established on GitHub. English pages 
 | [Framework Looper-0](docs/milestones/androidbox/FRAMEWORK_LOOPER_0.md) | Real eventfd/epoll, isolated Binder device domains, close-flush semantics and complete proc maps; two upstream Framework Parcel/Looper/cross-thread wake cycles with normal VM shutdown |
 | [Binder Objects-1](docs/milestones/androidbox/BINDER_OBJECTS_1.md) | Strong/weak object translation, connection-scoped handles, reference/death ownership and nested callbacks; FD/service integration remains open |
 | [Binder Files-2](docs/milestones/androidbox/BINDER_FILES_2.md) | Flat FD transfer, atomic receive/rollback, cross-process memory-file lifetime and Binder epoll readiness; service/policy integration remains open |
+| [Service Bootstrap-0](docs/milestones/androidbox/SERVICE_BOOTSTRAP_0.md) | Init-selected executables/identities, Binder manager authority, timerfd/ppoll and verified original service inputs; original ServiceManager acceptance remains open |
 
 ## Historical OS design records
 

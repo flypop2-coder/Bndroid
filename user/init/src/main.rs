@@ -2160,7 +2160,7 @@ fn linux_abi_init(system_root: u64) -> ! {
     let mut previous_pid = 0;
     #[cfg(feature = "binder-runtime")]
     let mut children = [0; 2];
-    for _ in 0..2 {
+    for launch_index in 0..2 {
         let channel = syscall(SyscallNumber::ChannelCreate, 0, 0, 0);
         if channel.status != Status::Ok.raw() {
             fail(0x7001);
@@ -2169,7 +2169,11 @@ fn linux_abi_init(system_root: u64) -> ! {
             SyscallNumber::ProcessSpawn,
             channel.out2,
             UserImageId::LinuxApp.raw(),
-            0,
+            if cfg!(feature = "linux-launch-runtime") {
+                launch_index << bndr_abi::PROCESS_SPAWN_LINUX_PROFILE_SHIFT
+            } else {
+                0
+            },
         );
         if child.status != Status::Ok.raw() || child.out1 == 0 || child.out1 == previous_pid {
             fail(0x7002);
@@ -2193,7 +2197,7 @@ fn linux_abi_init(system_root: u64) -> ! {
             }
         }
     }
-    #[cfg(feature = "binder-runtime")]
+    #[cfg(all(feature = "binder-runtime", not(feature = "service-manager-runtime")))]
     for (index, child) in children.into_iter().enumerate() {
         let result = syscall(SyscallNumber::ProcessWait, child, 0, 0);
         if result.status != Status::Ok.raw()
@@ -2205,6 +2209,24 @@ fn linux_abi_init(system_root: u64) -> ! {
                 let _ = syscall(SyscallNumber::ProcessWait, *remaining, 0, 0);
             }
             fail(0x7100 + result.out1);
+        }
+    }
+    #[cfg(feature = "service-manager-runtime")]
+    {
+        // The upstream daemon has no shutdown command. Reap the finite client,
+        // then terminate only its owned daemon through Init's native authority.
+        let client = syscall(SyscallNumber::ProcessWait, children[1], 0, 0);
+        let stopped = syscall(SyscallNumber::ProcessTerminate, children[0], 0, 0);
+        let daemon = syscall(SyscallNumber::ProcessWait, children[0], 0, 0);
+        if client.status != Status::Ok.raw()
+            || client.out1 != 0
+            || client.out2 != ProcessTerminationReason::Exited.raw()
+            || stopped.status != Status::Ok.raw()
+            || daemon.status != Status::Ok.raw()
+            || daemon.out1 != PROCESS_KILLED_EXIT_CODE
+            || daemon.out2 != ProcessTerminationReason::Killed.raw()
+        {
+            fail(0x7200);
         }
     }
     if syscall(SyscallNumber::HandleClose, system_root, 0, 0).status != Status::Ok.raw() {

@@ -35,6 +35,7 @@ pub enum Target {
     Memory { inode: u64, length: u64 },
     Binder(crate::linux_binder::Domain),
     EventFd,
+    TimerFd,
     Epoll,
 }
 
@@ -145,6 +146,20 @@ impl FileRef {
         }
         let id = crate::linux_poll::with(|h| h.epoll())?;
         Self::create(Target::Epoll, 2, None, None, None, Some(PollFile { id }))
+    }
+    pub fn try_timerfd(clock: u32, flags: u32) -> Result<Self, i64> {
+        if flags & !(0x800 | 0x80000) != 0 {
+            return Err(EINVAL);
+        }
+        let id = crate::linux_poll::with(|h| h.timerfd(clock))?;
+        Self::create(
+            Target::TimerFd,
+            2 | (flags & 0x800),
+            None,
+            None,
+            None,
+            Some(PollFile { id }),
+        )
     }
     fn create(
         target: Target,

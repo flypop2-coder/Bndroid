@@ -4,7 +4,7 @@ This fixture invokes the installed image's unmodified `dalvikvm64` and `libart.s
 
 The `managed` gate loads DEX and an aligned JNI library directly from an owned, signed APK. Its command-line entry validates Java threads/monitors/interruption, moving GC and weak references, JNI arrays/exceptions and an attached native thread. It verifies classloader namespace isolation and complete cleanup in two generations. This exercises APK contents through ART and the linker; ActivityThread, package installation and app graphics remain separate work.
 
-Prerequisites are the existing arm64 SDK system image, emulator/ADB, NDK r27b, SDK build-tools 36.1.0, JDK, Rust and QEMU. There are no downloads. [ADR 0001](../../docs/decisions/0001-android-runtime-baseline.md) records the frozen baseline and local-only distribution boundary.
+Prerequisites are the existing arm64 SDK system image, emulator/ADB, NDK r27b, SDK build-tools 36.1.0, JDK, Rust and QEMU. Runtime acquisition uses the installed SDK. The optional service extension also requires host erofs-utils. [ADR 0001](../../docs/decisions/0001-android-runtime-baseline.md) records the frozen baseline and local-only distribution boundary.
 
 ```sh
 python3 scripts/extract-bionic-runtime.py \
@@ -59,7 +59,7 @@ It tests counter/semaphore behavior, vectored I/O, nested/edge/one-shot watches,
 timeouts, blocked-descriptor reuse, competing readers, invalid/unmapped buffers,
 signal interruption/restart, atomic temporary masks and exit with a waiting
 sibling. `event_poll_verified` requires kernel wait/wake/timeout counters and full
-resource cleanup. Epoll currently supports eventfd, Binder and nested epoll targets;
+resource cleanup. Epoll currently supports eventfd, timerfd, Binder and nested epoll targets;
 other device readiness remains separate work.
 
 Binder now has independent framework/hardware/vendor device domains. Descriptor
@@ -69,6 +69,16 @@ Framework pool detach during normal shutdown. See
 [Framework Looper-0](../../docs/milestones/androidbox/FRAMEWORK_LOOPER_0.md).
 
 Java mode currently uses ART's interpreter option, a 4 MiB initial / 16 MiB maximum heap, matching core-library DEX jars, and no image compiler. These diagnostic limits reduce initial memory demand; they are not the final app runtime configuration. The program must produce its collection/arithmetic/exception marker in two distinct process generations before `managed_java_verified` becomes true.
+
+The `framework-identities` mode uses two Init-selected profiles (UID/GID 1000 and
+10000), authenticates their auxiliary-vector/signal/Binder identities, denies
+application context-manager registration, and checks timerfd/ppoll waits and
+complete cleanup. `framework-services` instead launches the original
+ServiceManager and a client using the original libbinder_ndk lookup/ping path.
+This separate gate currently fails at `selinux_status_open`; it does not claim
+working Android system services. Its client watchdog and Init cleanup bound the
+failure and reclaim both processes. See [Service Bootstrap-0](../../docs/milestones/androidbox/SERVICE_BOOTSTRAP_0.md)
+for offline input preparation, the commands and exact evidence.
 
 `check-art-signals.sh` runs one positive handler/synchronization gate and five deliberately failing programs. They test corrupt PSTATE, kernel PC, malformed FPSIMD data, an inaccessible alternate stack and group SIGKILL with a waiting sibling and full realtime queue. Negative modes pass only when the expected group fault is followed by complete cleanup. They can be selected individually with `BNDROID_ART_MODE=signals`, `signal-bad-frame`, `signal-bad-pc`, `signal-bad-fp`, `signal-guard` or `signal-default`. Run ART gates sequentially: they share a build directory but own separate disks and QEMU processes.
 

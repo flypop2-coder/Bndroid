@@ -168,7 +168,10 @@ Tasks follow dependencies, not optimistic calendar dates. Each stage requires co
 - [x] Supply real eventfd/epoll readiness, blocking, wake, timeout, signal-mask/restart and descriptor-lifetime semantics for upstream Looper; pass both cross-thread wake/delayed-callback Framework generations with normal VM shutdown and complete cleanup.
 - [x] Separate Binder/hwbinder/vndbinder context managers and close-flush returns; keep in-flight ownership while letting the upstream pool detach. Fit complete Framework proc-map snapshots within a declared text bound without truncation.
 - [x] Connect Binder to epoll with process/thread-specific readiness, nested/edge/one-shot notification, non-consuming snapshots and close cleanup.
-- [ ] Extend readiness to socket/pipe and other device descriptors; add poll/select, timerfd and native permission/power policy as their services become available.
+- [x] Add Init-selected Linux launch profiles with distinct UID/GID, matching auxiliary-vector/signal/Binder identities and explicit context-manager domain authority.
+- [x] Add timerfd expiration accounting and event waits; supply bounded ppoll readiness for existing files, timers, Binder and epoll.
+- [ ] Complete original ServiceManager startup, writable readiness properties and native permission/security-context mapping; retain the separate daemon/client acceptance gate.
+- [ ] Extend readiness to socket/pipe and other devices, add select and ppoll remaining-time writeback, and implement clock-change cancellation, alarm wakeups and native power policy.
 - [ ] Run a non-customized managed APK through ActivityThread and Framework.
 - [ ] Run a JNI/native-library APK with W^X, RELRO, ASLR, and crash-isolation checks.
 - [ ] Bridge packages, permissions, windows/input, storage, networking, and media in order.

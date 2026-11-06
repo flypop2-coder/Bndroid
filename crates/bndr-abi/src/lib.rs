@@ -320,6 +320,9 @@ pub const OBJECT_WAIT_MANY_ARRAY_MAX_WIRE_SIZE: usize =
 pub const OBJECT_WAIT_TIMEOUT_POLL: u64 = 0;
 pub const OBJECT_WAIT_TIMEOUT_INFINITE: u64 = u64::MAX;
 pub const PROCESS_SPAWN_FLAGS_NONE: u64 = 0;
+/// Init-only Linux launch profile selector; low flag bits remain reserved.
+/// Profile zero preserves the original single-executable spawn behavior.
+pub const PROCESS_SPAWN_LINUX_PROFILE_SHIFT: u32 = 32;
 /// Forced process termination (introduced in ABI 18) accepts no optional flags.
 pub const PROCESS_TERMINATE_FLAGS_NONE: u64 = 0;
 /// Stable exit code reported for a process stopped by `ProcessTerminate`.

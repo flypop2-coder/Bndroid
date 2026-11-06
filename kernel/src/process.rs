@@ -268,6 +268,10 @@ struct Process {
     startup_handle: Option<HandleValue>,
     is_init: bool,
     #[cfg(feature = "linux-abi-runtime")]
+    linux_credentials: bndroid_kernel::linux_launch::Credentials,
+    #[cfg(feature = "linux-abi-runtime")]
+    linux_manager_domains: u8,
+    #[cfg(feature = "linux-abi-runtime")]
     linux_clear_child_tid: u64,
     #[cfg(feature = "linux-abi-runtime")]
     linux_streams: [Option<u64>; 3],
@@ -875,6 +879,10 @@ pub fn install_init(prepared: Box<PreparedUserProcess>) {
         startup_handle: None,
         is_init: true,
         #[cfg(feature = "linux-abi-runtime")]
+        linux_credentials: bndroid_kernel::linux_launch::Credentials { uid: 0, gid: 0 },
+        #[cfg(feature = "linux-abi-runtime")]
+        linux_manager_domains: 0,
+        #[cfg(feature = "linux-abi-runtime")]
         linux_clear_child_tid: 0,
         #[cfg(feature = "linux-abi-runtime")]
         linux_streams: [Some(0); 3],
@@ -916,9 +924,10 @@ pub fn install_init(prepared: Box<PreparedUserProcess>) {
     crate::arch::aarch64::restore_daif(saved_daif);
 }
 
-pub fn spawn_image(
+pub fn spawn_image_profile(
     startup_handle: HandleValue,
     image_id: UserImageId,
+    profile: usize,
 ) -> Result<ProcessId, SpawnError> {
     assert_initialized();
     if !crate::arch::aarch64::irq_is_masked() || !current_is_init() || !image_id.is_spawnable() {
@@ -977,7 +986,8 @@ pub fn spawn_image(
         Err(HandleError::TableFull) => return Err(SpawnError::InvalidState),
     }
 
-    let prepared = crate::userboot::prepare_image(image_id).map_err(SpawnError::Image)?;
+    let prepared =
+        crate::userboot::prepare_image_profile(image_id, profile).map_err(SpawnError::Image)?;
     commit_prepared_spawn(
         startup_handle,
         image_id,
@@ -1059,6 +1069,22 @@ fn commit_prepared_spawn(
         handles,
         startup_handle: None,
         is_init: false,
+        #[cfg(feature = "linux-abi-runtime")]
+        linux_credentials: if image_id == UserImageId::LinuxApp {
+            crate::userboot::linux_launch(info.linux_profile)
+                .expect("validated launch profile")
+                .credentials
+        } else {
+            bndroid_kernel::linux_launch::Credentials::APPLICATION
+        },
+        #[cfg(feature = "linux-abi-runtime")]
+        linux_manager_domains: if image_id == UserImageId::LinuxApp {
+            crate::userboot::linux_launch(info.linux_profile)
+                .expect("validated launch profile")
+                .manager_domains
+        } else {
+            0
+        },
         #[cfg(feature = "linux-abi-runtime")]
         linux_clear_child_tid: 0,
         #[cfg(feature = "linux-abi-runtime")]
@@ -2572,6 +2598,24 @@ pub fn linux_memfd_seal(
         .filter_map(|p| p.address_space.as_ref())
         .any(|space| space.linux_memfd_may_write(memory.inode()));
     memory.add_seals(seals, writable)
+}
+
+#[cfg(feature = "linux-abi-runtime")]
+pub fn linux_current_credentials() -> bndroid_kernel::linux_launch::Credentials {
+    let id = current_live_user_process_id().expect("live Linux process");
+    lookup(ProcessId(id))
+        .expect("live Linux process")
+        .linux_credentials
+}
+
+#[cfg(feature = "art-runtime")]
+pub fn linux_may_manage_binder(domain: bndroid_kernel::linux_binder::Domain) -> bool {
+    let id = current_live_user_process_id().expect("live Linux process");
+    lookup(ProcessId(id))
+        .expect("live Linux process")
+        .linux_manager_domains
+        & (1 << domain as u8)
+        != 0
 }
 
 #[cfg(feature = "linux-abi-runtime")]

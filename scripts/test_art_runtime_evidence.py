@@ -20,6 +20,35 @@ PROCESS = "LINUX_PROCESS_EXIT pid=4294967298 code=0 native_handles=0\nLINUX_PROC
 
 
 class EvidenceTests(unittest.TestCase):
+    def test_launch_requires_both_identities_ppoll_timers_and_cleanup(self):
+        timers = "LAUNCH_TIMERS_OK periodic=1 absolute=1 poll=1 lifetime=1 interrupted=1\n"
+        ppoll = "LAUNCH_PPOLL_OK invalid=1 ignored=1 timer_wake=1 timeout=1\n"
+        identities = "".join(f"LAUNCH_IDENTITY_OK role={role} uid={uid} gid={uid} auxv=1 signals=1 binder=1 authority=1\n" for role, uid in (("system", 1000), ("app", 10000)))
+        binder = "LINUX_BINDER_OK opened=2 closed=2 submitted=1 replied=1 connections=0 transactions=0 buffers=0 nodes=0 references=0 call_frames=0 pending_fds=0\n"
+        poll = "LINUX_POLL_OK eventfds=0 epolls=2 external=2 timers=10 closed=14 ready=4 cancelled=2 live=0 watches=0\n"
+        signals = "LINUX_SIGNALS_OK delivered=4 returned=4 pending=0\n"
+        log = timers * 2 + ppoll * 2 + identities + binder + poll + signals + PROCESS + PROOF
+        self.assertEqual(completion_status(log, "framework-identities"), "framework-identities-passed")
+        for old, new, expected in ((ppoll, "", "missing-ppoll-proof"),
+                                   ("role=app uid=10000", "role=app uid=1000", "missing-distinct-identity-proof"),
+                                   ("pending_fds=0", "pending_fds=1", "invalid-service-binder-proof"),
+                                   ("closed=14", "closed=13", "invalid-service-poll-proof"),
+                                   ("ready=4", "ready=0", "invalid-launch-timer-proof")):
+            self.assertEqual(completion_status(log.replace(old, new), "framework-identities"), expected)
+
+    def test_service_success_requires_real_daemon_loop_and_distinct_forced_shutdown(self):
+        marker = "SERVICE_MANAGER_CLIENT_OK upstream=1 lookup=1 ping=1 uid=10000\n"
+        binder = "LINUX_BINDER_OK opened=2 closed=2 submitted=2 replied=2 connections=0 transactions=0 buffers=0 nodes=0 references=0 call_frames=0 pending_fds=0\n"
+        poll = "LINUX_POLL_OK eventfds=1 epolls=1 external=2 timers=1 closed=5 external_delivered=2 live=0 watches=0\n"
+        processes = PROCESS.replace("LINUX_PROCESS_EXIT pid=4294967298 code=0 native_handles=0\n", "")
+        proof = PROOF.replace("native_exits=2", "native_exits=1 native_killed=1")
+        log = marker + binder + poll + processes + proof
+        self.assertEqual(completion_status(log, "framework-services"), "framework-services-passed")
+        for old, new, expected in (("native_killed=1", "native_killed=0", "invalid-cleanup-proof"),
+                                   ("external_delivered=2", "external_delivered=0", "missing-upstream-service-loop-proof"),
+                                   (marker, "SERVICE_MANAGER_CLIENT_TIMEOUT\n", "missing-service-launch-proof")):
+            self.assertEqual(completion_status(log.replace(old, new), "framework-services"), expected)
+
     def test_poll_requires_real_waits_signals_and_complete_lifetime_cleanup(self):
         marker = "POLL_NATIVE_OK counter=1 semaphore=1 epoll=1 vectors=1 nested=1 lifetime=1 race=1 signals=1 timeout=1 pending_exit=1\n"
         poll = "LINUX_POLL_OK eventfds=28 epolls=14 closed=42 reads=34 writes=42 delivered=26 controls=26 blocked=30 ready=16 expired=4 cancelled=10 live=0 watches=0\n"

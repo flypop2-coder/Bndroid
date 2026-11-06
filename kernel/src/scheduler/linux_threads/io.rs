@@ -1,6 +1,7 @@
 //! Blocking eventfd/epoll calls retain the original open file. Timer wakeups
 //! inspect readiness only; user copies and consumption run on the owner's stack.
 use super::*;
+use alloc::vec::Vec;
 use bndroid_kernel::{
     linux_fd::{FileRef, Target},
     linux_poll as poll,
@@ -14,10 +15,22 @@ struct Segment {
 enum Operation {
     Read([Segment; 8]),
     Write(u64),
-    Poll { address: u64, maximum: usize },
+    Poll {
+        address: u64,
+        maximum: usize,
+    },
+    PollFds {
+        address: u64,
+        entries: Vec<PollEntry>,
+    },
+}
+struct PollEntry {
+    file: Option<FileRef>,
+    ignored: bool,
+    events: u16,
 }
 struct Call {
-    file: FileRef,
+    file: Option<FileRef>,
     operation: Operation,
     deadline: Option<u64>,
     args: [u64; 6],
@@ -48,12 +61,26 @@ pub(super) fn dispatch(frame: *mut TrapFrame, r: &[u64; 31]) -> Option<*mut Trap
         20 => FileRef::try_epoll(r[0] as u32).and_then(|f| insert(f, r[0])),
         21 => control(r),
         22 | 441 => return Some(wait_epoll(frame, r)),
+        73 => return Some(wait_pollfds(frame, r)),
+        #[cfg(feature = "art-runtime")]
+        85 => FileRef::try_timerfd(r[0] as u32, r[1] as u32).and_then(|f| insert(f, r[1])),
+        #[cfg(feature = "art-runtime")]
+        86 | 87 => timer_control(r),
         63..=66 => {
             let f = match file(r[0]) {
-                Ok(f) if matches!(f.target(), Target::EventFd | Target::Epoll) => f,
+                Ok(f)
+                    if matches!(
+                        f.target(),
+                        Target::EventFd | Target::TimerFd | Target::Epoll
+                    ) =>
+                {
+                    f
+                }
                 _ => return None,
             };
-            if matches!(f.target(), Target::Epoll) {
+            if matches!(f.target(), Target::Epoll)
+                || matches!(f.target(), Target::TimerFd) && matches!(r[8], 64 | 66)
+            {
                 Err(22)
             } else {
                 return Some(counter_io(frame, r, f));
@@ -63,6 +90,49 @@ pub(super) fn dispatch(frame: *mut TrapFrame, r: &[u64; 31]) -> Option<*mut Trap
     };
     wake_ready(crate::arch::aarch64::timer::counter_value());
     Some(runtime::complete(frame, result.unwrap_or_else(errno)))
+}
+#[cfg(feature = "art-runtime")]
+fn timer_control(r: &[u64; 31]) -> Result<u64, i64> {
+    use bndroid_kernel::linux_timerfd::Setting;
+    let f = file(r[0])?;
+    if !matches!(f.target(), Target::TimerFd) {
+        return Err(22);
+    }
+    let id = f.poll().unwrap().id;
+    let (monotonic, realtime) = runtime::event_clock_times();
+    let (setting, destination) = if r[8] == 86 {
+        if r[1] as u32 & !1 != 0 {
+            return Err(22);
+        }
+        let mut bytes = [0; 32];
+        runtime::copy_in(r[2], &mut bytes)?;
+        let setting = Setting::decode(&bytes)?;
+        if r[3] != 0
+            && !crate::process::current_user_range_is_writable(runtime::user_address(r[3]), 32)
+        {
+            return Err(14);
+        }
+        (
+            poll::with(|h| h.set_timer(id, r[1] as u32, setting, monotonic, realtime))?,
+            r[3],
+        )
+    } else {
+        // gettime requires an output pointer, including when it is zero.
+        let setting = poll::with(|h| h.timer_setting(id, monotonic, realtime))?;
+        output(r[1], &setting.encode())?;
+        return Ok(0);
+    };
+    if destination != 0 {
+        output(destination, &setting.encode())?;
+    }
+    Ok(0)
+}
+fn advance_timers() {
+    #[cfg(feature = "art-runtime")]
+    if poll::with(|h| h.has_timers()) {
+        let (monotonic, realtime) = runtime::event_clock_times();
+        poll::with(|h| h.advance_timers(monotonic, realtime));
+    }
 }
 fn control(r: &[u64; 31]) -> Result<u64, i64> {
     let ep = file(r[0])?;
@@ -158,7 +228,7 @@ fn counter_io(frame: *mut TrapFrame, r: &[u64; 31], file: FileRef) -> *mut TrapF
             Operation::Write(value)
         };
         Ok(Call {
-            file,
+            file: Some(file),
             operation,
             deadline: None,
             args: r[..6].try_into().unwrap(),
@@ -225,7 +295,7 @@ fn wait_epoll(frame: *mut TrapFrame, r: &[u64; 31]) -> *mut TrapFrame {
         };
         signals::begin_wait_mask(mask);
         Ok(Call {
-            file,
+            file: Some(file),
             operation: Operation::Poll {
                 address: r[1],
                 maximum: maximum as usize,
@@ -241,8 +311,127 @@ fn wait_epoll(frame: *mut TrapFrame, r: &[u64; 31]) -> *mut TrapFrame {
         Err(e) => runtime::complete(frame, errno(e)),
     }
 }
+fn wait_pollfds(frame: *mut TrapFrame, r: &[u64; 31]) -> *mut TrapFrame {
+    let result = (|| {
+        if r[1] > bndroid_kernel::linux_fd::CAPACITY as u64 {
+            return Err(22);
+        }
+        let mut entries = Vec::new();
+        entries.try_reserve_exact(r[1] as usize).map_err(|_| 12)?;
+        let owner = owner(current_running_context());
+        let tid = current_tid() as u32;
+        for index in 0..r[1] {
+            let address = r[0].checked_add(index * 8).ok_or(14)?;
+            let mut bytes = [0; 8];
+            runtime::copy_in(address, &mut bytes)?;
+            let number = i32::from_le_bytes(bytes[..4].try_into().unwrap());
+            let opened = if number < 0 {
+                None
+            } else {
+                file(number as u64)
+                    .ok()
+                    .filter(|f| f.flags() & 0x200000 == 0)
+            };
+            if let Some(f) = &opened {
+                if matches!(f.target(), Target::UnixDatagram) {
+                    return Err(95);
+                }
+                if let Some(device) = f.binder() {
+                    bndroid_kernel::linux_binder::with(|router| {
+                        router.register_poll(device.id, owner, tid)
+                    })?;
+                }
+            }
+            entries.push(PollEntry {
+                file: opened,
+                ignored: number < 0,
+                events: u16::from_le_bytes(bytes[4..6].try_into().unwrap()),
+            });
+        }
+        let deadline = if r[2] == 0 {
+            None
+        } else {
+            let mut bytes = [0; 16];
+            runtime::copy_in(r[2], &mut bytes)?;
+            Some(linux_sync::deadline(
+                i64::from_le_bytes(bytes[..8].try_into().unwrap()),
+                i64::from_le_bytes(bytes[8..].try_into().unwrap()),
+                crate::arch::aarch64::timer::frequency_hz(),
+                crate::arch::aarch64::timer::counter_value(),
+                false,
+            )?)
+        };
+        let mask = if r[3] == 0 {
+            None
+        } else {
+            if r[4] != 8 {
+                return Err(22);
+            }
+            let mut bytes = [0; 8];
+            runtime::copy_in(r[3], &mut bytes)?;
+            Some(u64::from_le_bytes(bytes))
+        };
+        signals::begin_wait_mask(mask);
+        Ok(Call {
+            file: None,
+            operation: Operation::PollFds {
+                address: r[0],
+                entries,
+            },
+            deadline,
+            args: r[..6].try_into().unwrap(),
+            owner,
+            tid,
+        })
+    })();
+    match result {
+        Ok(call) => run(frame, call),
+        Err(error) => runtime::complete(frame, errno(error)),
+    }
+}
+fn pollfds_ready(
+    call: &Call,
+    entries: &[PollEntry],
+    mut emit: impl FnMut(usize, u16) -> Result<(), i64>,
+) -> Result<u64, i64> {
+    let snapshot = bndroid_kernel::linux_binder::with(|r| r.readiness(call.owner, call.tid));
+    poll::with(|h| h.sync_external(snapshot.revision));
+    let mut count = 0;
+    for (index, entry) in entries.iter().enumerate() {
+        let mask = if entry.ignored {
+            0
+        } else if let Some(f) = &entry.file {
+            let mut mask = if let Some(source) = f.poll() {
+                poll::with(|h| h.mask_using(source.id, |key| snapshot.mask(key)))? as u16
+            } else {
+                match f.target() {
+                    Target::Random => poll::IN as u16,
+                    Target::Console => poll::OUT as u16,
+                    _ => (poll::IN | poll::OUT) as u16,
+                }
+            };
+            if mask & 1 != 0 {
+                mask |= 0x40;
+            }
+            if mask & 4 != 0 {
+                mask |= 0x100;
+            }
+            mask & (entry.events | 0x38)
+        } else {
+            0x20
+        };
+        if mask != 0 {
+            count += 1;
+        }
+        emit(index, mask)?;
+    }
+    Ok(count)
+}
 fn ready(call: &Call) -> Result<bool, i64> {
-    let id = call.file.poll().unwrap().id;
+    if let Operation::PollFds { entries, .. } = &call.operation {
+        return pollfds_ready(call, entries, |_, _| Ok(())).map(|count| count != 0);
+    }
+    let id = call.file.as_ref().unwrap().poll().unwrap().id;
     if matches!(call.operation, Operation::Poll { .. }) {
         let snapshot = bndroid_kernel::linux_binder::with(|r| r.readiness(call.owner, call.tid));
         return poll::with(|h| {
@@ -253,13 +442,28 @@ fn ready(call: &Call) -> Result<bool, i64> {
     poll::with(|h| match call.operation {
         Operation::Read(_) => h.can_read(id),
         Operation::Write(value) => h.can_write(id, value),
-        Operation::Poll { .. } => unreachable!(),
+        Operation::Poll { .. } | Operation::PollFds { .. } => unreachable!(),
     })
 }
 #[inline(never)]
 fn attempt(call: &Call) -> Result<Option<u64>, i64> {
-    let id = call.file.poll().unwrap().id;
+    advance_timers();
+    if let Operation::PollFds { address, entries } = &call.operation {
+        let count = pollfds_ready(call, entries, |index, mask| {
+            output(
+                address.checked_add(index as u64 * 8 + 6).ok_or(14)?,
+                &mask.to_le_bytes(),
+            )
+        })?;
+        return Ok((count != 0
+            || call.deadline.is_some_and(|end| {
+                deadline_reached(crate::arch::aarch64::timer::counter_value(), end)
+            }))
+        .then_some(count));
+    }
+    let id = call.file.as_ref().unwrap().poll().unwrap().id;
     match &call.operation {
+        Operation::PollFds { .. } => unreachable!(),
         Operation::Read(parts) => {
             let Some(value) = poll::with(|h| h.read(id))? else {
                 return Ok(None);
@@ -316,7 +520,7 @@ fn run(frame: *mut TrapFrame, call: Call) -> *mut TrapFrame {
     let result = attempt(&call);
     wake_ready(crate::arch::aarch64::timer::counter_value());
     let result = match result {
-        Ok(None) if call.file.flags() & 0x800 != 0 => Err(11),
+        Ok(None) if call.file.as_ref().is_some_and(|f| f.flags() & 0x800 != 0) => Err(11),
         Ok(None) => return suspend(frame, call),
         Ok(Some(value)) => Ok(value),
         Err(e) => Err(e),
@@ -339,7 +543,10 @@ fn suspend(frame: *mut TrapFrame, call: Call) -> *mut TrapFrame {
         signals::restore_wait_mask();
         return runtime::complete(frame, errno(e));
     }
-    if !matches!(call.operation, Operation::Poll { .. }) {
+    if !matches!(
+        call.operation,
+        Operation::Poll { .. } | Operation::PollFds { .. }
+    ) {
         signals::note_restartable(frame, call.args, None);
     }
     assert!(slot(c).is_none());
@@ -349,6 +556,7 @@ fn suspend(frame: *mut TrapFrame, call: Call) -> *mut TrapFrame {
     block(frame, ThreadState::Waiting)
 }
 pub(super) fn wake_ready(now: u64) {
+    advance_timers();
     for (c, state) in CONTEXTS.iter().enumerate().skip(DYNAMIC_USER_CONTEXT_START) {
         if state.state.load(Ordering::Relaxed) != STATE_WAITING {
             continue;
@@ -386,7 +594,7 @@ pub(super) fn evidence() {
     assert!((0..CONTEXT_COUNT).all(|c| slot(c).is_none()));
     let s = poll::with(|h| h.stats());
     crate::kprintln!(
-        "LINUX_POLL_OK eventfds={} epolls={} closed={} reads={} writes={} delivered={} controls={} blocked={} ready={} expired={} cancelled={} live={} watches={} external={} external_delivered={}",
+        "LINUX_POLL_OK eventfds={} epolls={} closed={} reads={} writes={} delivered={} controls={} blocked={} ready={} expired={} cancelled={} live={} watches={} external={} external_delivered={} timers={}",
         s.eventfds,
         s.epolls,
         s.closed,
@@ -401,7 +609,8 @@ pub(super) fn evidence() {
         s.live,
         s.watches,
         s.external,
-        s.external_delivered
+        s.external_delivered,
+        s.timers
     );
     assert_eq!((s.live, s.watches), (0, 0));
 }
