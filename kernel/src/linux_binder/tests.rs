@@ -204,6 +204,40 @@ fn request_reply_copies_payload_and_authenticates_identity_and_thread() {
     );
 }
 #[test]
+fn framework_collection_flag_survives_routing_without_changing_authority() {
+    let (mut r, s, c) = setup();
+    let flags = COLLECT_NOTED_APP_OPS | ACCEPT_FDS;
+    r.transact(c, 3, data(b"java", flags), b"java".to_vec())
+        .unwrap();
+    assert_eq!(opcode(&receive(&mut r, c, 3)), BR_COMPLETE);
+    let request = receive(&mut r, s, 2);
+    let tx = transaction(&request);
+    assert_eq!((tx.flags, tx.sender_pid, tx.sender_uid), (flags, 3, 10000));
+    assert_eq!(request.payload.as_deref(), Some(b"java".as_slice()));
+    r.free_buffer(s, tx.data).unwrap();
+    r.reply(s, 2, data(b"reply", 0), b"reply".to_vec()).unwrap();
+    let reply = receive(&mut r, c, 3);
+    assert_eq!(opcode(&reply), BR_REPLY);
+    r.free_buffer(c, transaction(&reply).data).unwrap();
+    assert_eq!(opcode(&receive(&mut r, s, 2)), BR_COMPLETE);
+    // The separate kernel async-update operation is still unsupported.
+    assert_eq!(
+        r.transact(c, 3, data(b"bad", 0x40), b"bad".to_vec()),
+        Err(95)
+    );
+    assert!(r.read(s, 2, 256).unwrap().is_none());
+    r.close(c);
+    r.close(s);
+    assert_eq!(
+        (
+            r.stats().transactions,
+            r.stats().buffers,
+            r.stats().connections
+        ),
+        (0, 0, 0)
+    );
+}
+#[test]
 fn prepared_reads_are_not_freeable_and_faulted_delivery_releases_ownership() {
     let (mut r, s, c) = setup();
     r.transact(c, 3, data(b"hello", 0), b"hello".to_vec())

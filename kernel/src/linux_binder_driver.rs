@@ -217,10 +217,11 @@ fn execute(file: &FileRef, tid: u32, command: u32, body: &[u8; 64]) -> Result<()
             }
             if let Err(error) = result {
                 crate::kprintln!(
-                    "LINUX_BINDER_TRANSFER_FAILED tid={} operation={} code={} data_bytes={} offsets_bytes={} errno={}",
+                    "LINUX_BINDER_TRANSFER_FAILED tid={} operation={} code={} flags={:#x} data_bytes={} offsets_bytes={} errno={}",
                     tid,
                     command,
                     data.code,
+                    data.flags,
                     data.data_size,
                     data.offsets_size,
                     error

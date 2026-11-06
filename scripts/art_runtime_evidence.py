@@ -18,13 +18,17 @@ def complete_lines(text, line):
     return len(re.findall("^" + re.escape(line + "\n"), text, re.MULTILINE))
 
 
-def service_bridge_status(text):
+def service_bridge_status(text, managed=False):
     """Require both provider instances, authority checks and generation cleanup."""
     try:
         ready = [parse_marker(line + "\n", "RUNTIME_SERVICE_READY") for line in text.splitlines()
                  if line.startswith("RUNTIME_SERVICE_READY ")]
         stopped = parse_marker(text, "RUNTIME_SERVICE_STOPPED")
-        client = parse_marker(text, "SERVICE_BRIDGE_CLIENT_OK")
+        if managed:
+            messages = re.findall(r"^ANDROID_LOG pid=(\d+) buffer=0 priority=4 tag=bndroid-service message=(.*)\n", text, re.MULTILINE)
+            client = parse_marker("\n".join(message for _, message in messages) + "\n", "FRAMEWORK_SERVICE_CLIENT_OK")
+        else:
+            client = parse_marker(text, "SERVICE_BRIDGE_CLIENT_OK")
         controller = parse_marker(text, "SERVICE_BRIDGE_CONTROLLER_OK")
         if len(ready) != 2 or any(int(r["pid"]) <= 0 or r.get("uid") != "1001" or int(r["instance"]) <= 0 for r in ready):
             return "invalid-provider-start-proof"
@@ -42,6 +46,15 @@ def service_bridge_status(text):
         owners = [int(ready[0]["pid"]), int(client["pid"]), int(controller["pid"])]
         if len(set(owners)) != 3 or sorted(owners) != exited_slots:
             return "invalid-service-owner-proof"
+        if managed:
+            owner = next(pid for pid in exits if int(pid) & 0xffffffff == int(client["pid"]))
+            if any(pid != owner for pid, _ in messages) or client.get("looper") != "1" or any(
+                    sum(message == "FRAMEWORK_SERVICE_STAGE " + stage for _, message in messages) != 1
+                    for stage in ("snapshot", "authority", "death")):
+                return "missing-framework-service-proof"
+            shutdowns = re.findall(r"^ANDROID_LOG pid=(\d+) buffer=0 priority=3 tag=AndroidRuntime message=Shutting down VM *\n", text, re.MULTILINE)
+            if shutdowns != [owner] or "Warning: unable to detach main thread" in text or "Warning: VM did not shut down cleanly" in text:
+                return "missing-framework-shutdown-proof"
         binder = parse_marker(text, "LINUX_BINDER_OK")
         if not binder or any(int(binder.get(k, 0)) < n for k, n in (("opened", 5), ("submitted", 12), ("replied", 12), ("security_contexts", 8), ("deaths", 2))):
             return "missing-service-bridge-transport-proof"
@@ -69,14 +82,15 @@ def completion_status(text, mode):
         "framework-identities": "LAUNCH_TIMERS_OK periodic=1 absolute=1 poll=1 lifetime=1 interrupted=1\n",
         "framework-services": "SERVICE_MANAGER_CLIENT_OK upstream=1 lookup=1 ping=1 uid=10000\n",
         "framework-bridge": "",
+        "framework-client": "",
         "framework": "FRAMEWORK_MAIN_OK parcel=1 bundle=1 looper=1 delayed=1 wake=1\n",
         "java": "ART_JAVA_CORE_OK sum=4950 exceptions=1 collections=1\n",
         "managed": "ART_MANAGED_OK java_threads=3 monitors=1 interrupt=1 gc=1 jni=1 native_thread=1 clocks=1\n",
         "signals": "ART_SIGNALS_OK handlers=1 altstack=1 registers=1 masks=1 realtime=1 faults=1 threads=1 restart=1 waits=1\n",
     }[mode]
-    if mode in ("framework-identities", "framework-services", "framework-bridge"):
-        if mode == "framework-bridge":
-            bridge_error = service_bridge_status(text)
+    if mode in ("framework-identities", "framework-services", "framework-bridge", "framework-client"):
+        if mode in ("framework-bridge", "framework-client"):
+            bridge_error = service_bridge_status(text, managed=mode == "framework-client")
             if bridge_error:
                 return bridge_error
         elif complete_lines(text, expected.rstrip("\n")) != (2 if mode == "framework-identities" else 1):
@@ -173,7 +187,7 @@ def completion_status(text, mode):
                 "live_anonymous_tables": "0", "live_file_descriptions": "0", "loader": "upstream-android-linker"}
     if mode == "framework-services":
         required.update(native_exits="1", native_killed="1")
-    elif mode == "framework-bridge":
+    elif mode in ("framework-bridge", "framework-client"):
         required.update(native_processes="5", native_exits="3", native_killed="2", native_reaped="5")
     if any(proof.get(key) != value for key, value in required.items()):
         return "invalid-cleanup-proof"
@@ -303,7 +317,7 @@ def main():
     process = None
     text = ""
     status = "timeout"
-    if mode not in ("java", "managed", "memory", "memfd", "binder", "poll", "properties", "help", "framework", "framework-help", "framework-identities", "framework-services", "framework-bridge", "signals", "signal-bad-frame", "signal-bad-pc", "signal-bad-fp", "signal-default", "signal-guard"):
+    if mode not in ("java", "managed", "memory", "memfd", "binder", "poll", "properties", "help", "framework", "framework-help", "framework-identities", "framework-services", "framework-bridge", "framework-client", "signals", "signal-bad-frame", "signal-bad-pc", "signal-bad-fp", "signal-default", "signal-guard"):
         raise SystemExit("Unknown ART mode")
     with tempfile.NamedTemporaryFile(prefix="bndroid-art-entropy-") as entropy:
         entropy.write(os.urandom(65536))
@@ -346,8 +360,9 @@ def main():
                "managed_runtime_verified": mode == "managed" and status == "managed-passed",
                "apk_dex_jni_verified": mode == "managed" and status == "managed-passed",
                "launch_profiles_verified": mode == "framework-identities" and status == "framework-identities-passed",
-               "service_manager_verified": mode in ("framework-services", "framework-bridge") and status == mode + "-passed",
-               "service_bridge_verified": mode == "framework-bridge" and status == "framework-bridge-passed",
+               "service_manager_verified": mode in ("framework-services", "framework-bridge", "framework-client") and status == mode + "-passed",
+               "service_bridge_verified": mode in ("framework-bridge", "framework-client") and status == mode + "-passed",
+               "framework_service_client_verified": mode == "framework-client" and status == "framework-client-passed",
                "framework_frontend_verified": mode == "framework-help" and status == "framework-help-passed",
                "shared_memfd_verified": mode == "memfd" and status == "memfd-passed",
                "binder_transport_verified": mode == "binder" and status == "binder-passed",

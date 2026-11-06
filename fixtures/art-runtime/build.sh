@@ -17,6 +17,17 @@ if [[ "${BNDROID_ART_MODE:-java}" == framework* ]]; then
     --output "$OUT/framework-dex" "$OUT/framework-classes/FrameworkMain.class"
   cp "$OUT/framework-dex/classes.dex" "$OUT/framework.dex"
 fi
+if [[ "${BNDROID_ART_MODE:-java}" == framework-client ]]; then
+  mkdir -p "$OUT/framework-service-classes/org/bndroid/runtime" "$OUT/framework-service-dex"
+  javac --release 8 -classpath "$SDK_ROOT/platforms/android-36/android.jar" \
+    -d "$OUT/framework-service-classes" \
+    "$ROOT/user/runtime-service/java/org/bndroid/runtime/PlatformRuntime.java" \
+    "$ROOT/fixtures/art-runtime/FrameworkServiceMain.java"
+  "$D8" --min-api 35 --lib "$SDK_ROOT/platforms/android-36/android.jar" \
+    --output "$OUT/framework-service-dex" "$OUT/framework-service-classes/"*.class \
+    "$OUT/framework-service-classes/org/bndroid/runtime/"*.class
+  cp "$OUT/framework-service-dex/classes.dex" "$OUT/framework-service.dex"
+fi
 NDK_ROOT="${BNDROID_NDK_ROOT:-$SDK_ROOT/ndk/27.1.12297006}"
 case "$(uname -s)" in
   Darwin) HOST_TAG=darwin-x86_64 ;;
@@ -82,14 +93,14 @@ if [[ "${BNDROID_ART_MODE:-java}" == framework-identities || "${BNDROID_ART_MODE
     -Wl,-z,max-page-size=4096 -Wl,-z,separate-loadable-segments \
     "$ROOT/fixtures/art-runtime/launch.c" -ldl -lbinder_ndk -o "$OUT/launch-probe"
 fi
-if [[ "${BNDROID_ART_MODE:-java}" == framework-bridge ]]; then
+if [[ "${BNDROID_ART_MODE:-java}" == framework-bridge || "${BNDROID_ART_MODE:-java}" == framework-client ]]; then
   for SOURCE in "$ROOT/user/runtime-service/main.c" "$ROOT/fixtures/art-runtime/service-bridge.c"; do
     NAME=bndroid-runtime-service
     [[ "$SOURCE" != *service-bridge.c ]] || NAME=service-bridge-client
     "$NDK_ROOT/toolchains/llvm/prebuilt/$HOST_TAG/bin/aarch64-linux-android35-clang" \
       -O2 -g -Wall -Wextra -Werror -pthread -fPIE -pie \
       -Wl,-z,max-page-size=4096 -Wl,-z,separate-loadable-segments \
-      "$SOURCE" "$ROOT/user/runtime-service/platform.c" -ldl -lbinder_ndk -o "$OUT/$NAME"
+      "$SOURCE" "$ROOT/user/runtime-service/platform.c" -ldl -lbinder_ndk -llog -o "$OUT/$NAME"
   done
 fi
 printf 'ART_DEX_BUILD_OK path=%s\n' "$OUT/probe.dex"

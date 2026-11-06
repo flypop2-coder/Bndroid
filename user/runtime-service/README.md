@@ -56,3 +56,32 @@ The service implementation is reusable; the controller/client under
 Init restart policy is specific to this mode. General resident supervision,
 CoreSystem-owned dynamic permissions, ActivityThread and Android application
 services remain separate work. This mode does not establish general APK support.
+
+## Java binding and Framework integration
+
+`java/org/bndroid/runtime/PlatformRuntime.java` is a reusable Java binding that
+accepts a discovered `IBinder`, checks its descriptor, decodes versioned snapshots,
+and exposes maintenance requests with the same independent native permission.
+Parcels are recycled on success and failure; malformed replies are rejected.
+Its returned `IBinder` supports the original Framework death-recipient API.
+
+```sh
+BNDROID_ART_MODE=framework-client scripts/check-art-runtime.sh
+```
+
+This mode substitutes the original `app_process64`/ART and owned
+`FrameworkServiceMain` for the native application client, with the same UID and
+grants. The Java client uses the original Framework ServiceManager, Parcel,
+Binder and SystemProperties implementations. A Binder-worker death notification
+is posted to its main Looper before rediscovery, and acceptance requires normal
+VM shutdown and full reclamation. Platform lookup/property methods omitted from
+SDK stubs are reached by reflection in this integration harness; no hidden-API
+exemption or replacement boot class is installed. The reusable binding itself
+uses public Binder/Parcel APIs and does not perform hidden service lookup.
+
+The maintenance controller waits on Bionic's shared property futex instead of
+polling readiness. This mode allows up to 180 seconds for Framework initialization
+and has a 240-second controller watchdog; native-only mode keeps its existing
+5-second readiness bound and 20-second watchdog. Kernel/host, memory and stack
+limits remain unchanged. This is a platform service integration, not APK launch
+through ActivityThread or a general Android application lifecycle.

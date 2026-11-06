@@ -36,6 +36,9 @@ pub const BR_DEAD_BINDER: u32 = 0x8008_720f;
 pub const BR_CLEAR_DEATH_DONE: u32 = 0x8008_7210;
 pub const BR_FAILED_REPLY: u32 = 0x0000_7211;
 pub const ONE_WAY: u32 = 1;
+/// Framework AppOps collection metadata. Forward to userspace unchanged;
+/// this bit grants no native permission and changes no driver scheduling.
+pub const COLLECT_NOTED_APP_OPS: u32 = 2;
 pub const ACCEPT_FDS: u32 = 0x10;
 pub const MAX_MAPPING: u64 = 4 * 1024 * 1024;
 pub const MAX_OBJECTS: u64 = 256;
@@ -190,7 +193,7 @@ impl Transaction {
         b
     }
     pub fn validate_payload(self) -> Result<(), i64> {
-        if self.flags & !(ONE_WAY | 8 | 16 | 32) != 0 {
+        if self.flags & !(ONE_WAY | COLLECT_NOTED_APP_OPS | 8 | ACCEPT_FDS | 32) != 0 {
             return Err(95);
         }
         if self.data_size > MAX_MAPPING

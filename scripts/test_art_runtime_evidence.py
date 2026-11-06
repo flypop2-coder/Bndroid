@@ -44,6 +44,19 @@ class EvidenceTests(unittest.TestCase):
                 ("instance=200", "instance=bad", "invalid-service-bridge-record")):
             self.assertEqual(completion_status(log.replace(old, new), "framework-bridge"), expected)
         self.assertEqual(completion_status(log + controller, "framework-bridge"), "invalid-service-bridge-record")
+        java_client = "ANDROID_LOG pid=4294967300 buffer=0 priority=4 tag=bndroid-service message=" + client.replace("SERVICE_BRIDGE_CLIENT_OK", "FRAMEWORK_SERVICE_CLIENT_OK").rstrip() + " looper=1\n"
+        stages = "".join("ANDROID_LOG pid=4294967300 buffer=0 priority=4 tag=bndroid-service message=FRAMEWORK_SERVICE_STAGE " + stage + "\n" for stage in ("snapshot", "authority", "death"))
+        shutdown = "ANDROID_LOG pid=4294967300 buffer=0 priority=3 tag=AndroidRuntime message=Shutting down VM\n"
+        managed = log.replace(client, java_client + stages + shutdown)
+        self.assertEqual(completion_status(managed, "framework-client"), "framework-client-passed")
+        for old, new, expected in (
+                ("looper=1", "looper=0", "missing-framework-service-proof"),
+                (stages, "", "missing-framework-service-proof"),
+                ("\nANDROID_LOG pid=4294967300 buffer=0 priority=4 tag=bndroid-service message=FRAMEWORK_SERVICE_STAGE authority", "\naudit without newline ANDROID_LOG pid=4294967300 buffer=0 priority=4 tag=bndroid-service message=FRAMEWORK_SERVICE_STAGE authority", "missing-framework-service-proof"),
+                ("ANDROID_LOG pid=4294967300", "ANDROID_LOG pid=4294967301", "missing-framework-service-proof"),
+                (shutdown, "", "missing-framework-shutdown-proof"),
+                (java_client, client, "missing-service-client-proof")):
+            self.assertEqual(completion_status(managed.replace(old, new), "framework-client"), expected)
 
     def test_launch_requires_both_identities_ppoll_timers_and_cleanup(self):
         timers = "LAUNCH_TIMERS_OK periodic=1 absolute=1 poll=1 lifetime=1 interrupted=1\n"

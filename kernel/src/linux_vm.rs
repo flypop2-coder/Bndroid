@@ -237,8 +237,11 @@ impl Layout {
         let size = rounded_length(length)?;
         let end = checked_range(address, size)?;
         let mut regions = Vec::new();
+        // A contiguous interval can split only its two boundary regions.
+        // Small native services must not each retain the full Framework VMA
+        // quota in the shared kernel heap alongside an ART process.
         regions
-            .try_reserve_exact(MAX_REGIONS + 3)
+            .try_reserve_exact(self.regions.len() + 3)
             .map_err(|_| ENOMEM)?;
         let mut cursor = address;
         for &r in &self.regions {
@@ -346,8 +349,10 @@ impl Layout {
     ) -> Result<Change, i64> {
         let end = checked_range(start, size)?;
         let mut regions = Vec::new();
+        // At most two boundary fragments and one replacement are added.
+        // Reserve before planning; the hard region limit still applies below.
         regions
-            .try_reserve_exact(MAX_REGIONS + 3)
+            .try_reserve_exact(self.regions.len() + 3)
             .map_err(|_| ENOMEM)?;
         for &r in &self.regions {
             if r.end <= start || end <= r.start {
@@ -441,6 +446,25 @@ pub fn is_arena_address(address: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn small_services_do_not_reserve_the_framework_region_quota() {
+        let layout = Layout::default()
+            .map(0, PAGE * 3, 3, 0x22, 0)
+            .unwrap()
+            .layout;
+        let inherited = layout
+            .advise_dontfork(ARENA_START + PAGE, PAGE, true)
+            .unwrap();
+        let protected = layout.protect(ARENA_START + PAGE, PAGE, 1).unwrap().layout;
+        for state in [&layout, &inherited, &protected] {
+            assert!(state.regions.capacity() <= 8);
+        }
+        assert_eq!(inherited.regions.len(), 3);
+        assert!(inherited.regions[1].dont_fork);
+        assert_eq!(protected.regions[1].protection, Protection::Read);
+        assert_eq!(layout.regions.len(), 1);
+        assert_eq!(layout.regions[0].protection, Protection::ReadWrite);
+    }
     #[test]
     #[cfg(feature = "art-runtime")]
     fn device_receive_buffers_reject_write_and_execute_after_splitting() {

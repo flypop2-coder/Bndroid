@@ -33,7 +33,7 @@ if [[ "$BNDROID_ART_MODE" == framework-identities ]]; then
 elif [[ "$BNDROID_ART_MODE" == framework-services ]]; then
   FEATURES+=,service-manager-runtime
   USER_FEATURES+=,service-manager-runtime
-elif [[ "$BNDROID_ART_MODE" == framework-bridge ]]; then
+elif [[ "$BNDROID_ART_MODE" == framework-bridge || "$BNDROID_ART_MODE" == framework-client ]]; then
   FEATURES+=,service-bridge-runtime
   USER_FEATURES+=,service-bridge-runtime
 fi

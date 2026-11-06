@@ -15,8 +15,9 @@
 
 #define CHECK(x) do {if(!(x)){fprintf(stderr,"SERVICE_BRIDGE_FAIL line=%d errno=%d uid=%u\n",__LINE__,errno,getuid());exit(81);}}while(0)
 static atomic_bool done;
+static int watchdog_iterations=2000,property_wait_seconds=5;
 static void *watchdog(void *unused) {
-    (void)unused;for(int i=0;i<2000;++i){if(atomic_load(&done))return NULL;usleep(10000);}
+    (void)unused;for(int i=0;i<watchdog_iterations;++i){if(atomic_load(&done))return NULL;usleep(10000);}
     fputs("SERVICE_BRIDGE_TIMEOUT\n",stderr);_exit(82);
 }
 static void *create(void *state){return state;}
@@ -67,16 +68,34 @@ static AIBinder *discover(struct platform_api *api,AIBinder_Class *type) {
     }
     CHECK(binder && AIBinder_associateClass(binder,type));return binder;
 }
+struct property_value {uint32_t serial;bool ready;};
+static void read_property(void *cookie,const char *name,const char *value,uint32_t serial) {
+    (void)name;
+    struct property_value *result=cookie;result->serial=serial;result->ready=strcmp(value,"true")==0;
+}
 static void wait_property(const char *name) {
-    char ready[PROP_VALUE_MAX]={0};
-    for(int i=0;i<1000;++i){if(__system_property_get(name,ready)==4 && strcmp(ready,"true")==0)return;usleep(5000);}
-    CHECK(false);
+    const prop_info *property=__system_property_find(name);CHECK(property);
+    struct timespec now;CHECK(clock_gettime(CLOCK_MONOTONIC,&now)==0);
+    int64_t deadline=(int64_t)now.tv_sec*1000000000+now.tv_nsec+(int64_t)property_wait_seconds*1000000000;
+    for(;;) {
+        struct property_value value;uint32_t next;
+        __system_property_read_callback(property,read_property,&value);
+        if(value.ready)return;
+        CHECK(clock_gettime(CLOCK_MONOTONIC,&now)==0);
+        int64_t remaining=deadline-((int64_t)now.tv_sec*1000000000+now.tv_nsec);CHECK(remaining>0);
+        struct timespec timeout={.tv_sec=remaining/1000000000,.tv_nsec=remaining%1000000000};
+        (void)__system_property_wait(property,value.serial,&next,&timeout);
+    }
 }
 static unsigned deaths;
 static void died(void *cookie){CHECK(cookie==&deaths);++deaths;}
 int main(int argc,char **argv) {
     CHECK(argc==2 && setvbuf(stdout,NULL,_IOLBF,0)==0);
-    bool controller=strcmp(argv[1],"controller")==0;CHECK(controller || strcmp(argv[1],"client")==0);
+    bool managed=strcmp(argv[1],"framework-controller")==0;
+    bool controller=managed || strcmp(argv[1],"controller")==0;CHECK(controller || strcmp(argv[1],"client")==0);
+    // Framework initialization precedes the application readiness handshake.
+    // Native-only mode retains its existing 20-second watchdog and 5-second wait.
+    if(managed){watchdog_iterations=24000;property_wait_seconds=180;}
     CHECK(getuid()==(controller?1002:10000));
     pthread_t timeout;CHECK(pthread_create(&timeout,NULL,watchdog,NULL)==0);
     struct platform_api api;CHECK(platform_api_open(&api) && api.pool_max(0));

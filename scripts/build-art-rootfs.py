@@ -18,13 +18,16 @@ def service_profiles(mode):
     profiles = [dict(uid=1000, executable="servicemanager", args=[], binder_managers=1,
                      service_grants=[(3, manager), (4, "u:r:bndroid_profile_0:s0")],
                      property_grants=["servicemanager.ready"], control_grants=[])]
-    if mode == "framework-bridge":
+    if mode in ("framework-bridge", "framework-client"):
         profiles += [dict(uid=1001, executable="bndroid-runtime-service", args=[], binder_managers=0,
                           service_grants=[(2, manager), (3, runtime)], property_grants=[], control_grants=[]),
                      dict(uid=10000, executable="service-bridge-client", args=["client"], binder_managers=0,
                           service_grants=[(2, manager), (2, runtime)], property_grants=["bndroid.runtime.client_ready"], control_grants=[]),
                      dict(uid=1002, executable="service-bridge-client", args=["controller"], binder_managers=0,
                           service_grants=[(2, manager), (2, runtime)], property_grants=[], control_grants=[runtime])]
+        if mode == "framework-client":
+            profiles[2].update(executable="app_process64", args=[])
+            profiles[3]["args"] = ["framework-controller"]
     else:
         profiles.append(dict(uid=10000, executable="launch-probe", args=["lookup" if mode == "framework-services" else "app"],
                              binder_managers=0, service_grants=[(2, manager)], property_grants=[], control_grants=[]))
@@ -40,7 +43,7 @@ def main():
     parser.add_argument("--runtime", required=True, type=Path)
     parser.add_argument("--dex", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--mode", choices=("java", "managed", "memory", "memfd", "binder", "poll", "properties", "help", "framework", "framework-help", "framework-identities", "framework-services", "framework-bridge", "signals", "signal-bad-frame", "signal-bad-pc", "signal-bad-fp", "signal-default", "signal-guard"), default="java")
+    parser.add_argument("--mode", choices=("java", "managed", "memory", "memfd", "binder", "poll", "properties", "help", "framework", "framework-help", "framework-identities", "framework-services", "framework-bridge", "framework-client", "signals", "signal-bad-frame", "signal-bad-pc", "signal-bad-fp", "signal-default", "signal-guard"), default="java")
     args = parser.parse_args()
     provenance = json.loads((args.runtime / "art-provenance.json").read_text())
     framework = args.mode.startswith("framework")
@@ -48,8 +51,8 @@ def main():
         raise SystemExit("Framework mode requires inputs extracted with --include-framework")
     if framework and not framework_inputs_complete(provenance):
         raise SystemExit("Framework metadata/JNI inputs are incomplete; re-run extraction with --resume-framework --include-framework")
-    bridge = args.mode == "framework-bridge"
-    service_mode = args.mode in ("framework-identities", "framework-services", "framework-bridge")
+    bridge = args.mode in ("framework-bridge", "framework-client")
+    service_mode = args.mode in ("framework-identities", "framework-services", "framework-bridge", "framework-client")
     if service_mode and not service_inputs_complete(provenance):
         raise SystemExit("Service mode requires verified inputs from extract-android-services.py")
     inputs = {}
@@ -93,7 +96,7 @@ def main():
                 raise SystemExit(f"Bionic alias differs from canonical input: {name}")
     inputs["system/framework/bndroid-probe.dex"] = args.dex.read_bytes()
     if framework:
-        inputs["system/framework/bndroid-probe.dex"] = (args.dex.parent / "framework.dex").read_bytes()
+        inputs["system/framework/bndroid-probe.dex"] = (args.dex.parent / ("framework-service.dex" if args.mode == "framework-client" else "framework.dex")).read_bytes()
     if framework or args.mode == "properties":
         properties = runtime_properties(provenance["source"])
         if service_mode:
@@ -196,6 +199,8 @@ def main():
         arguments = [arguments[0], "/system/bin/app_process64"]
         arguments += ["-help"] if args.mode == "framework-help" else ["-Xint", "-Xusejit:false", "-Xms4m", "-Xmx16m", "-Xnoimage-dex2oat"]
         arguments += ["/system/bin", "--application", "--nice-name=bndroid.framework", "FrameworkMain"]
+        if args.mode == "framework-client":
+            arguments[-1] = "FrameworkServiceMain"
         environment += ["BOOTCLASSPATH=" + ":".join(provenance["framework"]["bootclasspath"]),
                         "DEX2OATBOOTCLASSPATH=" + compiler_classpath,
                         "CLASSPATH=/system/framework/bndroid-probe.dex"]
@@ -203,6 +208,8 @@ def main():
     if service_mode:
         launch = []
         profiles = service_profiles(args.mode)
+        if args.mode == "framework-client":
+            profiles[2]["args"] = arguments[2:]
         for profile in profiles:
             launch += [f"profile={profile['index']}", f"uid={profile['uid']}", f"gid={profile['gid']}",
                        f"binder_managers={profile['binder_managers']}",
@@ -211,7 +218,7 @@ def main():
             launch += [f"service_grant={rights} {target}" for rights, target in profile["service_grants"]]
             launch += ["property_grant=" + name for name in profile["property_grants"]]
             launch += ["control_grant=" + target for target in profile["control_grants"]]
-            launch += ["env=" + entry for entry in environment if not entry.startswith(("CLASSPATH=", "BOOTCLASSPATH=", "DEX2OATBOOTCLASSPATH="))]
+            launch += ["env=" + entry for entry in environment if profile["executable"] == "/system/bin/app_process64" or not entry.startswith(("CLASSPATH=", "BOOTCLASSPATH=", "DEX2OATBOOTCLASSPATH="))]
     args.output.with_suffix(".launch").write_text("\n".join(launch) + "\n")
     receipt = {"source": provenance, "rootfs_sha256": hashlib.sha256(args.output.read_bytes()).hexdigest(),
                "dex_sha256": hashlib.sha256(selected_dex).hexdigest(), "mode": args.mode,
