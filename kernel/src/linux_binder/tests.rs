@@ -306,7 +306,8 @@ fn invalid_credentials_unmap_exhaustion_and_unsupported_objects_fail_closed() {
     assert_eq!(r.set_manager(c, 0, 0), Err(16));
     let mut bad = data(b"x", 0);
     bad.offsets_size = 8;
-    assert_eq!(r.transact(c, 3, bad, vec![1]), Err(95));
+    r.transact(c, 3, bad, vec![1]).unwrap();
+    assert_eq!(opcode(&receive(&mut r, c, 3)), BR_FAILED_REPLY);
     r.transact(c, 3, data(&[1; 4096], 0), vec![1; 4096])
         .unwrap();
     receive(&mut r, c, 3);

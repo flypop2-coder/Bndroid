@@ -67,7 +67,7 @@ def completion_status(text, mode):
             if not poll or any(poll.get(key) != "0" for key in ("live", "watches")) or any(int(poll.get(key, 0)) < 2 for key in ("eventfds", "epolls", "reads", "writes", "delivered", "blocked", "ready")):
                 return "missing-framework-wake-proof"
             binder = parse_marker(text, "LINUX_BINDER_OK")
-            if not binder or any(binder.get(key) != "0" for key in ("connections", "transactions", "buffers")) or int(binder.get("opened", 0)) < 4 or binder["opened"] != binder.get("closed") or int(binder.get("flush_returns", 0)) < 2:
+            if not binder or any(binder.get(key) != "0" for key in ("connections", "transactions", "buffers", "nodes", "references", "call_frames")) or int(binder.get("opened", 0)) < 4 or binder["opened"] != binder.get("closed") or int(binder.get("flush_returns", 0)) < 2:
                 return "missing-framework-shutdown-proof"
             if int(poll["closed"]) != int(poll["eventfds"]) + int(poll["epolls"]):
                 return "missing-framework-shutdown-proof"
@@ -76,11 +76,15 @@ def completion_status(text, mode):
     elif mode == "binder":
         if complete_lines(text, expected.rstrip("\n")) != 1 or complete_lines(text, "BINDER_SERVER_OK identity=1 reply=1 oneway=3 receive_pool=1 readonly=1 domains=3") != 1:
             return "missing-binder-process-proof"
+        for marker in ("BINDER_OBJECT_CLIENT_OK export=2 handles=2 roundtrip=1 malformed=3 deaths=2 refs=1",
+                       "BINDER_OBJECT_SERVER_OK export=2 callback=1 nested=2 per_node_oneway=1 refs=1"):
+            if complete_lines(text, marker) != 1:
+                return "missing-binder-object-proof"
         try:
             binder = parse_marker(text, "LINUX_BINDER_OK")
-            if not binder or any(binder.get(key) != "0" for key in ("connections", "transactions", "buffers")):
+            if not binder or any(binder.get(key) != "0" for key in ("connections", "transactions", "buffers", "nodes", "references", "call_frames")):
                 return "invalid-binder-cleanup"
-            if any(int(binder.get(key, 0)) < count for key, count in (("opened", 5), ("submitted", 8), ("replied", 3), ("oneway", 3), ("failed", 5), ("deaths", 1), ("flush_returns", 1))) or binder["opened"] != binder["closed"]:
+            if any(int(binder.get(key, 0)) < count for key, count in (("opened", 5), ("submitted", 16), ("replied", 8), ("oneway", 6), ("failed", 10), ("deaths", 3), ("flush_returns", 1), ("objects", 7), ("reference_events", 10), ("nested", 2), ("max_depth", 3))) or binder["opened"] != binder["closed"]:
                 return "missing-binder-transport-proof"
         except (ValueError, KeyError):
             return "invalid-binder-record"

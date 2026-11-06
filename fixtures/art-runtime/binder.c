@@ -21,6 +21,11 @@ static int control_fd, request_fd;
 static _Atomic int phase;
 static volatile sig_atomic_t faults, signals_seen;
 static int flush_seen;
+static uint32_t object_handles[2];
+static unsigned ref_incs, ref_acquires, ref_releases, ref_decs;
+#define CLIENT_PTR 0x123400
+#define SERVER_PTR 0x567800
+#define COOKIE(p) ((p)+0x55)
 static void *pool;
 struct payload { uint32_t pid, serial; uint64_t value; };
 struct event { uint32_t command; struct binder_transaction_data transaction; uint64_t cookie; };
@@ -53,6 +58,14 @@ static struct event receive_from(int fd, int fallback) {
             if (code==BR_TRANSACTION || code==BR_REPLY) { CHECK(!result.command); memcpy(&result.transaction,bytes+at,sizeof(result.transaction)); result.command=code; }
             else if (code==BR_DEAD_BINDER || code==BR_CLEAR_DEATH_NOTIFICATION_DONE) { CHECK(!result.command); memcpy(&result.cookie,bytes+at,8); result.command=code; }
             else if (code==BR_DEAD_REPLY || code==BR_FAILED_REPLY) { CHECK(!result.command); result.command=code; }
+            else if (code==BR_INCREFS || code==BR_ACQUIRE || code==BR_RELEASE || code==BR_DECREFS) {
+                struct binder_ptr_cookie ref; memcpy(&ref,bytes+at,sizeof(ref));
+                CHECK((ref.ptr==CLIENT_PTR || ref.ptr==CLIENT_PTR+0x100 || ref.ptr==SERVER_PTR || ref.ptr==SERVER_PTR+0x100) && ref.cookie==COOKIE(ref.ptr));
+                if(code==BR_INCREFS) {++ref_incs;command(fd,BC_INCREFS_DONE,&ref,sizeof(ref));}
+                else if(code==BR_ACQUIRE) {++ref_acquires;command(fd,BC_ACQUIRE_DONE,&ref,sizeof(ref));}
+                else if(code==BR_RELEASE) ++ref_releases;
+                else ++ref_decs;
+            }
             else CHECK(code==BR_NOOP || code==BR_TRANSACTION_COMPLETE);
             at+=size;
         }
@@ -65,6 +78,93 @@ static void release_buffer(int fd, const struct event *event) {
     binder_uintptr_t address=event->transaction.data.ptr.buffer;
     CHECK(address>=(uintptr_t)pool && address+event->transaction.data_size<=(uintptr_t)pool+POOL_SIZE);
     command(fd,BC_FREE_BUFFER,&address,sizeof(address));
+}
+static struct flat_binder_object local_object(uintptr_t ptr, int strong) {
+    return (struct flat_binder_object){.hdr.type=strong?BINDER_TYPE_BINDER:BINDER_TYPE_WEAK_BINDER,
+        .flags=FLAT_BINDER_FLAG_ACCEPTS_FDS,.binder=ptr,.cookie=COOKIE(ptr)};
+}
+static struct flat_binder_object remote_object(uint32_t handle, int strong) {
+    return (struct flat_binder_object){.hdr.type=strong?BINDER_TYPE_HANDLE:BINDER_TYPE_WEAK_HANDLE,
+        .flags=FLAT_BINDER_FLAG_ACCEPTS_FDS,.handle=handle};
+}
+static void transmit_objects(int fd,uint32_t operation,uint32_t handle,uint32_t code,uint32_t flags,
+                             struct flat_binder_object *objects,size_t count) {
+    binder_size_t offsets[4];CHECK(count<=4);
+    for(size_t i=0;i<count;++i) offsets[i]=i*sizeof(*objects);
+    struct binder_transaction_data data={.target.handle=handle,.code=code,.flags=flags,
+        .data_size=count*sizeof(*objects),.offsets_size=count*sizeof(*offsets),
+        .data.ptr.buffer=(uintptr_t)objects,.data.ptr.offsets=(uintptr_t)offsets};
+    // Only target.handle's low 32 bits are meaningful on a write. Deliberately
+    // poison the LP64 union padding instead of depending on compiler choices.
+    data.target.ptr=0xaabbccdd00000000ULL|handle;
+    command(fd,operation,&data,sizeof(data));
+}
+static struct flat_binder_object get_object(const struct event *event,size_t index,size_t count) {
+    CHECK(event->transaction.data_size==count*sizeof(struct flat_binder_object) && event->transaction.offsets_size==count*8);
+    uintptr_t base=event->transaction.data.ptr.buffer,offsets=event->transaction.data.ptr.offsets;
+    CHECK(base>=(uintptr_t)pool && offsets==base+count*sizeof(struct flat_binder_object) && offsets+count*8<=(uintptr_t)pool+POOL_SIZE);
+    binder_size_t offset;memcpy(&offset,(void *)(offsets+index*8),8);CHECK(offset==index*sizeof(struct flat_binder_object));
+    struct flat_binder_object object;memcpy(&object,(void *)(base+offset),sizeof(object));return object;
+}
+static uint32_t retain_object(int fd,struct flat_binder_object object,int strong) {
+    CHECK(object.hdr.type==(strong?BINDER_TYPE_HANDLE:BINDER_TYPE_WEAK_HANDLE) && object.handle>0 && object.cookie==0);
+    command(fd,BC_INCREFS,&object.handle,4);if(strong) command(fd,BC_ACQUIRE,&object.handle,4);return object.handle;
+}
+static void object_client(int fd) {
+    struct flat_binder_object objects[4]={local_object(CLIENT_PTR,1),local_object(CLIENT_PTR+0x100,0)};
+    transmit_objects(fd,BC_TRANSACTION,0,60,0,objects,2);
+    struct event response=receive(fd);if(response.command!=BR_REPLY) fprintf(stderr,"BINDER_OBJECT_RESPONSE command=%x\n",response.command);CHECK(response.command==BR_REPLY);
+    for(size_t i=0;i<2;++i) object_handles[i]=retain_object(fd,get_object(&response,i,4),1);
+    for(size_t i=0;i<2;++i) {struct flat_binder_object o=get_object(&response,i+2,4);
+        CHECK(o.hdr.type==(i?BINDER_TYPE_WEAK_BINDER:BINDER_TYPE_BINDER) && o.binder==CLIENT_PTR+i*0x100 && o.cookie==COOKIE(o.binder));}
+    release_buffer(fd,&response);
+    // Partial translation must roll back the first export when the second
+    // object is unsupported or overlaps the first object.
+    struct flat_binder_object bad[2]={local_object(CLIENT_PTR+0x200,1),{.hdr.type=BINDER_TYPE_FD,.handle=fd}};
+    transmit_objects(fd,BC_TRANSACTION,object_handles[0],61,0,bad,2);CHECK(receive(fd).command==BR_FAILED_REPLY);
+    bad[1]=local_object(CLIENT_PTR+0x300,1);binder_size_t offsets[2]={0,4};
+    struct binder_transaction_data invalid={.target.handle=object_handles[0],.data_size=sizeof(bad),.offsets_size=sizeof(offsets),
+        .data.ptr.buffer=(uintptr_t)bad,.data.ptr.offsets=(uintptr_t)offsets};
+    command(fd,BC_TRANSACTION,&invalid,sizeof(invalid));CHECK(receive(fd).command==BR_FAILED_REPLY);
+    transmit_objects(fd,BC_TRANSACTION,0x7fffffff,61,0,NULL,0);CHECK(receive(fd).command==BR_FAILED_REPLY);
+    for(size_t i=0;i<2;++i) {struct binder_handle_cookie d={.handle=object_handles[i],.cookie=0xcafe0000+i};
+        command(fd,BC_REQUEST_DEATH_NOTIFICATION,&d,sizeof(d));}
+    objects[0]=remote_object(object_handles[0],1);
+    transmit_objects(fd,BC_TRANSACTION,object_handles[0],61,0,objects,1);
+    response=receive(fd);CHECK(response.command==BR_REPLY);release_buffer(fd,&response);
+    for(size_t i=0;i<3;++i) transmit_objects(fd,BC_TRANSACTION,object_handles[i==2?1:0],62,TF_ONE_WAY,NULL,0);
+    transmit_objects(fd,BC_TRANSACTION,object_handles[1],63,0,NULL,0);
+    struct event callback=receive(fd);CHECK(callback.command==BR_TRANSACTION && callback.transaction.code==64 && callback.transaction.target.ptr==CLIENT_PTR && callback.transaction.cookie==COOKIE(CLIENT_PTR));
+    CHECK(callback.transaction.sender_pid>0 && callback.transaction.sender_pid!=getpid() && callback.transaction.sender_euid==(uint32_t)getuid());
+    release_buffer(fd,&callback);
+    // Re-enter the waiting service before returning the first callback. Both
+    // sides must receive this on their original synchronous call threads.
+    transmit_objects(fd,BC_TRANSACTION,object_handles[0],65,0,NULL,0);
+    response=receive(fd);CHECK(response.command==BR_REPLY);release_buffer(fd,&response);
+    transmit_objects(fd,BC_REPLY,0,64,0,NULL,0);
+    response=receive(fd);CHECK(response.command==BR_REPLY);release_buffer(fd,&response);
+}
+static void object_server(int fd,const struct event *request) {
+    uint32_t handles[2];handles[0]=retain_object(fd,get_object(request,0,2),1);handles[1]=retain_object(fd,get_object(request,1,2),0);
+    release_buffer(fd,request);
+    struct flat_binder_object objects[4]={local_object(SERVER_PTR,1),local_object(SERVER_PTR+0x100,1),remote_object(handles[0],1),remote_object(handles[1],0)};
+    transmit_objects(fd,BC_REPLY,0,60,0,objects,4);
+    struct event next=receive(fd);CHECK(next.command==BR_TRANSACTION && next.transaction.code==61 && next.transaction.target.ptr==SERVER_PTR && next.transaction.cookie==COOKIE(SERVER_PTR));
+    struct flat_binder_object local=get_object(&next,0,1);CHECK(local.hdr.type==BINDER_TYPE_BINDER && local.binder==SERVER_PTR && local.cookie==COOKIE(SERVER_PTR));
+    release_buffer(fd,&next);transmit_objects(fd,BC_REPLY,0,61,0,NULL,0);
+    struct event first=receive(fd);CHECK(first.command==BR_TRANSACTION && first.transaction.code==62 && first.transaction.target.ptr==SERVER_PTR && first.transaction.sender_pid==0);
+    next=receive(fd);CHECK(next.command==BR_TRANSACTION && next.transaction.code==62 && next.transaction.target.ptr==SERVER_PTR+0x100 && next.transaction.sender_pid==0);
+    release_buffer(fd,&first);release_buffer(fd,&next);
+    next=receive(fd);CHECK(next.command==BR_TRANSACTION && next.transaction.code==62 && next.transaction.target.ptr==SERVER_PTR && next.transaction.sender_pid==0);release_buffer(fd,&next);
+    next=receive(fd);CHECK(next.command==BR_TRANSACTION && next.transaction.code==63 && next.transaction.target.ptr==SERVER_PTR+0x100);release_buffer(fd,&next);
+    transmit_objects(fd,BC_TRANSACTION,handles[0],64,0,NULL,0);
+    next=receive(fd);CHECK(next.command==BR_TRANSACTION && next.transaction.code==65 && next.transaction.target.ptr==SERVER_PTR);
+    release_buffer(fd,&next);transmit_objects(fd,BC_REPLY,0,65,0,NULL,0);
+    next=receive(fd);CHECK(next.command==BR_REPLY);release_buffer(fd,&next);
+    transmit_objects(fd,BC_REPLY,0,63,0,NULL,0);
+    command(fd,BC_RELEASE,&handles[0],4);for(size_t i=0;i<2;++i) command(fd,BC_DECREFS,&handles[i],4);
+    CHECK(ref_incs==2 && ref_acquires==2);
+    puts("BINDER_OBJECT_SERVER_OK export=2 callback=1 nested=2 per_node_oneway=1 refs=1");
 }
 static void *waiting_reply(void *unused) {
     (void)unused;
@@ -132,13 +232,26 @@ static void client(int fd) {
     struct payload finish={(uint32_t)getpid(),99,0x5555};
     transmit(control_fd,BC_TRANSACTION,99,0,&finish,sizeof(finish));
     reply=receive(control_fd); CHECK(reply.command==BR_REPLY); release_buffer(control_fd,&reply);
+    object_client(control_fd);
     // The service exits with this synchronous request still outstanding.
     transmit(control_fd,BC_TRANSACTION,100,0,&finish,sizeof(finish));
     CHECK(receive(control_fd).command==BR_DEAD_REPLY);
-    struct event notified=receive(control_fd); CHECK(notified.command==BR_DEAD_BINDER && notified.cookie==death.cookie);
-    command(control_fd,BC_CLEAR_DEATH_NOTIFICATION,&death,sizeof(death));
-    command(control_fd,BC_DEAD_BINDER_DONE,&death.cookie,8);
-    CHECK(receive(control_fd).command==BR_CLEAR_DEATH_NOTIFICATION_DONE);
+    unsigned notified_mask=0;
+    for(size_t i=0;i<3;++i) {
+        struct event notified=receive(control_fd);CHECK(notified.command==BR_DEAD_BINDER);
+        struct binder_handle_cookie d=death;unsigned bit=1;
+        if(notified.cookie!=death.cookie) {CHECK(notified.cookie>=0xcafe0000 && notified.cookie<0xcafe0002);
+            size_t index=notified.cookie-0xcafe0000;d.handle=object_handles[index];d.cookie=notified.cookie;bit=2U<<index;}
+        CHECK(!(notified_mask&bit));notified_mask|=bit;
+        command(control_fd,BC_CLEAR_DEATH_NOTIFICATION,&d,sizeof(d));command(control_fd,BC_DEAD_BINDER_DONE,&d.cookie,8);
+        struct event clear=receive(control_fd);CHECK(clear.command==BR_CLEAR_DEATH_NOTIFICATION_DONE && clear.cookie==d.cookie);
+    }
+    CHECK(notified_mask==7 && ref_incs==2 && ref_acquires==1 && ref_releases==1 && ref_decs==2);
+    for(size_t i=0;i<2;++i) {
+        transmit_objects(control_fd,BC_TRANSACTION,object_handles[i],61,0,NULL,0);CHECK(receive(control_fd).command==BR_DEAD_REPLY);
+        command(control_fd,BC_RELEASE,&object_handles[i],4);command(control_fd,BC_DECREFS,&object_handles[i],4);
+    }
+    puts("BINDER_OBJECT_CLIENT_OK export=2 handles=2 roundtrip=1 malformed=3 deaths=2 refs=1");
     transmit(control_fd,BC_TRANSACTION,101,0,&finish,sizeof(finish)); CHECK(receive(control_fd).command==BR_DEAD_REPLY);
     command(control_fd,BC_RELEASE,&handle,4); command(control_fd,BC_DECREFS,&handle,4);
     CHECK(munmap(pool,POOL_SIZE)==0 && close(control_fd)==0);
@@ -159,6 +272,7 @@ static void server(int fd) {
         struct event request=receive(fd); CHECK(request.command==BR_TRANSACTION);
         CHECK(request.transaction.sender_euid==(uint32_t)getuid());
         uint32_t code=request.transaction.code;
+        if (code==60) {object_server(fd,&request);continue;}
         if (code==40) {
             CHECK(oneway==3 && request.transaction.sender_pid==(int32_t)client_pid && request.transaction.data_size==8201);
             unsigned char response[8201]; const unsigned char *data=(void *)(uintptr_t)request.transaction.data.ptr.buffer;

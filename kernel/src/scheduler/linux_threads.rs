@@ -822,7 +822,7 @@ pub fn evidence(marker: &str) {
         io::evidence();
         let stats = bndroid_kernel::linux_binder::with(|r| r.stats());
         crate::kprintln!(
-            "LINUX_BINDER_OK opened={} closed={} submitted={} replied={} oneway={} failed={} deaths={} connections={} transactions={} buffers={} first_sender={} first_receiver={} flushes={} flush_returns={}",
+            "LINUX_BINDER_OK opened={} closed={} submitted={} replied={} oneway={} failed={} deaths={} connections={} transactions={} buffers={} first_sender={} first_receiver={} flushes={} flush_returns={} nodes={} references={} objects={} reference_events={} nested={} max_depth={} call_frames={}",
             stats.opened,
             stats.closed,
             stats.submitted,
@@ -836,11 +836,25 @@ pub fn evidence(marker: &str) {
             stats.first_sender,
             stats.first_receiver,
             stats.flushes,
-            stats.flush_returns
+            stats.flush_returns,
+            stats.nodes,
+            stats.references,
+            stats.objects_translated,
+            stats.reference_events,
+            stats.nested,
+            stats.max_call_depth,
+            stats.call_frames
         );
         assert_eq!(
-            (stats.connections, stats.transactions, stats.buffers),
-            (0, 0, 0)
+            (
+                stats.connections,
+                stats.transactions,
+                stats.buffers,
+                stats.nodes,
+                stats.references,
+                stats.call_frames
+            ),
+            (0, 0, 0, 0, 0, 0)
         );
     }
     crate::kprintln!(

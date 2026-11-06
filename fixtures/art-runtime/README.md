@@ -42,10 +42,13 @@ read-only mapping faults, invalid user buffers, an outstanding call at service
 close and death notification/acknowledgment. It requires both zero-status exits,
 matching kernel process identities and zero live connections, transactions,
 buffers, threads, waits, pages, tables and file descriptions.
-`binder_transport_verified` only covers this initial context-manager byte
-transport. Exported Binder objects, FD transfer, nested calls, ServiceManager and
-app permission/capability policy remain incomplete. See
-[Binder Transport-0](../../docs/milestones/androidbox/BINDER_TRANSPORT_0.md).
+The object phase adds strong/weak exports, nonzero handles, object round trips,
+reference acknowledgments, two nested callbacks, per-object one-way ordering,
+malformed-transfer rollback and two additional death subscriptions. The verifier
+also requires zero live nodes, handle references and synchronous call frames.
+`binder_transport_verified` covers these bounded native transport operations;
+FD transfer, ServiceManager and app permission/capability policy remain open.
+See [Binder Objects-1](../../docs/milestones/androidbox/BINDER_OBJECTS_1.md).
 
 The `poll` mode runs two native generations through actual eventfd/epoll objects.
 It tests counter/semaphore behavior, vectored I/O, nested/edge/one-shot watches,

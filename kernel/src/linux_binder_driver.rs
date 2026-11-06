@@ -88,12 +88,14 @@ fn start(file: FileRef, tid: u32, request: u64, address: u64) -> Result<Call, i6
         SET_CONTEXT_MGR_EXT => {
             let mut b = [0; 24];
             runtime::copy_in(address, &mut b)?;
-            // Security-context, RT inheritance and FD ownership require the
-            // corresponding policy/transport. Do not advertise those options.
-            if u32_at(&b, 4) & !0xff != 0 {
+            // FD acceptance metadata is retained, but actual FD objects still
+            // fail. Security contexts and RT inheritance need separate policy.
+            if u32_at(&b, 4) & !0x1ff != 0 {
                 return Err(95);
             }
-            binder::with(|r| r.set_manager(id, u64_at(&b, 8), u64_at(&b, 16)))?;
+            binder::with(|r| {
+                r.set_manager_with_flags(id, u64_at(&b, 8), u64_at(&b, 16), u32_at(&b, 4))
+            })?;
         }
         THREAD_EXIT => binder::with(|r| r.thread_exit(id, tid)),
         WRITE_READ => return write_read(file, tid, address),
@@ -170,11 +172,14 @@ fn execute(file: &FileRef, tid: u32, command: u32, body: &[u8; 64]) -> Result<()
             let payload = (|| {
                 data.validate_payload()?;
                 let mut bytes = Vec::new();
-                bytes
-                    .try_reserve_exact(data.data_size as usize)
-                    .map_err(|_| 12)?;
-                bytes.resize(data.data_size as usize, 0);
-                runtime::copy_in(data.data, &mut bytes)?;
+                let length = data.payload_length()?;
+                bytes.try_reserve_exact(length).map_err(|_| 12)?;
+                bytes.resize(length, 0);
+                runtime::copy_in(data.data, &mut bytes[..data.data_size as usize])?;
+                if data.offsets_size != 0 {
+                    let at = (data.data_size as usize + 7) & !7;
+                    runtime::copy_in(data.offsets, &mut bytes[at..])?;
+                }
                 Ok(bytes)
             })();
             let result = match payload {
@@ -187,7 +192,28 @@ fn execute(file: &FileRef, tid: u32, command: u32, body: &[u8; 64]) -> Result<()
                 }),
                 Err(error) => Err(error),
             };
-            if result.is_err() {
+            let prepared_error = binder::with(|r| r.stats().last_transfer_error);
+            if result.is_ok() && prepared_error != 0 {
+                crate::kprintln!(
+                    "LINUX_BINDER_PREPARE_FAILED tid={} operation={} code={} data_bytes={} offsets_bytes={} errno={}",
+                    tid,
+                    command,
+                    data.code,
+                    data.data_size,
+                    data.offsets_size,
+                    prepared_error
+                );
+            }
+            if let Err(error) = result {
+                crate::kprintln!(
+                    "LINUX_BINDER_TRANSFER_FAILED tid={} operation={} code={} data_bytes={} offsets_bytes={} errno={}",
+                    tid,
+                    command,
+                    data.code,
+                    data.data_size,
+                    data.offsets_size,
+                    error
+                );
                 binder::with(|r| {
                     if command == BC_REPLY {
                         r.fail_reply(id, tid)
@@ -206,6 +232,9 @@ fn execute(file: &FileRef, tid: u32, command: u32, body: &[u8; 64]) -> Result<()
         }
         BC_INCREFS | BC_ACQUIRE | BC_RELEASE | BC_DECREFS => {
             binder::with(|r| r.reference(id, u32_at(body, 0), command))?
+        }
+        BC_INCREFS_DONE | BC_ACQUIRE_DONE => {
+            binder::with(|r| r.acknowledge(id, u64_at(body, 0), u64_at(body, 8), command))?
         }
         BC_REQUEST_DEATH => {
             binder::with(|r| r.request_death(id, u32_at(body, 0), u64_at(body, 4)))?
@@ -275,7 +304,13 @@ pub fn finish(call: &ReadCall, delivery: Delivery) -> Result<(), i64> {
         output(call.address, &io.encode())?;
         binder::with(|r| r.finish_delivery(id, &delivery))
     })();
-    if result.is_err() {
+    if let Err(error) = result {
+        crate::kprintln!(
+            "LINUX_BINDER_DELIVERY_FAILED tid={} bytes={} errno={}",
+            call.tid,
+            delivery.length,
+            error
+        );
         // A failed user copy must also honor CLEAR_BUF. The recipient owns
         // this reserved slot until discard; other buffers cannot reuse it.
         if binder::with(|r| r.validate_delivery(id, &delivery)).is_ok()

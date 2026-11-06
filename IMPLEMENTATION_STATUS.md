@@ -2,6 +2,30 @@
 
 This page records implemented behavior and validation, with a September 9, 2026 platform baseline and dated updates below. Historical test counts belong to the indicated development runs; they are not a claim that every historical gate was rerun during publication. The [complete original status log](docs/archive/originals/IMPLEMENTATION_STATUS.txt) preserves detailed evidence and earlier milestones. Future tasks belong only in [TODO.md](TODO.md).
 
+## Binder objects and nested callbacks update — November 6, 2026
+
+Binder now translates strong/weak objects into connection-scoped handles, restores
+local objects on round trips and manages explicit reference handshakes separately
+from receive-buffer holds. Retain acknowledgments precede sender completion;
+failed copies preserve reference/death notifications. One-way work is ordered per
+object. Synchronous callbacks return to the original waiting thread, with bounded
+call stacks, authenticated replies and descendant failure cleanup.
+
+The combined native gate exercises two nested callbacks, seven translated
+objects, ten reference events, independent one-way queues, malformed transfers,
+three deaths and complete process/resource cleanup (`check.x1QDbZ`). Full Framework
+passes both normal startup/shutdown generations (`check.b7VdzY`), and managed
+APK/GC/JNI plus eventfd/epoll regressions pass with unchanged disks. Host validation covers 1,158
+workspace tests, 427 Framework library tests and 34 Python checks; host/AArch64
+Clippy passes with warnings denied. Full evidence,
+failed diagnostics, regression results and current limits are recorded in
+[Binder Objects-1](docs/milestones/androidbox/BINDER_OBJECTS_1.md).
+
+FD/SG ownership, real ServiceManager and ActivityThread startup, per-app policy
+and Android graphics/service bridges remain open. This does not complete A1–A6
+or establish general Android application compatibility. Acquired binaries and
+runtime evidence remain local/ignored; the demo uses temporary disk storage.
+
 ## Framework Looper and normal shutdown update — November 6, 2026
 
 The full Framework command-line gate now passes with unmodified Android 16 app_process/AndroidRuntime/ART. Two cold launches complete Parcel/Bundle round trips, cross-thread Looper wakeups and delayed callbacks, return normally from Java, destroy the VM and exit zero. All 16 workers, event objects, Binder connections, pages, page tables and file descriptions are reclaimed. Evidence `.bndroid/art-runtime/check.qpDz2A` records 163,452 Linux calls, a 102,855-page peak, 335,965 reclaimed pages and an unchanged temporary disk. `framework_parcel_looper_verified=true`; `full_android_apps=false` and A1–A6 remain incomplete.

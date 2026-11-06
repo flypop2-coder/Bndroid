@@ -13,6 +13,8 @@ pub const BC_INCREFS: u32 = 0x4004_6304;
 pub const BC_ACQUIRE: u32 = 0x4004_6305;
 pub const BC_RELEASE: u32 = 0x4004_6306;
 pub const BC_DECREFS: u32 = 0x4004_6307;
+pub const BC_INCREFS_DONE: u32 = 0x4010_6308;
+pub const BC_ACQUIRE_DONE: u32 = 0x4010_6309;
 pub const BC_REGISTER_LOOPER: u32 = 0x0000_630b;
 pub const BC_ENTER_LOOPER: u32 = 0x0000_630c;
 pub const BC_EXIT_LOOPER: u32 = 0x0000_630d;
@@ -23,6 +25,10 @@ pub const BR_TRANSACTION: u32 = 0x8040_7202;
 pub const BR_REPLY: u32 = 0x8040_7203;
 pub const BR_DEAD_REPLY: u32 = 0x0000_7205;
 pub const BR_COMPLETE: u32 = 0x0000_7206;
+pub const BR_INCREFS: u32 = 0x8010_7207;
+pub const BR_ACQUIRE: u32 = 0x8010_7208;
+pub const BR_RELEASE: u32 = 0x8010_7209;
+pub const BR_DECREFS: u32 = 0x8010_720a;
 pub const BR_NOOP: u32 = 0x0000_720c;
 pub const BR_SPAWN_LOOPER: u32 = 0x0000_720d;
 pub const BR_DEAD_BINDER: u32 = 0x8008_720f;
@@ -30,6 +36,11 @@ pub const BR_CLEAR_DEATH_DONE: u32 = 0x8008_7210;
 pub const BR_FAILED_REPLY: u32 = 0x0000_7211;
 pub const ONE_WAY: u32 = 1;
 pub const MAX_MAPPING: u64 = 4 * 1024 * 1024;
+pub const MAX_OBJECTS: u64 = 256;
+pub const TYPE_BINDER: u32 = 0x7362_2a85;
+pub const TYPE_WEAK_BINDER: u32 = 0x7762_2a85;
+pub const TYPE_HANDLE: u32 = 0x7368_2a85;
+pub const TYPE_WEAK_HANDLE: u32 = 0x7768_2a85;
 
 pub fn u32_at(bytes: &[u8], at: usize) -> u32 {
     u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap())
@@ -144,15 +155,30 @@ impl Transaction {
         b
     }
     pub fn validate_payload(self) -> Result<(), i64> {
-        // Object/FD translation and SG buffers need capability ownership. They
-        // are rejected explicitly until that transport is implemented.
-        if self.offsets_size != 0 || self.flags & !(ONE_WAY | 8 | 16 | 32) != 0 {
+        if self.flags & !(ONE_WAY | 8 | 16 | 32) != 0 {
             return Err(95);
         }
-        if self.data_size > MAX_MAPPING || self.data.checked_add(self.data_size).is_none() {
+        if self.data_size > MAX_MAPPING
+            || self.data.checked_add(self.data_size).is_none()
+            || !self.offsets_size.is_multiple_of(8)
+            || self.offsets_size > MAX_OBJECTS * 8
+            || self.offsets.checked_add(self.offsets_size).is_none()
+            || self.payload_length()? as u64 > MAX_MAPPING
+        {
             return Err(22);
         }
         Ok(())
+    }
+    pub fn payload_length(self) -> Result<usize, i64> {
+        if self.offsets_size == 0 {
+            return usize::try_from(self.data_size).map_err(|_| 22);
+        }
+        self.data_size
+            .checked_add(7)
+            .map(|n| n & !7)
+            .and_then(|n| n.checked_add(self.offsets_size))
+            .and_then(|n| usize::try_from(n).ok())
+            .ok_or(22)
     }
 }
 
@@ -161,6 +187,7 @@ pub fn command_bytes(command: u32) -> Result<usize, i64> {
         BC_TRANSACTION | BC_REPLY => 64,
         BC_FREE_BUFFER | BC_DEAD_DONE => 8,
         BC_INCREFS | BC_ACQUIRE | BC_RELEASE | BC_DECREFS => 4,
+        BC_INCREFS_DONE | BC_ACQUIRE_DONE => 16,
         BC_REGISTER_LOOPER | BC_ENTER_LOOPER | BC_EXIT_LOOPER => 0,
         BC_REQUEST_DEATH | BC_CLEAR_DEATH => 12,
         _ => return Err(22),

@@ -43,5 +43,6 @@ Public Markdown documentation is maintained in English. Paths already establishe
 - [Framework runtime JNI dependencies](milestones/androidbox/FRAMEWORK_JNI_0.md)
 - [Initial Binder byte transport and Framework Parcel progress](milestones/androidbox/BINDER_TRANSPORT_0.md)
 - [Framework Looper, event notification and normal VM shutdown](milestones/androidbox/FRAMEWORK_LOOPER_0.md)
+- [Binder objects, handle ownership and nested callbacks](milestones/androidbox/BINDER_OBJECTS_1.md)
 
 Historical pages report their original profile and validation date, not universal compatibility or a fresh test run. See [the archive policy](archive/README.md) for source preservation.
