@@ -40,6 +40,8 @@ def main():
     parser.add_argument("--system-image", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--include-art", action="store_true", help="Also inventory and extract bounded ART/core-Java runtime inputs")
+    parser.add_argument("--include-framework", action="store_true", help="Include ART plus the source Framework boot jars and app_process dependencies")
+    parser.add_argument("--resume-framework", action="store_true", help="Resume an interrupted Framework extension of an already extracted ART set")
     args = parser.parse_args()
     sdk, image, output = args.sdk.resolve(), args.system_image.resolve(), args.output.resolve()
     properties = (image / "source.properties").read_text()
@@ -48,7 +50,21 @@ def main():
     for required in (image / "system.img", sdk / "emulator/emulator", sdk / "platform-tools/adb"):
         if not required.is_file():
             raise SystemExit(f"Missing local SDK prerequisite: {required}")
-    output.mkdir(parents=True, exist_ok=False)
+    if args.resume_framework:
+        if not args.include_framework or not (output / "art-provenance.json").is_file():
+            raise SystemExit("--resume-framework requires --include-framework and an existing ART receipt")
+        from android_framework_inputs import validate_inputs
+        verified = validate_inputs(output)
+        previous = json.loads((output / "provenance.json").read_text())
+        if previous != verified["source"]:
+            raise SystemExit("ART and Bionic source receipts are inconsistent")
+        if previous["package_properties"] != properties:
+            raise SystemExit("Cannot resume from a different SDK system image")
+        if "framework" in verified:
+            print(f"FRAMEWORK_RUNTIME_ALREADY_COMPLETE path={output}", flush=True)
+            return
+    else:
+        output.mkdir(parents=True, exist_ok=False)
     process = None
     port = free_port()
     serial = f"emulator-{port}"
@@ -101,6 +117,13 @@ def main():
                 else:
                     raise TimeoutError("Temporary source emulator did not boot within 180 seconds")
                 fingerprint = command("shell", "getprop", "ro.build.fingerprint")
+                if args.resume_framework:
+                    if fingerprint != previous["build_fingerprint"]:
+                        raise RuntimeError("Cannot resume from a different source build fingerprint")
+                    from android_framework_inputs import extract_framework
+                    extract_framework(command, output, sdk)
+                    print(f"FRAMEWORK_RUNTIME_RESUME_OK source={fingerprint} path={output}", flush=True)
+                    return
                 files = {}
                 for filename in ("linker64", "libc.so", "libm.so", "libdl.so"):
                     subdirectory = "bin" if filename == "linker64" else "lib64/bionic"
@@ -115,9 +138,12 @@ def main():
                     shutil.copyfile(notice, output / "source-NOTICE.txt")
                     receipt["notice_sha256"] = hashlib.sha256(notice.read_bytes()).hexdigest()
                 (output / "provenance.json").write_text(json.dumps(receipt, indent=2) + "\n")
-                if args.include_art:
+                if args.include_art or args.include_framework:
                     from android_art_inputs import extract_art
                     extract_art(command, output, sdk, receipt)
+                if args.include_framework:
+                    from android_framework_inputs import extract_framework
+                    extract_framework(command, output, sdk)
                 print(f"BIONIC_RUNTIME_EXTRACT_OK source={fingerprint} path={output}", flush=True)
             finally:
                 # Terminate the Popen owner directly: never kill a possibly

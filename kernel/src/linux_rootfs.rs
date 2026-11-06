@@ -14,7 +14,9 @@ use core::{
 };
 
 use bndroid_kernel::linux_fs::{Archive, Kind, Node, Path};
-const ROOTFS_BYTES: usize = if cfg!(feature = "art-runtime") {
+const ROOTFS_BYTES: usize = if cfg!(feature = "framework-runtime") {
+    320 * 1024 * 1024
+} else if cfg!(feature = "art-runtime") {
     96 * 1024 * 1024
 } else {
     8 * 1024 * 1024

@@ -7,6 +7,7 @@ HELP = "dalvikvm: [options] class [argument ...]\nThe following ART arguments ar
 MEMORY = "ART_MEMORY_OK low_64m=1 protections=1 holes=1 shared_threads=1 kernel_isolation=1\n"
 MEMORY += "ART_PROC_OK stack=1 maps=1 counters=1 snapshots=1 large_read=1 shared_ro=1 mremap=1 log=1\n"
 MEMORY += "ART_PAGING_OK discard=1 rss=1 zero_fault=1 usercopy=1 protections=1 atomic_failure=1 cpu_time=1\n"
+MEMORY += "ART_REMAP_OK fixed=1 replaced=1 readonly=1 growth_zero=1 source_unmapped=1 atomic_failure=1\n"
 PAGING = "LINUX_PAGING_OK discarded=5000 demand_zero=3000\n"
 LOG = "ANDROID_LOG pid={} buffer=0 priority=4 tag=bndroid-probe message=PROC_LOG_TRANSPORT_OK\n"
 LOGS = LOG.format(4294967298) + LOG.format(8589934594)
@@ -19,6 +20,31 @@ PROCESS = "LINUX_PROCESS_EXIT pid=4294967298 code=0 native_handles=0\nLINUX_PROC
 
 
 class EvidenceTests(unittest.TestCase):
+    def test_framework_requires_both_native_operations_and_authenticated_process_logs(self):
+        def messages(pid):
+            return "".join(f"ANDROID_LOG pid={pid} buffer=0 priority=4 tag=bndroid-framework message={message}\n"
+                           for message in ("FRAMEWORK_STAGE parcel", "FRAMEWORK_STAGE looper",
+                                           "FRAMEWORK_MAIN_OK parcel=1 bundle=1 looper=1 delayed=1"))
+        log = messages(4294967298) + messages(8589934594) + PROCESS + PROOF
+        self.assertEqual(completion_status(log, "framework"), "framework-passed")
+        self.assertEqual(completion_status(log.replace("FRAMEWORK_STAGE looper", "wrong-stage"), "framework"), "missing-framework-stage")
+        self.assertEqual(completion_status(log.replace("ANDROID_LOG pid=8589934594", "ANDROID_LOG pid=13"), "framework"), "invalid-process-proof")
+        self.assertNotEqual(completion_status(HELP * 2 + PROCESS + PROOF, "framework"), "framework-passed")
+        self.assertNotEqual(completion_status(HELP * 2 + PROCESS + PROOF, "framework-help"), "framework-help-passed")
+        help_records = ""
+        for pid in (4294967298, 8589934594):
+            for priority, tag, message in ((3, "AndroidRuntime", ">>>>>> START com.android.internal.os.RuntimeInit uid 10000 <<<<<< "),
+                                           (4, "vm-printf", "dalvikvm: [options] class [argument ...] "),
+                                           (4, "AndroidRuntime", "VM exiting with result code 0.")):
+                help_records += f"ANDROID_LOG pid={pid} buffer=0 priority={priority} tag={tag} message={message}\n"
+        self.assertEqual(completion_status(help_records + PROCESS + PROOF, "framework-help"), "framework-help-passed")
+        self.assertEqual(completion_status(help_records.replace("VM exiting with result code 0.", "wrong-exit") + PROCESS + PROOF, "framework-help"), "missing-framework-frontend-proof")
+        properties = "ART_PROPERTIES_OK bionic_reader=1 callback=1 enumerate=1 wait=1 immutable=1\n"
+        property_process = PROCESS.replace("live=0 waiting=0", "live=0 waiting=0 waits=2 timeouts=2")
+        self.assertEqual(completion_status(properties * 2 + property_process + PROOF, "properties"), "properties-passed")
+        self.assertEqual(completion_status(properties * 2 + PROCESS + PROOF, "properties"), "missing-property-wait-proof")
+        self.assertNotEqual(completion_status(properties + PROCESS + PROOF, "properties"), "properties-passed")
+
     def test_managed_workload_requires_all_stages_and_real_reclaim_and_thread_cleanup(self):
         marker="ART_MANAGED_OK java_threads=3 monitors=1 interrupt=1 gc=1 jni=1 native_thread=1 clocks=1\n"
         marker+="ART_APK_INPUT_OK dex=apk native=apk namespace=isolated\n"
@@ -31,6 +57,7 @@ class EvidenceTests(unittest.TestCase):
         memory=MEMORY*2+LOGS+PROCESS+PROOF+PAGING
         self.assertEqual(completion_status(memory,"memory"),"memory-passed")
         self.assertEqual(completion_status(memory.replace("discarded=5000","discarded=0"),"memory"),"invalid-paging-proof")
+        self.assertEqual(completion_status(memory.replace("fixed=1", "fixed=0"),"memory"),"missing-fixed-remap-proof")
     def test_signal_proof_requires_returns_and_complete_thread_cleanup(self):
         log=SIGNALS*2+PROCESS+PROOF+SIGNAL_PROOF
         self.assertEqual(completion_status(log,"signals"),"signals-passed")

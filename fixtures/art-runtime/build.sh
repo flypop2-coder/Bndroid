@@ -9,6 +9,14 @@ mkdir -p "$OUT/classes" "$OUT/dex"
 javac --release 8 -d "$OUT/classes" "$ROOT/fixtures/art-runtime/Main.java"
 "$D8" --min-api 35 --output "$OUT/dex" "$OUT/classes/Main.class"
 cp "$OUT/dex/classes.dex" "$OUT/probe.dex"
+if [[ "${BNDROID_ART_MODE:-java}" == framework* ]]; then
+  mkdir -p "$OUT/framework-classes" "$OUT/framework-dex"
+  javac --release 8 -classpath "$SDK_ROOT/platforms/android-36/android.jar" \
+    -d "$OUT/framework-classes" "$ROOT/fixtures/art-runtime/FrameworkMain.java"
+  "$D8" --min-api 35 --lib "$SDK_ROOT/platforms/android-36/android.jar" \
+    --output "$OUT/framework-dex" "$OUT/framework-classes/FrameworkMain.class"
+  cp "$OUT/framework-dex/classes.dex" "$OUT/framework.dex"
+fi
 NDK_ROOT="${BNDROID_NDK_ROOT:-$SDK_ROOT/ndk/27.1.12297006}"
 case "$(uname -s)" in
   Darwin) HOST_TAG=darwin-x86_64 ;;
@@ -18,11 +26,16 @@ esac
 "$NDK_ROOT/toolchains/llvm/prebuilt/$HOST_TAG/bin/aarch64-linux-android35-clang" \
   -O2 -g -Wall -Wextra -Werror -pthread -fPIE -pie \
   -Wl,-z,max-page-size=4096 -Wl,-z,separate-loadable-segments \
-  "$ROOT/fixtures/art-runtime/memory.c" "$ROOT/fixtures/art-runtime/proc.c" "$ROOT/fixtures/art-runtime/paging.c" -o "$OUT/memory-probe"
+  "$ROOT/fixtures/art-runtime/memory.c" "$ROOT/fixtures/art-runtime/proc.c" "$ROOT/fixtures/art-runtime/paging.c" \
+  "$ROOT/fixtures/art-runtime/remap.c" -o "$OUT/memory-probe"
 "$NDK_ROOT/toolchains/llvm/prebuilt/$HOST_TAG/bin/aarch64-linux-android35-clang" \
   -O2 -g -Wall -Wextra -Werror -pthread -fPIE -pie \
   -Wl,-z,max-page-size=4096 -Wl,-z,separate-loadable-segments \
   "$ROOT/fixtures/art-runtime/signals.c" "$ROOT/fixtures/art-runtime/signals.S" -o "$OUT/signals-probe"
+"$NDK_ROOT/toolchains/llvm/prebuilt/$HOST_TAG/bin/aarch64-linux-android35-clang" \
+  -O2 -g -Wall -Wextra -Werror -fPIE -pie \
+  -Wl,-z,max-page-size=4096 -Wl,-z,separate-loadable-segments \
+  "$ROOT/fixtures/art-runtime/properties.c" -o "$OUT/properties-probe"
 if [[ "${BNDROID_ART_MODE:-java}" == managed ]]; then
   mkdir -p "$OUT/managed-classes" "$OUT/managed-dex"
   javac --release 8 -d "$OUT/managed-classes" "$ROOT/fixtures/art-runtime/ManagedMain.java"

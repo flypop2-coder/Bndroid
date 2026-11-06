@@ -181,6 +181,19 @@ pub fn reject_svc(frame: *mut TrapFrame) -> *mut TrapFrame {
 pub(crate) fn complete(frame: *mut TrapFrame, value: u64) -> *mut TrapFrame {
     #[cfg(feature = "linux-syscall-trace")]
     unsafe {
+        if value == errno(12) && matches!((*frame).x[8], 215 | 216 | 222 | 226) {
+            let (pages, tables, regions) =
+                crate::process::with_current_linux_address_space(|space| {
+                    space.linux_mapping_usage()
+                });
+            crate::kprintln!(
+                "LINUX_MEMORY_LIMIT pages={} tables={} regions={} heap_free={}",
+                pages,
+                tables,
+                regions,
+                crate::kernel_heap::stats().unwrap().free_bytes
+            );
+        }
         crate::kprintln!(
             "LINUX_SYSCALL_TRACE nr={} args={:#x},{:#x},{:#x},{:#x},{:#x},{:#x} result={:#x}",
             (*frame).x[8],
@@ -436,13 +449,10 @@ fn gettimeofday(address: u64, zone: u64) -> u64 {
 fn getrlimit(resource: u64, address: u64) -> u64 {
     let limit = match resource {
         3 => (crate::userboot::USER_STACK_END - crate::userboot::USER_STACK_START) as u64,
-        7 => {
-            if cfg!(feature = "bionic-dynamic-runtime") {
-                64
-            } else {
-                3
-            }
-        }
+        #[cfg(feature = "bionic-dynamic-runtime")]
+        7 => bndroid_kernel::linux_fd::CAPACITY as u64,
+        #[cfg(not(feature = "bionic-dynamic-runtime"))]
+        7 => 3,
         _ => return errno(EINVAL),
     };
     let mut bytes = [0; 16];
@@ -563,7 +573,9 @@ pub fn monitor() -> ! {
         }
         // Two cold interpreter launches of the upstream ART/core jars exceed
         // the native smoke test's 30 seconds. Keep a finite ART-specific bound.
-        let timeout_ticks = if cfg!(feature = "art-runtime") {
+        let timeout_ticks = if cfg!(feature = "framework-runtime") {
+            30000
+        } else if cfg!(feature = "art-runtime") {
             9000
         } else {
             3000

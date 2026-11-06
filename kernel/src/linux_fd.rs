@@ -10,7 +10,13 @@ use core::{
     sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering, fence},
 };
 
-pub const CAPACITY: usize = 64;
+// app_process's linker keeps hundreds of dependency files open while building
+// its load group. Smaller personalities retain the original descriptor bound.
+pub const CAPACITY: usize = if cfg!(feature = "framework-runtime") {
+    512
+} else {
+    64
+};
 pub const EBADF: i64 = 9;
 pub const ENOMEM: i64 = 12;
 pub const EINVAL: i64 = 22;
@@ -167,28 +173,24 @@ struct Descriptor {
     close_on_exec: bool,
 }
 pub struct Table {
-    entries: [Option<Descriptor>; CAPACITY],
+    // Process construction runs on a fixed kernel stack. Keep larger linker
+    // descriptor tables in fallibly allocated storage, not in copied frames.
+    entries: Vec<Option<Descriptor>>,
 }
 impl Table {
     pub const fn empty() -> Self {
         Self {
-            entries: [const { None }; CAPACITY],
+            entries: Vec::new(),
         }
     }
     pub fn standard() -> Result<Self, i64> {
         let mut result = Self::empty();
-        for (index, (target, flags)) in [
+        for (target, flags) in [
             (Target::Null, 0),
             (Target::Console, 1),
             (Target::Console, 1),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            result.entries[index] = Some(Descriptor {
-                file: FileRef::try_new(target, flags)?,
-                close_on_exec: false,
-            });
+        ] {
+            result.insert(FileRef::try_new(target, flags)?, 0, false)?;
         }
         Ok(result)
     }
@@ -231,6 +233,7 @@ impl Table {
         if first >= CAPACITY {
             return Err(EINVAL);
         }
+        self.ensure_storage()?;
         let index = self.entries[first..]
             .iter()
             .position(Option::is_none)
@@ -241,6 +244,15 @@ impl Table {
             close_on_exec,
         });
         Ok(index as u64)
+    }
+    fn ensure_storage(&mut self) -> Result<(), i64> {
+        if self.entries.is_empty() {
+            self.entries
+                .try_reserve_exact(CAPACITY)
+                .map_err(|_| ENOMEM)?;
+            self.entries.resize_with(CAPACITY, || None);
+        }
+        Ok(())
     }
     pub fn duplicate(&mut self, old: u64, minimum: u64, close_on_exec: bool) -> Result<u64, i64> {
         self.insert(self.file(old)?, minimum, close_on_exec)

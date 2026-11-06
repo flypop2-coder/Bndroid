@@ -28,12 +28,35 @@ def completion_status(text, mode):
         return None
     expected = {
         "memory": "ART_MEMORY_OK low_64m=1 protections=1 holes=1 shared_threads=1 kernel_isolation=1\n",
+        "properties": "ART_PROPERTIES_OK bionic_reader=1 callback=1 enumerate=1 wait=1 immutable=1\n",
         "help": "dalvikvm: [options] class [argument ...]\n",
+        "framework-help": "dalvikvm: [options] class [argument ...]\n",
+        "framework": "FRAMEWORK_MAIN_OK parcel=1 bundle=1 looper=1 delayed=1\n",
         "java": "ART_JAVA_CORE_OK sum=4950 exceptions=1 collections=1\n",
         "managed": "ART_MANAGED_OK java_threads=3 monitors=1 interrupt=1 gc=1 jni=1 native_thread=1 clocks=1\n",
         "signals": "ART_SIGNALS_OK handlers=1 altstack=1 registers=1 masks=1 realtime=1 faults=1 threads=1 restart=1 waits=1\n",
     }[mode]
-    if complete_lines(text, expected.rstrip("\n")) != 2 or (mode == "help" and complete_lines(text, "The following ART arguments are supported:") != 2):
+    if mode == "framework-help":
+        records = re.findall(r"^ANDROID_LOG pid=(\d+) buffer=0 priority=(\d+) tag=([^ ]+) message=(.*)\n", text, re.MULTILINE)
+        successes = [pid for pid, priority, tag, message in records
+                     if priority == "4" and tag == "vm-printf" and message.rstrip() == expected.rstrip()]
+        if len(successes) != 2 or len(set(successes)) != 2:
+            return "exited-without-expected-proof"
+        for owner in successes:
+            for level, message in (("3", ">>>>>> START com.android.internal.os.RuntimeInit uid 10000 <<<<<<"),
+                                   ("4", "VM exiting with result code 0.")):
+                if sum(pid == owner and priority == level and tag == "AndroidRuntime" and value.rstrip() == message
+                       for pid, priority, tag, value in records) != 1:
+                    return "missing-framework-frontend-proof"
+    elif mode == "framework":
+        messages = re.findall(r"^ANDROID_LOG pid=(\d+) buffer=0 priority=4 tag=bndroid-framework message=(.*)\n", text, re.MULTILINE)
+        successes = [pid for pid, message in messages if message == expected.rstrip("\n")]
+        if len(successes) != 2 or len(set(successes)) != 2:
+            return "exited-without-expected-proof"
+        if any(sum(pid == owner and message == "FRAMEWORK_STAGE " + stage for pid, message in messages) != 1
+               for owner in successes for stage in ("parcel", "looper")):
+            return "missing-framework-stage"
+    elif complete_lines(text, expected.rstrip("\n")) != 2 or (mode == "help" and complete_lines(text, "The following ART arguments are supported:") != 2):
         return "exited-without-expected-proof"
     required = {"abi": "70", "native_processes": "2", "native_exits": "2", "native_reaped": "2",
                 "remaining_processes": "1", "native_handles": "0", "live_anonymous_pages": "0",
@@ -43,8 +66,16 @@ def completion_status(text, mode):
     exits = re.findall(r"^LINUX_PROCESS_EXIT pid=(\d+) code=0 native_handles=0$", text, re.MULTILINE)
     if len(exits) != 2 or len(set(exits)) != 2 or not threads or any(threads.get(key) != "0" for key in ("live", "waiting")):
         return "invalid-process-proof"
+    if mode.startswith("framework") and set(successes) != set(exits):
+        return "invalid-process-proof"
     if not threads.get("created") or threads["created"] != threads.get("reaped"):
         return "invalid-thread-proof"
+    if mode == "properties":
+        try:
+            if int(threads.get("waits", 0)) < 2 or int(threads.get("timeouts", 0)) < 2:
+                return "missing-property-wait-proof"
+        except ValueError:
+            return "missing-property-wait-proof"
     if mode == "managed":
         if complete_lines(text, "ART_APK_INPUT_OK dex=apk native=apk namespace=isolated") != 2:
             return "missing-apk-input-proof"
@@ -66,6 +97,8 @@ def completion_status(text, mode):
         except ValueError:
             return "invalid-signal-proof"
     if mode == "memory":
+        if complete_lines(text, "ART_REMAP_OK fixed=1 replaced=1 readonly=1 growth_zero=1 source_unmapped=1 atomic_failure=1") != 2:
+            return "missing-fixed-remap-proof"
         if complete_lines(text, "ART_PAGING_OK discard=1 rss=1 zero_fault=1 usercopy=1 protections=1 atomic_failure=1 cpu_time=1") != 2:
             return "missing-paging-proof"
         try:
@@ -117,7 +150,8 @@ def signal_failure_status(text, mode):
 
 def main():
     artifacts = Path(sys.argv[1])
-    timeout = float(os.environ.get("BNDROID_QEMU_TIMEOUT_SECONDS", "120"))
+    mode = os.environ.get("BNDROID_ART_MODE", "java")
+    timeout = float(os.environ.get("BNDROID_QEMU_TIMEOUT_SECONDS", "360" if mode.startswith("framework") else "120"))
     if not math.isfinite(timeout) or timeout <= 0:
         raise SystemExit("Timeout must be finite and positive")
     disk = artifacts / "storage.raw"
@@ -125,8 +159,7 @@ def main():
     process = None
     text = ""
     status = "timeout"
-    mode = os.environ.get("BNDROID_ART_MODE", "java")
-    if mode not in ("java", "managed", "memory", "help", "signals", "signal-bad-frame", "signal-bad-pc", "signal-bad-fp", "signal-default", "signal-guard"):
+    if mode not in ("java", "managed", "memory", "properties", "help", "framework", "framework-help", "signals", "signal-bad-frame", "signal-bad-pc", "signal-bad-fp", "signal-default", "signal-guard"):
         raise SystemExit("Unknown ART mode")
     with tempfile.NamedTemporaryFile(prefix="bndroid-art-entropy-") as entropy:
         entropy.write(os.urandom(65536))
@@ -168,6 +201,9 @@ def main():
                "managed_java_verified": mode in ("java", "managed") and status == mode + "-passed",
                "managed_runtime_verified": mode == "managed" and status == "managed-passed",
                "apk_dex_jni_verified": mode == "managed" and status == "managed-passed",
+               "framework_frontend_verified": mode == "framework-help" and status == "framework-help-passed",
+               "boot_properties_verified": mode == "properties" and status == "properties-passed",
+               "framework_parcel_looper_verified": mode == "framework" and status == "framework-passed",
                "abort_messages": re.findall(r"^LINUX_ABORT_MESSAGE pid=\d+ message=(.*)$", text, re.MULTILINE),
                "android_errors": re.findall(r"^ANDROID_LOG pid=\d+ buffer=\d+ priority=[67] tag=(.*)\n", text, re.MULTILINE)[-16:],
                "unsupported_syscalls": sorted(set(map(int, re.findall(r"LINUX_SYSCALL_UNSUPPORTED pid=\d+ number=(\d+)", text)))),

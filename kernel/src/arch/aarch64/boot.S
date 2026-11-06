@@ -3,6 +3,19 @@
     .type _start, %function
 
 _start:
+    // Standard AArch64 Image header. The advertised in-memory size includes
+    // BSS so firmware/QEMU never places its DTB in our zero-initialized rootfs.
+    b .Lboot_start
+    .long 0
+    .quad 0x80000
+    .quad __kernel_image_size
+    .quad 0
+    .quad 0
+    .quad 0
+    .quad 0
+    .long 0x644d5241
+    .long 0
+.Lboot_start:
     // The QEMU/AArch64 boot protocol passes the flattened device tree in x0.
     mov x19, x0
     msr daifset, #0xf

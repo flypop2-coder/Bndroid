@@ -122,7 +122,12 @@ fn main() {
         "cargo:rustc-link-arg-bin=bndroid-kernel=-T{}",
         linker_script.display()
     );
-    let kernel_bss_limit = if env::var_os("CARGO_FEATURE_ART_RUNTIME").is_some() {
+    let kernel_bss_limit = if env::var_os("CARGO_FEATURE_FRAMEWORK_RUNTIME").is_some() {
+        // Full Framework boot jars/resources and app_process DSOs exceed the
+        // ART-only root. Keep this separate 320 MiB catalog within a bounded
+        // 352 MiB RW/NX image window in the 1 GiB Framework guest.
+        "0x56000000"
+    } else if env::var_os("CARGO_FEATURE_ART_RUNTIME").is_some() {
         // The measured local ART/core-Java input is 69 MiB. Reserve a 96 MiB
         // immutable rootfs inside a 128 MiB RW/NX image window, with 512 MiB
         // guest RAM. Native and Bionic-only profiles keep their prior limits.

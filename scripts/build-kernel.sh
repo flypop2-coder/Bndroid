@@ -43,6 +43,9 @@ export CARGO_TARGET_DIR="$TARGET_ROOT"
 
 KERNEL_FEATURES="${BNDROID_KERNEL_FEATURES:-}"
 USERSPACE_FEATURES="${BNDROID_USERSPACE_FEATURES:-}"
+if feature_list_contains "$KERNEL_FEATURES" "framework-runtime"; then
+  KERNEL_FEATURES="$(append_feature "$KERNEL_FEATURES" "art-runtime")"
+fi
 if feature_list_contains "$KERNEL_FEATURES" "art-runtime"; then
   KERNEL_FEATURES="$(append_feature "$KERNEL_FEATURES" "bionic-dynamic-runtime")"
 fi

@@ -2,7 +2,9 @@
 //! never against the host filesystem. File bytes retain the archive lifetime.
 
 pub const PATH_MAX: usize = 256;
-pub const FILE_MAX: usize = if cfg!(feature = "art-runtime") {
+pub const FILE_MAX: usize = if cfg!(feature = "framework-runtime") {
+    512
+} else if cfg!(feature = "art-runtime") {
     128
 } else {
     64

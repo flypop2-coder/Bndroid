@@ -39,6 +39,7 @@ SECTIONS
 
     . = ALIGN(4K);
     __kernel_end = .;
+    __kernel_image_size = __kernel_end - __kernel_start;
 }
 
 ASSERT((__bss_start % 8) == 0, "BSS start must be 8-byte aligned")

@@ -10,7 +10,9 @@ pub const ARENA_END: u64 = 0x80_0000_0000;
 // slots 0/1 retain privileged MMIO/RAM and 4..8 retain kernel VM/user startup.
 pub const LOW_START: u64 = 0x8000_0000;
 pub const LOW_END: u64 = 0x1_0000_0000;
-pub const MAX_REGIONS: usize = if cfg!(feature = "art-runtime") {
+pub const MAX_REGIONS: usize = if cfg!(feature = "framework-runtime") {
+    4096
+} else if cfg!(feature = "art-runtime") {
     1024
 } else {
     128

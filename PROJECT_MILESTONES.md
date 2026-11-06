@@ -49,6 +49,7 @@ This index follows the milestone locations established on GitHub. English pages 
 | [ART Process-0](docs/milestones/androidbox/ART_PROCESS_0.md) | Process/VM metadata, stack guards, remapping, runtime files and namespace-based native initialization; managed startup still incomplete |
 | [ART Signals-0](docs/milestones/androidbox/ART_SIGNALS_0.md) | Real AArch64 signals, futex requeue, realtime clocks and two managed Java execution/cleanup cycles; APK/Framework acceptance remains incomplete |
 | [ART Managed-0](docs/milestones/androidbox/ART_MANAGED_0.md) | Signed APK DEX/JNI loading, Java threads, GC, native callbacks and real anonymous discard/demand-zero memory; ActivityThread/Framework remain incomplete |
+| [Framework Frontend-0](docs/milestones/androidbox/FRAMEWORK_FRONTEND_0.md) | Original app_process/AndroidRuntime frontend, CFI-compatible fixed relocation and immutable boot properties; managed Framework entry still fails at code-cache initialization |
 
 ## Historical OS design records
 

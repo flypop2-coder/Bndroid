@@ -22,6 +22,8 @@ Keep each initial extracted runtime set below 512 MiB and measure actual compone
 
 Do not silently consume newer SDK components. An input change must produce a new fingerprint/hash receipt and pass native, thread, managed-runtime, fault-containment, and existing mobile regressions appropriate to the change. Keep the old receipt for comparison. Pin additional ART/APEX identities in the generated manifest once inspected. No automatic updater or unassigned ongoing staffing commitment is implied.
 
+The subsequent Framework inventory measures 347 files / 265,049,386 bytes, including 46 source boot jars and platform resources. It retains all 66 earlier ART inputs unchanged and remains below the 512 MiB acquisition cap. This measured set justifies a separate `framework-runtime` profile with 1 GiB guest RAM, a 320 MiB immutable root and a 352 MiB bounded RW/NX kernel image window. ART-only and mobile profiles keep their original limits. Its public boot properties describe the implemented arm64 ABI, absence of a native bridge and Bndroid product identity; they do not reproduce the SDK device's private state or supply a writable Android property service.
+
 ## Consequences and remaining work
 
 This provides a concrete, reproducible source for testing the custom kernel against real Android runtime behavior without a large source acquisition. Android's namespace, property, signal, memory, filesystem, Binder, and service semantics still have to be implemented and verified. Booting an SDK emulator to read files is never evidence that Bndroid runs Android applications. The acceptance levels in `TODO.md` remain unchanged and incomplete until their full requirements pass on Bndroid.

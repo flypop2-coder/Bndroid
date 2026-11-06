@@ -5,14 +5,20 @@ use bndroid_kernel::linux_vm::{
     self, Change, EACCES, EINVAL, ENOMEM, Layout as VmLayout, Protection,
 };
 
-// ART's first low-address allocation is 64 MiB. Leave room for its DSO pages
-// while retaining a hard 256 MiB per-process bound in this bring-up profile.
-const MAX_PAGES: usize = if cfg!(feature = "art-runtime") {
+// Framework startup also extracts its full boot DEX set; observed ART-only
+// limits fail before framework.jar can load. Keep each profile hard-bounded.
+const MAX_PAGES: usize = if cfg!(feature = "framework-runtime") {
+    131072
+} else if cfg!(feature = "art-runtime") {
     65536
 } else {
     8192
 };
-const MAX_TABLES: usize = 256;
+const MAX_TABLES: usize = if cfg!(feature = "framework-runtime") {
+    512
+} else {
+    256
+};
 static LIVE_PAGES: AtomicU64 = AtomicU64::new(0);
 static LIVE_TABLES: AtomicU64 = AtomicU64::new(0);
 static PEAK_PAGES: AtomicU64 = AtomicU64::new(0);
@@ -199,24 +205,27 @@ impl LinuxMappings {
         Ok(true)
     }
     #[cfg(feature = "art-runtime")]
-    fn remap(
-        &mut self,
-        l1: &OwnedFrame,
-        asid: u8,
-        address: u64,
-        old_length: u64,
-        new_length: u64,
-        flags: u64,
-    ) -> Result<u64, i64> {
+    fn remap(&mut self, l1: &OwnedFrame, asid: u8, arguments: [u64; 5]) -> Result<u64, i64> {
+        let [address, old_length, new_length, flags, destination] = arguments;
         if flags & !7 != 0 {
             return Err(EINVAL);
         }
-        if flags & !1 != 0 {
+        let fixed = flags & 2 != 0;
+        if fixed && flags & 1 == 0 {
+            return Err(EINVAL);
+        }
+        if flags & 4 != 0 {
             return Err(38);
-        } // FIXED/DONTUNMAP need alias semantics.
+        } // DONTUNMAP needs separate retained-source fault semantics.
         let old = linux_vm::rounded_length(old_length)?;
         let new = linux_vm::rounded_length(new_length)?;
         let old_end = linux_vm::checked_range(address, old)?;
+        if fixed {
+            let end = linux_vm::checked_range(destination, new)?;
+            if destination < old_end && address < end {
+                return Err(EINVAL);
+            }
+        }
         let region = *self
             .layout
             .regions
@@ -226,10 +235,10 @@ impl LinuxMappings {
         if region.file_backed || region.shared {
             return Err(38);
         }
-        if old == new {
+        if !fixed && old == new {
             return Ok(address);
         }
-        if new < old {
+        if !fixed && new < old {
             let change = self.layout.unmap(address + new, old - new)?;
             self.apply(l1, asid, change, None)?;
             return Ok(address);
@@ -240,25 +249,31 @@ impl LinuxMappings {
             Protection::ReadWrite => 3,
             Protection::ReadExecute => 5,
         };
-        let mut growth = self.layout.map(old_end, new - old, protection, 0x100022, 0);
-        if let Ok(change) = growth.as_mut()
-            && region.wipe_on_fork
-        {
-            change.layout = change.layout.advise_fork(old_end, new - old, true)?;
+        if !fixed {
+            let mut growth = self.layout.map(old_end, new - old, protection, 0x100022, 0);
+            if let Ok(change) = growth.as_mut()
+                && region.wipe_on_fork
+            {
+                change.layout = change.layout.advise_fork(old_end, new - old, true)?;
+            }
+            if let Ok(change) = growth {
+                self.apply(l1, asid, change, None)?;
+                return Ok(address);
+            }
+            if flags & 1 == 0 {
+                return Err(ENOMEM);
+            }
         }
-        if let Ok(change) = growth {
-            self.apply(l1, asid, change, None)?;
-            return Ok(address);
-        }
-        if flags & 1 == 0 {
-            return Err(ENOMEM);
-        }
-        let hint = if address < linux_vm::LOW_END {
+        let hint = if fixed {
+            destination
+        } else if address < linux_vm::LOW_END {
             linux_vm::LOW_START
         } else {
             0
         };
-        let mut change = self.layout.map(hint, new, protection, 0x22, 0)?;
+        let mut change =
+            self.layout
+                .map(hint, new, protection, if fixed { 0x32 } else { 0x22 }, 0)?;
         let result = change.start;
         change.layout = change.layout.unmap(address, old)?.layout;
         if region.wipe_on_fork {
@@ -751,7 +766,7 @@ impl UserAddressSpace {
     #[cfg(feature = "art-runtime")]
     pub fn linux_mremap(&mut self, r: &[u64; 31]) -> Result<u64, i64> {
         self.linux
-            .remap(&self.level_1, self.asid(), r[0], r[1], r[2], r[3])
+            .remap(&self.level_1, self.asid(), r[..5].try_into().unwrap())
     }
     #[cfg(feature = "art-runtime")]
     pub fn linux_proc_snapshot(
@@ -962,6 +977,14 @@ impl UserAddressSpace {
 
     pub fn linux_mmap(&mut self, args: [u64; 6]) -> Result<u64, i64> {
         self.linux.map(&self.level_1, self.asid(), args)
+    }
+    #[cfg(feature = "linux-syscall-trace")]
+    pub fn linux_mapping_usage(&self) -> (usize, usize, usize) {
+        (
+            self.linux.pages.len(),
+            self.linux.tables.len(),
+            self.linux.layout.regions.len(),
+        )
     }
     pub fn linux_munmap(&mut self, address: u64, length: u64) -> Result<u64, i64> {
         self.linux
