@@ -2,7 +2,13 @@
 use alloc::vec::Vec;
 use core::fmt::{self, Write};
 
-pub const MAX_SNAPSHOT: usize = 128 * 1024;
+// Framework permits four times the ART VMA count. Its real shutdown map scan
+// exceeds 128 KiB even with ample free heap; retain a proportional text bound.
+pub const MAX_SNAPSHOT: usize = if cfg!(feature = "framework-runtime") {
+    512 * 1024
+} else {
+    128 * 1024
+};
 pub struct Text(Vec<u8>);
 impl Text {
     pub fn new() -> Self {
@@ -10,6 +16,9 @@ impl Text {
     }
     pub fn finish(self) -> Vec<u8> {
         self.0
+    }
+    pub fn bytes_written(&self) -> usize {
+        self.0.len()
     }
 }
 impl Default for Text {
@@ -130,7 +139,11 @@ impl Map<'_> {
             write!(
                 text,
                 " {}{}",
-                if self.name.starts_with('[') { "" } else { "/" },
+                if self.name.starts_with('[') || self.name.starts_with('/') {
+                    ""
+                } else {
+                    "/"
+                },
                 self.name
             )
             .map_err(|_| 12)?;
@@ -142,6 +155,48 @@ impl Map<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn device_maps_preserve_an_absolute_path() {
+        let mut text = Text::new();
+        Map {
+            start: 0x1000,
+            end: 0x2000,
+            read: true,
+            write: false,
+            execute: false,
+            shared: true,
+            offset: 0,
+            inode: 9,
+            name: "/dev/hwbinder",
+        }
+        .append(&mut text)
+        .unwrap();
+        assert!(text.finish().ends_with(b" /dev/hwbinder\n"));
+    }
+    #[test]
+    #[cfg(feature = "framework-runtime")]
+    fn framework_maps_exceed_the_art_text_bound_without_truncating() {
+        let mut text = Text::new();
+        for i in 0..2063u64 {
+            Map {
+                start: 0x800000000 + i * 8192,
+                end: 0x800001000 + i * 8192,
+                read: true,
+                write: false,
+                execute: false,
+                shared: false,
+                offset: i * 4096,
+                inode: i + 100,
+                name: "apex/com.android.art/lib64/libart.so",
+            }
+            .append(&mut text)
+            .unwrap();
+        }
+        let bytes = text.finish();
+        assert!(bytes.len() > 128 * 1024 && bytes.len() < MAX_SNAPSHOT);
+        assert_eq!(bytes.iter().filter(|b| **b == b'\n').count(), 2063);
+        assert!(bytes.ends_with(b" /apex/com.android.art/lib64/libart.so\n"));
+    }
     #[test]
     fn stat_field_positions_and_parenthesized_names_follow_proc_abi() {
         let mut name = [0; 16];

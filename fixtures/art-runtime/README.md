@@ -14,6 +14,7 @@ BNDROID_ART_MODE=help scripts/check-art-runtime.sh
 BNDROID_ART_MODE=memory scripts/check-art-runtime.sh
 BNDROID_ART_MODE=memfd scripts/check-art-runtime.sh
 BNDROID_ART_MODE=binder scripts/check-art-runtime.sh
+BNDROID_ART_MODE=poll scripts/check-art-runtime.sh
 BNDROID_ART_MODE=properties scripts/check-art-runtime.sh
 scripts/check-art-signals.sh
 scripts/check-art-runtime.sh
@@ -45,6 +46,20 @@ buffers, threads, waits, pages, tables and file descriptions.
 transport. Exported Binder objects, FD transfer, nested calls, ServiceManager and
 app permission/capability policy remain incomplete. See
 [Binder Transport-0](../../docs/milestones/androidbox/BINDER_TRANSPORT_0.md).
+
+The `poll` mode runs two native generations through actual eventfd/epoll objects.
+It tests counter/semaphore behavior, vectored I/O, nested/edge/one-shot watches,
+timeouts, blocked-descriptor reuse, competing readers, invalid/unmapped buffers,
+signal interruption/restart, atomic temporary masks and exit with a waiting
+sibling. `event_poll_verified` requires kernel wait/wake/timeout counters and full
+resource cleanup. Epoll currently supports eventfd and nested epoll targets;
+other device readiness remains separate work.
+
+Binder now has independent framework/hardware/vendor device domains. Descriptor
+close flushes waiting reads with BR_NOOP while retaining their original open file;
+the reply test continues through a surviving duplicate. This lets the original
+Framework pool detach during normal shutdown. See
+[Framework Looper-0](../../docs/milestones/androidbox/FRAMEWORK_LOOPER_0.md).
 
 Java mode currently uses ART's interpreter option, a 4 MiB initial / 16 MiB maximum heap, matching core-library DEX jars, and no image compiler. These diagnostic limits reduce initial memory demand; they are not the final app runtime configuration. The program must produce its collection/arithmetic/exception marker in two distinct process generations before `managed_java_verified` becomes true.
 
@@ -85,13 +100,21 @@ If the Framework extension is interrupted after its ART receipt was produced, re
 
 The current full attempt loads the JNI library through the unchanged Tethering
 namespace, opens/maps Binder, starts its pool and enters the Java probe through
-`RuntimeInit.nativeFinishInit`. Parcel/Bundle checks complete. Looper creation
-then fails with `Could not make wake event fd: Function not implemented`.
-[Binder Transport-0](../../docs/milestones/androidbox/BINDER_TRANSPORT_0.md)
-records the result and cleanup; the full gate still exits nonzero.
+`RuntimeInit.nativeFinishInit`. The gate now passes: both cold launches perform
+Parcel/Bundle round trips, wake a sleeping Looper from another Java thread,
+execute a delayed callback, return normally, destroy the VM and exit zero.
+All 16 workers and process resources are reclaimed. This is a command-line
+Framework entry, not an Activity, system-service loop or full-app acceptance.
+[Framework Looper-0](../../docs/milestones/androidbox/FRAMEWORK_LOOPER_0.md)
+records the evidence and remaining scope.
 
 Framework modes select `framework-runtime`: one CPU, 1 GiB guest RAM, a 320 MiB immutable archive / 512-entry catalog, 512 file descriptors, 4,096 mapping regions, a combined 512 MiB physical budget for private pages and memfd backing, and 512 page-table pages. Shared aliases do not allocate a second physical copy. The ART-only bounds remain unchanged. The Framework guest/host timeouts are 300/360 seconds because loading and reclaiming hundreds of libraries exceeds the earlier two-launch bound. The source boot and compiler boot classpaths are supplied through the startup environment. No alternate Java/Framework implementation or global library search override is supplied.
 
-`framework-help` requires authenticated AndroidRuntime start/zero-exit and ART help records from both process generations, followed by complete native cleanup. Help is logged through AndroidRuntime's `vm-printf` hook rather than standard output. It proves native loading and argument parsing, not Java VM or Activity startup. `framework` is a separate integration gate: only two actual Parcel/Bundle round trips and delayed Looper callbacks through upstream RuntimeInit may satisfy it. A missing stage remains failure; `full_android_apps` stays false even if this narrower probe eventually passes.
+`framework-help` requires authenticated AndroidRuntime start/zero-exit and ART help records from both process generations, followed by complete native cleanup. Help is logged through AndroidRuntime's `vm-printf` hook rather than standard output. It proves native loading and argument parsing, not Java VM or Activity startup. `framework` is a separate integration gate: both authenticated Parcel/Bundle/Looper sequences, actual cross-thread wakeups, delayed callbacks, Binder flush returns and normal exits are required. A missing stage remains failure; `full_android_apps` stays false when this narrower probe passes.
+
+Framework proc-map snapshots have a 512 KiB text bound, proportional to that
+profile's larger VMA allowance; ART-only snapshots retain 128 KiB. The complete
+teardown scan exceeds the earlier bound. The existing kernel heap and physical
+budgets remain in force, and snapshot failure never publishes truncated maps.
 
 The read-only boot-property area contains declared public ABI, native-bridge and Bndroid product values, plus the version metadata of the frozen API 36.1 / Android 16 inputs. The builder rejects a different API source instead of guessing its build version. These values describe the supplied Framework libraries and do not claim full application compatibility. Unmodified Bionic reads its supported pre-split binary format; there is no writable property service or private property namespace. `properties` independently verifies lookup, callbacks, all 13 properties, real timed waiting, CLOCK_BOOTTIME advancement across that wait, and rejected file/shared-map writes. The memory gate additionally verifies fixed-address anonymous relocation, including equal-size/shrink/growth, preserved read-only access, destination replacement, neighboring mappings and atomic failure.

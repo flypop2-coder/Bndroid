@@ -38,8 +38,12 @@ pub fn map(args: [u64; 6], file: &FileRef) -> Result<u64, i64> {
     let backing = &file.binder().unwrap().backing;
     let memory = backing.memory().unwrap();
     process::with_current_linux_address_space(|space| space.linux_memfd_resize(memory, length))?;
-    let result =
-        process::with_current_linux_address_space(|space| space.linux_mmap_binder(args, backing));
+    let bndroid_kernel::linux_fd::Target::Binder(domain) = file.target() else {
+        return Err(9);
+    };
+    let result = process::with_current_linux_address_space(|space| {
+        space.linux_mmap_binder(args, backing, domain.path())
+    });
     match result {
         Ok(base) => {
             binder::with(|r| {

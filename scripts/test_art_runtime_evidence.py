@@ -20,10 +20,26 @@ PROCESS = "LINUX_PROCESS_EXIT pid=4294967298 code=0 native_handles=0\nLINUX_PROC
 
 
 class EvidenceTests(unittest.TestCase):
+    def test_poll_requires_real_waits_signals_and_complete_lifetime_cleanup(self):
+        marker = "POLL_NATIVE_OK counter=1 semaphore=1 epoll=1 vectors=1 nested=1 lifetime=1 race=1 signals=1 timeout=1 pending_exit=1\n"
+        poll = "LINUX_POLL_OK eventfds=28 epolls=14 closed=42 reads=34 writes=42 delivered=26 controls=26 blocked=30 ready=16 expired=4 cancelled=10 live=0 watches=0\n"
+        signals = "LINUX_SIGNALS_OK delivered=8 returned=8 interrupted=8 pending=0\n"
+        log = marker * 2 + poll + signals + PROCESS.replace("created=2 reaped=2", "created=20 reaped=20") + PROOF
+        self.assertEqual(completion_status(log, "poll"), "poll-passed")
+        for old, new, expected in (("watches=0", "watches=1", "invalid-poll-cleanup"),
+                                   ("closed=42", "closed=41", "invalid-poll-cleanup"),
+                                   ("expired=4", "expired=0", "missing-poll-transport-proof"),
+                                   ("cancelled=10", "cancelled=0", "missing-poll-transport-proof"),
+                                   ("returned=8", "returned=7", "invalid-poll-signal-proof"),
+                                   ("closed=42", "closed=invalid", "invalid-poll-record")):
+            self.assertEqual(completion_status(log.replace(old,new), "poll"), expected)
+        self.assertEqual(completion_status(log+poll, "poll"), "invalid-poll-record")
+        self.assertNotEqual(completion_status(log.replace(marker,"",1), "poll"), "poll-passed")
+
     def test_binder_requires_cross_process_transport_signal_and_cleanup_proof(self):
         client = "BINDER_CLIENT_OK identity=1 reply=1 oneway=3 death=1 interrupted=1 fd_reuse=1 readonly=1\n"
-        server = "BINDER_SERVER_OK identity=1 reply=1 oneway=3 receive_pool=1 readonly=1\n"
-        binder = "LINUX_BINDER_OK opened=2 closed=2 submitted=8 replied=3 oneway=3 failed=5 deaths=1 connections=0 transactions=0 buffers=0 first_sender=4294967298 first_receiver=8589934594\n"
+        server = "BINDER_SERVER_OK identity=1 reply=1 oneway=3 receive_pool=1 readonly=1 domains=3\n"
+        binder = "LINUX_BINDER_OK opened=5 closed=5 submitted=8 replied=3 oneway=3 failed=5 deaths=1 connections=0 transactions=0 buffers=0 first_sender=4294967298 first_receiver=8589934594 flush_returns=1\n"
         signals = "LINUX_SIGNALS_OK delivered=3 returned=3 interrupted=1 pending=0\n"
         log = client + server + binder + signals + PROCESS + PROOF
         self.assertEqual(completion_status(log, "binder"), "binder-passed")
@@ -51,11 +67,19 @@ class EvidenceTests(unittest.TestCase):
     def test_framework_requires_both_native_operations_and_authenticated_process_logs(self):
         def messages(pid):
             return "".join(f"ANDROID_LOG pid={pid} buffer=0 priority=4 tag=bndroid-framework message={message}\n"
-                           for message in ("FRAMEWORK_STAGE parcel", "FRAMEWORK_STAGE looper",
-                                           "FRAMEWORK_MAIN_OK parcel=1 bundle=1 looper=1 delayed=1"))
-        log = messages(4294967298) + messages(8589934594) + PROCESS + PROOF
+                           for message in ("FRAMEWORK_STAGE parcel", "FRAMEWORK_STAGE wake", "FRAMEWORK_STAGE looper",
+                                           "FRAMEWORK_MAIN_OK parcel=1 bundle=1 looper=1 delayed=1 wake=1")) + f"ANDROID_LOG pid={pid} buffer=0 priority=3 tag=AndroidRuntime message=Shutting down VM \n"
+        poll = "LINUX_POLL_OK eventfds=2 epolls=2 closed=4 reads=2 writes=2 delivered=2 blocked=2 ready=2 live=0 watches=0\n"
+        binder = "LINUX_BINDER_OK opened=4 closed=4 connections=0 transactions=0 buffers=0 flush_returns=2\n"
+        log = messages(4294967298) + messages(8589934594) + PROCESS + PROOF + poll + binder
         self.assertEqual(completion_status(log, "framework"), "framework-passed")
         self.assertEqual(completion_status(log.replace("FRAMEWORK_STAGE looper", "wrong-stage"), "framework"), "missing-framework-stage")
+        self.assertEqual(completion_status(log.replace("FRAMEWORK_STAGE wake", "wrong-stage"), "framework"), "missing-framework-stage")
+        self.assertEqual(completion_status(log.replace("blocked=2", "blocked=0"), "framework"), "missing-framework-wake-proof")
+        self.assertEqual(completion_status(log.replace("flush_returns=2", "flush_returns=0"), "framework"), "missing-framework-shutdown-proof")
+        self.assertEqual(completion_status(log.replace("closed=4", "closed=3"), "framework"), "missing-framework-shutdown-proof")
+        self.assertEqual(completion_status(log.replace("Shutting down VM", "unproven"), "framework"), "missing-framework-shutdown-proof")
+        self.assertEqual(completion_status(log + "Warning: VM did not shut down cleanly\n", "framework"), "missing-framework-shutdown-proof")
         self.assertEqual(completion_status(log.replace("ANDROID_LOG pid=8589934594", "ANDROID_LOG pid=13"), "framework"), "invalid-process-proof")
         self.assertNotEqual(completion_status(HELP * 2 + PROCESS + PROOF, "framework"), "framework-passed")
         self.assertNotEqual(completion_status(HELP * 2 + PROCESS + PROOF, "framework-help"), "framework-help-passed")

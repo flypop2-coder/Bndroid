@@ -70,4 +70,10 @@ if [[ "${BNDROID_ART_MODE:-java}" == binder ]]; then
     -Wl,-z,max-page-size=4096 -Wl,-z,separate-loadable-segments \
     "$ROOT/fixtures/art-runtime/binder.c" -o "$OUT/binder-probe"
 fi
+if [[ "${BNDROID_ART_MODE:-java}" == poll ]]; then
+  "$NDK_ROOT/toolchains/llvm/prebuilt/$HOST_TAG/bin/aarch64-linux-android35-clang" \
+    -O2 -g -Wall -Wextra -Werror -pthread -fPIE -pie \
+    -Wl,-z,max-page-size=4096 -Wl,-z,separate-loadable-segments \
+    "$ROOT/fixtures/art-runtime/poll.c" -o "$OUT/poll-probe"
+fi
 printf 'ART_DEX_BUILD_OK path=%s\n' "$OUT/probe.dex"

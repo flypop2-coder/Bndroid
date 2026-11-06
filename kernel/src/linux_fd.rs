@@ -33,7 +33,9 @@ pub enum Target {
     Snapshot { path: &'static str, inode: u64 },
     UnixDatagram,
     Memory { inode: u64, length: u64 },
-    Binder,
+    Binder(crate::linux_binder::Domain),
+    EventFd,
+    Epoll,
 }
 
 struct Description {
@@ -45,6 +47,15 @@ struct Description {
     log_connected: AtomicBool,
     memory: Option<crate::linux_memfd::MemoryFile>,
     binder: Option<BinderFile>,
+    poll: Option<PollFile>,
+}
+pub struct PollFile {
+    pub id: u64,
+}
+impl Drop for PollFile {
+    fn drop(&mut self) {
+        crate::linux_poll::with(|hub| hub.close(self.id));
+    }
 }
 pub struct BinderFile {
     pub id: u64,
@@ -62,7 +73,7 @@ unsafe impl Send for FileRef {}
 unsafe impl Sync for FileRef {}
 impl FileRef {
     pub fn try_new(target: Target, flags: u32) -> Result<Self, i64> {
-        Self::create(target, flags, None, None, None)
+        Self::create(target, flags, None, None, None, None)
     }
     pub fn try_snapshot(
         path: &'static str,
@@ -74,6 +85,7 @@ impl FileRef {
             Target::Snapshot { path, inode },
             flags,
             Some(bytes),
+            None,
             None,
             None,
         )
@@ -89,18 +101,45 @@ impl FileRef {
             None,
             Some(memory),
             None,
+            None,
         )
     }
-    pub fn try_binder(owner: crate::linux_binder::Identity, flags: u32) -> Result<Self, i64> {
+    pub fn try_binder(
+        owner: crate::linux_binder::Identity,
+        domain: crate::linux_binder::Domain,
+        flags: u32,
+    ) -> Result<Self, i64> {
         let backing = Self::try_memory(b"binder-receive", 0)?;
-        let id = crate::linux_binder::with(|router| router.open(owner))?;
+        let id = crate::linux_binder::with(|router| router.open_in(owner, domain))?;
         Self::create(
-            Target::Binder,
+            Target::Binder(domain),
             flags,
             None,
             None,
             Some(BinderFile { id, backing }),
+            None,
         )
+    }
+    pub fn try_eventfd(value: u32, flags: u32) -> Result<Self, i64> {
+        if flags & !(1 | 0x800 | 0x80000) != 0 {
+            return Err(EINVAL);
+        }
+        let id = crate::linux_poll::with(|h| h.eventfd(value, flags & 1 != 0))?;
+        Self::create(
+            Target::EventFd,
+            2 | (flags & 0x800),
+            None,
+            None,
+            None,
+            Some(PollFile { id }),
+        )
+    }
+    pub fn try_epoll(flags: u32) -> Result<Self, i64> {
+        if flags & !0x80000 != 0 {
+            return Err(EINVAL);
+        }
+        let id = crate::linux_poll::with(|h| h.epoll())?;
+        Self::create(Target::Epoll, 2, None, None, None, Some(PollFile { id }))
     }
     fn create(
         target: Target,
@@ -108,6 +147,7 @@ impl FileRef {
         snapshot: Option<Vec<u8>>,
         memory: Option<crate::linux_memfd::MemoryFile>,
         binder: Option<BinderFile>,
+        poll: Option<PollFile>,
     ) -> Result<Self, i64> {
         let pointer =
             NonNull::new(unsafe { alloc(Layout::new::<Description>()) }.cast::<Description>())
@@ -122,6 +162,7 @@ impl FileRef {
                 log_connected: AtomicBool::new(false),
                 memory,
                 binder,
+                poll,
             });
         }
         LIVE_DESCRIPTIONS.fetch_add(1, Ordering::Relaxed);
@@ -144,6 +185,9 @@ impl FileRef {
     }
     pub fn binder(&self) -> Option<&BinderFile> {
         self.inner().binder.as_ref()
+    }
+    pub fn poll(&self) -> Option<&PollFile> {
+        self.inner().poll.as_ref()
     }
     pub fn snapshot(&self) -> Option<&[u8]> {
         self.inner().snapshot.as_deref()
@@ -236,6 +280,13 @@ impl Drop for FileRef {
 struct Descriptor {
     file: FileRef,
     close_on_exec: bool,
+}
+impl Drop for Descriptor {
+    fn drop(&mut self) {
+        if let Some(file) = self.file.binder() {
+            crate::linux_binder::with(|r| r.flush(file.id));
+        }
+    }
 }
 pub struct Table {
     // Process construction runs on a fixed kernel stack. Keep larger linker

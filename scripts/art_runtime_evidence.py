@@ -30,10 +30,11 @@ def completion_status(text, mode):
         "memory": "ART_MEMORY_OK low_64m=1 protections=1 holes=1 shared_threads=1 kernel_isolation=1\n",
         "memfd": "ART_MEMFD_OK aliases=1 code=1 truncate=1 seals=1 lifetime=1 wx=1\n",
         "binder": "BINDER_CLIENT_OK identity=1 reply=1 oneway=3 death=1 interrupted=1 fd_reuse=1 readonly=1\n",
+        "poll": "POLL_NATIVE_OK counter=1 semaphore=1 epoll=1 vectors=1 nested=1 lifetime=1 race=1 signals=1 timeout=1 pending_exit=1\n",
         "properties": "ART_PROPERTIES_OK bionic_reader=1 callback=1 enumerate=1 wait=1 immutable=1\n",
         "help": "dalvikvm: [options] class [argument ...]\n",
         "framework-help": "dalvikvm: [options] class [argument ...]\n",
-        "framework": "FRAMEWORK_MAIN_OK parcel=1 bundle=1 looper=1 delayed=1\n",
+        "framework": "FRAMEWORK_MAIN_OK parcel=1 bundle=1 looper=1 delayed=1 wake=1\n",
         "java": "ART_JAVA_CORE_OK sum=4950 exceptions=1 collections=1\n",
         "managed": "ART_MANAGED_OK java_threads=3 monitors=1 interrupt=1 gc=1 jni=1 native_thread=1 clocks=1\n",
         "signals": "ART_SIGNALS_OK handlers=1 altstack=1 registers=1 masks=1 realtime=1 faults=1 threads=1 restart=1 waits=1\n",
@@ -56,16 +57,30 @@ def completion_status(text, mode):
         if len(successes) != 2 or len(set(successes)) != 2:
             return "exited-without-expected-proof"
         if any(sum(pid == owner and message == "FRAMEWORK_STAGE " + stage for pid, message in messages) != 1
-               for owner in successes for stage in ("parcel", "looper")):
+               for owner in successes for stage in ("parcel", "wake", "looper")):
             return "missing-framework-stage"
+        shutdowns = re.findall(r"^ANDROID_LOG pid=(\d+) buffer=0 priority=3 tag=AndroidRuntime message=Shutting down VM *\n", text, re.MULTILINE)
+        if sorted(shutdowns) != sorted(successes) or "Warning: unable to detach main thread" in text or "Warning: VM did not shut down cleanly" in text:
+            return "missing-framework-shutdown-proof"
+        try:
+            poll = parse_marker(text, "LINUX_POLL_OK")
+            if not poll or any(poll.get(key) != "0" for key in ("live", "watches")) or any(int(poll.get(key, 0)) < 2 for key in ("eventfds", "epolls", "reads", "writes", "delivered", "blocked", "ready")):
+                return "missing-framework-wake-proof"
+            binder = parse_marker(text, "LINUX_BINDER_OK")
+            if not binder or any(binder.get(key) != "0" for key in ("connections", "transactions", "buffers")) or int(binder.get("opened", 0)) < 4 or binder["opened"] != binder.get("closed") or int(binder.get("flush_returns", 0)) < 2:
+                return "missing-framework-shutdown-proof"
+            if int(poll["closed"]) != int(poll["eventfds"]) + int(poll["epolls"]):
+                return "missing-framework-shutdown-proof"
+        except (ValueError, KeyError):
+            return "invalid-poll-record"
     elif mode == "binder":
-        if complete_lines(text, expected.rstrip("\n")) != 1 or complete_lines(text, "BINDER_SERVER_OK identity=1 reply=1 oneway=3 receive_pool=1 readonly=1") != 1:
+        if complete_lines(text, expected.rstrip("\n")) != 1 or complete_lines(text, "BINDER_SERVER_OK identity=1 reply=1 oneway=3 receive_pool=1 readonly=1 domains=3") != 1:
             return "missing-binder-process-proof"
         try:
             binder = parse_marker(text, "LINUX_BINDER_OK")
             if not binder or any(binder.get(key) != "0" for key in ("connections", "transactions", "buffers")):
                 return "invalid-binder-cleanup"
-            if any(int(binder.get(key, 0)) < count for key, count in (("opened", 2), ("submitted", 8), ("replied", 3), ("oneway", 3), ("failed", 5), ("deaths", 1))) or binder["opened"] != binder["closed"]:
+            if any(int(binder.get(key, 0)) < count for key, count in (("opened", 5), ("submitted", 8), ("replied", 3), ("oneway", 3), ("failed", 5), ("deaths", 1), ("flush_returns", 1))) or binder["opened"] != binder["closed"]:
                 return "missing-binder-transport-proof"
         except (ValueError, KeyError):
             return "invalid-binder-record"
@@ -83,6 +98,18 @@ def completion_status(text, mode):
         return "invalid-process-proof"
     if not threads.get("created") or threads["created"] != threads.get("reaped"):
         return "invalid-thread-proof"
+    if mode == "poll":
+        try:
+            poll = parse_marker(text, "LINUX_POLL_OK")
+            signals = parse_marker(text, "LINUX_SIGNALS_OK")
+            if not poll or poll.get("live") != "0" or poll.get("watches") != "0" or int(poll["closed"]) != int(poll["eventfds"]) + int(poll["epolls"]):
+                return "invalid-poll-cleanup"
+            if any(int(poll.get(key, 0)) < count for key, count in (("eventfds", 20), ("epolls", 10), ("reads", 30), ("writes", 30), ("delivered", 20), ("blocked", 16), ("ready", 10), ("expired", 4), ("cancelled", 8))) or int(threads["created"]) < 20:
+                return "missing-poll-transport-proof"
+            if not signals or any(signals.get(key) != value for key, value in (("delivered", "8"), ("returned", "8"), ("pending", "0"))) or int(signals.get("interrupted", 0)) < 8:
+                return "invalid-poll-signal-proof"
+        except (ValueError, KeyError):
+            return "invalid-poll-record"
     if mode == "binder":
         if {binder.get("first_sender"), binder.get("first_receiver")} != set(exits):
             return "invalid-binder-process-identity"
@@ -190,7 +217,7 @@ def main():
     process = None
     text = ""
     status = "timeout"
-    if mode not in ("java", "managed", "memory", "memfd", "binder", "properties", "help", "framework", "framework-help", "signals", "signal-bad-frame", "signal-bad-pc", "signal-bad-fp", "signal-default", "signal-guard"):
+    if mode not in ("java", "managed", "memory", "memfd", "binder", "poll", "properties", "help", "framework", "framework-help", "signals", "signal-bad-frame", "signal-bad-pc", "signal-bad-fp", "signal-default", "signal-guard"):
         raise SystemExit("Unknown ART mode")
     with tempfile.NamedTemporaryFile(prefix="bndroid-art-entropy-") as entropy:
         entropy.write(os.urandom(65536))
@@ -236,6 +263,8 @@ def main():
                "shared_memfd_verified": mode == "memfd" and status == "memfd-passed",
                "binder_transport_verified": mode == "binder" and status == "binder-passed",
                "binder": diagnostic_record(text, "LINUX_BINDER_OK"),
+               "event_poll_verified": mode == "poll" and status == "poll-passed",
+               "poll": diagnostic_record(text, "LINUX_POLL_OK"),
                "boot_properties_verified": mode == "properties" and status == "properties-passed",
                "framework_parcel_looper_verified": mode == "framework" and status == "framework-passed",
                "abort_messages": re.findall(r"^LINUX_ABORT_MESSAGE pid=\d+ message=(.*)$", text, re.MULTILINE),

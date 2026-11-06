@@ -11,7 +11,7 @@ pub(super) struct RestartCall {
 #[derive(Clone, Copy)]
 enum Waiting {
     None,
-    Futex(RestartCall),
+    Restartable(RestartCall),
     Sleep { remaining: u64, deadline: u64 },
     Signal { set: u64, info: u64 },
 }
@@ -311,8 +311,11 @@ pub(super) fn clear_wait(context: usize) {
     thread(context).wait = Waiting::None;
 }
 pub(super) fn note_futex(frame: *mut TrapFrame, r: &[u64; 31], deadline: Option<u64>) {
-    thread(current_running_context()).wait = Waiting::Futex(RestartCall {
-        args: r[..6].try_into().unwrap(),
+    note_restartable(frame, r[..6].try_into().unwrap(), deadline);
+}
+pub(super) fn note_restartable(frame: *mut TrapFrame, args: [u64; 6], deadline: Option<u64>) {
+    thread(current_running_context()).wait = Waiting::Restartable(RestartCall {
+        args,
         pc: unsafe { (*frame).elr_el1 },
         deadline,
     });
@@ -337,8 +340,9 @@ pub(super) fn interrupt(context: usize) {
     }
     let wait = thread(context).wait;
     super::binder::cancel(context);
+    super::io::cancel(context);
     let mut result = errno(4);
-    if let Waiting::Futex(call) = wait {
+    if let Waiting::Restartable(call) = wait {
         thread(context).interrupted = Some(call);
     }
     if let Waiting::Sleep {
@@ -442,6 +446,20 @@ fn suspend(frame: *mut TrapFrame, r: &[u64; 31]) -> *mut TrapFrame {
             block(frame, ThreadState::Waiting)
         }
         Err(error) => runtime::complete(frame, errno(error)),
+    }
+}
+pub(super) fn begin_wait_mask(mask: Option<u64>) {
+    if let Some(mask) = mask {
+        let c = current_running_context();
+        assert!(thread(c).restore_mask.is_none());
+        thread(c).restore_mask = Some(local(c).signal_mask);
+        local(c).signal_mask = mask & !wire::UNBLOCKABLE;
+    }
+}
+pub(super) fn restore_wait_mask() {
+    let c = current_running_context();
+    if let Some(mask) = thread(c).restore_mask.take() {
+        local(c).signal_mask = mask;
     }
 }
 fn restart_interrupted(frame: *mut TrapFrame, restart: bool) {
@@ -563,6 +581,13 @@ extern "C" fn linux_signal_return(frame: *mut TrapFrame) -> *mut TrapFrame {
     // SP belong to the resumed process. Signal delivery then sees the final
     // syscall result, or EINTR if the queued read was cancelled.
     super::binder::complete_ready(frame);
+    if let Some(next) = super::io::complete_ready(frame) {
+        // run() may reblock after another reader consumed the readiness. In
+        // that case assembly must switch stacks before any further user copy.
+        if next != frame {
+            return next;
+        }
+    }
     let c = current_running_context();
     let info = loop {
         match pop(c, !local(c).signal_mask) {
@@ -571,6 +596,7 @@ extern "C" fn linux_signal_return(frame: *mut TrapFrame) -> *mut TrapFrame {
         }
     };
     let Some(info) = info else {
+        restore_wait_mask();
         restart_interrupted(frame, true);
         return frame;
     };

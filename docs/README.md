@@ -41,6 +41,7 @@ Public Markdown documentation is maintained in English. Paths already establishe
 - [ART managed threads, garbage collection and JNI from an APK](milestones/androidbox/ART_MANAGED_0.md)
 - [ART shared code-cache backing and boot metadata](milestones/androidbox/ART_MEMFD_0.md)
 - [Framework runtime JNI dependencies](milestones/androidbox/FRAMEWORK_JNI_0.md)
-- [Binder byte transport and current Framework/Looper boundary](milestones/androidbox/BINDER_TRANSPORT_0.md)
+- [Initial Binder byte transport and Framework Parcel progress](milestones/androidbox/BINDER_TRANSPORT_0.md)
+- [Framework Looper, event notification and normal VM shutdown](milestones/androidbox/FRAMEWORK_LOOPER_0.md)
 
 Historical pages report their original profile and validation date, not universal compatibility or a fresh test run. See [the archive policy](archive/README.md) for source preservation.

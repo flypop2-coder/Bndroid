@@ -914,13 +914,14 @@ impl UserAddressSpace {
         args: [u64; 6],
         opened: &bndroid_kernel::linux_fd::FileRef,
     ) -> Result<u64, i64> {
-        self.linux_mmap_backing(args, opened, false)
+        self.linux_mmap_backing(args, opened, None)
     }
     #[cfg(feature = "art-runtime")]
     pub fn linux_mmap_binder(
         &mut self,
         mut args: [u64; 6],
         opened: &bndroid_kernel::linux_fd::FileRef,
+        path: &'static str,
     ) -> Result<u64, i64> {
         // Binder accepts MAP_PRIVATE but its receive pool is kernel-owned;
         // userspace can never write it, obtain a COW view, or execute it.
@@ -928,14 +929,14 @@ impl UserAddressSpace {
             return Err(EACCES);
         }
         args[3] = (args[3] & !3) | 1;
-        self.linux_mmap_backing(args, opened, true)
+        self.linux_mmap_backing(args, opened, Some(path))
     }
     #[cfg(feature = "art-runtime")]
     fn linux_mmap_backing(
         &mut self,
         args: [u64; 6],
         opened: &bndroid_kernel::linux_fd::FileRef,
-        device: bool,
+        device_path: Option<&'static str>,
     ) -> Result<u64, i64> {
         let memory = opened.memory().ok_or(19)?;
         if args[5] > i64::MAX as u64 || !args[5].is_multiple_of(PAGE_SIZE as u64) {
@@ -965,17 +966,13 @@ impl UserAddressSpace {
                 available: memory.len().saturating_sub(args[5]),
                 offset: args[5],
                 inode: memory.inode(),
-                path: if device {
-                    "/dev/binder"
-                } else {
-                    "memfd:anonymous (deleted)"
-                },
+                path: device_path.unwrap_or("memfd:anonymous (deleted)"),
                 memory: true,
-                may_write: !device && opened.writable() && memory.may_write(),
-                may_execute: !device,
+                may_write: device_path.is_none() && opened.writable() && memory.may_write(),
+                may_execute: device_path.is_none(),
             }),
         )?;
-        if device {
+        if device_path.is_some() {
             for region in &mut change.layout.regions {
                 if region.file.is_some_and(|f| f.inode == memory.inode()) {
                     region.dont_fork = true;
@@ -1081,9 +1078,22 @@ impl UserAddressSpace {
         maps: bool,
     ) -> Result<Vec<u8>, i64> {
         use bndroid_kernel::linux_proc::{Map, Text};
+        let failure = |stage: &str, bytes: usize, error: i64| {
+            crate::kprintln!(
+                "LINUX_PROC_SNAPSHOT_FAILED stage={} bytes={} limit={} regions={} native_pages={} heap_free={} errno={}",
+                stage,
+                bytes,
+                bndroid_kernel::linux_proc::MAX_SNAPSHOT,
+                self.linux.layout.regions.len(),
+                self.mappings.pages.len(),
+                crate::kernel_heap::stats().map_or(0, |s| s.free_bytes),
+                error
+            );
+            error
+        };
         let mut rows: Vec<Map> = Vec::new();
         rows.try_reserve_exact(self.mappings.pages.len() + self.linux.layout.regions.len())
-            .map_err(|_| ENOMEM)?;
+            .map_err(|_| failure("rows", 0, ENOMEM))?;
         let layout = &self.mappings.metadata.layout;
         stat.resident_pages = (self.mappings.pages.len() + self.linux.pages.len()) as u64;
         stat.resident_limit = ((MAX_PAGES + self.mappings.pages.len()) * PAGE_SIZE) as u64;
@@ -1121,7 +1131,7 @@ impl UserAddressSpace {
                 (
                     file.offset + region.start - region.file_origin,
                     file.inode,
-                    if file.memory {
+                    if file.memory && !file.path.starts_with("/dev/") {
                         self.linux
                             .memories
                             .iter()
@@ -1170,12 +1180,22 @@ impl UserAddressSpace {
                     p.end = row.end;
                     continue;
                 }
-                p.append(&mut text)?;
+                p.append(&mut text)
+                    .map_err(|e| failure("text", text.bytes_written(), e))?;
             }
             previous = Some(row);
         }
         if let Some(row) = previous {
-            row.append(&mut text)?;
+            row.append(&mut text)
+                .map_err(|e| failure("text", text.bytes_written(), e))?;
+        }
+        if text.bytes_written() > 128 * 1024 {
+            crate::kprintln!(
+                "LINUX_PROC_SNAPSHOT_OK bytes={} limit={} regions={}",
+                text.bytes_written(),
+                bndroid_kernel::linux_proc::MAX_SNAPSHOT,
+                self.linux.layout.regions.len()
+            );
         }
         Ok(text.finish())
     }

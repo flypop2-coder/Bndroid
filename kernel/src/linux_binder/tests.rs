@@ -1,6 +1,101 @@
 use super::*;
 use alloc::vec;
 
+#[test]
+fn descriptor_flush_returns_idle_reads_without_releasing_connection_or_work() {
+    let (mut r, s, c) = setup();
+    assert!(r.read(s, 2, 256).unwrap().is_none());
+    r.waiting(s, 2, true).unwrap();
+    r.flush(s);
+    let noop = receive(&mut r, s, 2);
+    assert_eq!(noop.length, 4);
+    assert_eq!(u32_at(&noop.bytes, 0), BR_NOOP);
+    assert!(r.read(s, 2, 256).unwrap().is_none());
+    r.transact(c, 3, data(b"work", 0), b"work".to_vec())
+        .unwrap();
+    r.flush(s);
+    r.flush(c);
+    assert_eq!(opcode(&receive(&mut r, c, 3)), BR_COMPLETE);
+    let request = receive(&mut r, s, 2);
+    assert_eq!(request.payload.as_deref(), Some(b"work".as_slice()));
+    r.free_buffer(s, transaction(&request).data).unwrap();
+    r.reply(s, 2, data(b"reply", 0), b"reply".to_vec()).unwrap();
+    assert_eq!(opcode(&receive(&mut r, c, 3)), BR_REPLY);
+    assert_eq!(r.stats().flush_returns, 1);
+    r.close(c);
+    r.close(s);
+    assert_eq!(r.stats().connections, 0);
+}
+
+#[test]
+fn device_domains_route_handle_zero_and_pin_manager_uids_independently() {
+    let (mut r, service, client) = setup();
+    let hardware = r
+        .open_in(
+            Identity {
+                process: 0x100000004,
+                uid: 2000,
+            },
+            Domain::Hardware,
+        )
+        .unwrap();
+    let hw_client = r
+        .open_in(
+            Identity {
+                process: 0x100000005,
+                uid: 10000,
+            },
+            Domain::Hardware,
+        )
+        .unwrap();
+    let vendor = r
+        .open_in(
+            Identity {
+                process: 0x100000006,
+                uid: 3000,
+            },
+            Domain::Vendor,
+        )
+        .unwrap();
+    r.map(
+        hardware,
+        Mapping {
+            base: 0xa00000000,
+            length: 4096,
+            inode: 3,
+        },
+    )
+    .unwrap();
+    r.set_manager(hardware, 1, 2).unwrap();
+    r.set_manager(vendor, 3, 4).unwrap();
+    r.transact(hw_client, 5, data(b"hardware", 0), b"hardware".to_vec())
+        .unwrap();
+    receive(&mut r, hw_client, 5);
+    assert!(r.read(service, 2, 256).unwrap().is_none());
+    let request = receive(&mut r, hardware, 4);
+    assert_eq!(request.payload.as_deref(), Some(b"hardware".as_slice()));
+    r.close(hardware);
+    assert_eq!(opcode(&receive(&mut r, hw_client, 5)), BR_DEAD_REPLY);
+    assert_eq!(r.set_manager(hw_client, 0, 0), Err(1));
+    r.transact(client, 3, data(b"framework", 0), b"framework".to_vec())
+        .unwrap();
+    assert_eq!(
+        receive(&mut r, service, 2).payload.as_deref(),
+        Some(b"framework".as_slice())
+    );
+    for id in [service, client, hw_client, vendor] {
+        r.close(id);
+    }
+    assert_eq!(
+        (
+            r.stats().connections,
+            r.stats().transactions,
+            r.stats().buffers
+        ),
+        (0, 0, 0)
+    );
+}
+
 fn data(bytes: &[u8], flags: u32) -> Transaction {
     Transaction {
         target: 0,

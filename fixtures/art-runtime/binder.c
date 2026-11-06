@@ -20,6 +20,7 @@
 static int control_fd, request_fd;
 static _Atomic int phase;
 static volatile sig_atomic_t faults, signals_seen;
+static int flush_seen;
 static void *pool;
 struct payload { uint32_t pid, serial; uint64_t value; };
 struct event { uint32_t command; struct binder_transaction_data transaction; uint64_t cookie; };
@@ -40,11 +41,11 @@ static void transmit(int fd, uint32_t operation, uint32_t code, uint32_t flags, 
         .data_size=size,.data.ptr.buffer=(uintptr_t)bytes};
     command(fd,operation,&data,sizeof(data));
 }
-static struct event receive(int fd) {
+static struct event receive_from(int fd, int fallback) {
     for (;;) {
         unsigned char bytes[256];
         struct binder_write_read io={.read_size=sizeof(bytes),.read_buffer=(uintptr_t)bytes};
-        CHECK(ioctl(fd,BINDER_WRITE_READ,&io)==0 && io.read_consumed>=8 && io.read_consumed<=sizeof(bytes));
+        CHECK(ioctl(fd,BINDER_WRITE_READ,&io)==0 && io.read_consumed>=4 && io.read_consumed<=sizeof(bytes));
         struct event result={0}; size_t at=0;
         while (at<io.read_consumed) {
             uint32_t code; CHECK(io.read_consumed-at>=4); memcpy(&code,bytes+at,4); at+=4;
@@ -56,8 +57,10 @@ static struct event receive(int fd) {
             at+=size;
         }
         if (result.command) return result;
+        if(io.read_consumed==4 && fd!=fallback) {fd=fallback;flush_seen=1;}
     }
 }
+static struct event receive(int fd) {return receive_from(fd,fd);}
 static void release_buffer(int fd, const struct event *event) {
     binder_uintptr_t address=event->transaction.data.ptr.buffer;
     CHECK(address>=(uintptr_t)pool && address+event->transaction.data_size<=(uintptr_t)pool+POOL_SIZE);
@@ -68,7 +71,8 @@ static void *waiting_reply(void *unused) {
     struct payload request={(uint32_t)getpid(),1,0x1122334455667788ULL};
     transmit(request_fd,BC_TRANSACTION,10,0,&request,sizeof(request));
     atomic_store(&phase,1);
-    struct event reply=receive(request_fd);
+    struct event reply=receive_from(request_fd,control_fd);
+    CHECK(flush_seen==1);
     CHECK(reply.command==BR_REPLY && reply.transaction.sender_pid==0 && reply.transaction.sender_euid==(uint32_t)getuid());
     CHECK(reply.transaction.data_size==sizeof(request));
     struct payload answer; memcpy(&answer,(void *)(uintptr_t)reply.transaction.data.ptr.buffer,sizeof(answer));
@@ -141,6 +145,14 @@ static void client(int fd) {
     puts("BINDER_CLIENT_OK identity=1 reply=1 oneway=3 death=1 interrupted=1 fd_reuse=1 readonly=1");
 }
 static void server(int fd) {
+    int hardware=open("/dev/hwbinder",O_RDWR|O_CLOEXEC);
+    int vendor=open("/dev/vndbinder",O_RDWR|O_CLOEXEC);
+    CHECK(hardware>=0 && vendor>=0);
+    // Context managers are per device, not aliases of the framework service.
+    CHECK(ioctl(hardware,BINDER_SET_CONTEXT_MGR,NULL)==0 && ioctl(vendor,BINDER_SET_CONTEXT_MGR,NULL)==0);
+    int collision=open("/dev/hwbinder",O_RDWR|O_CLOEXEC);CHECK(collision>=0);
+    CHECK(ioctl(collision,BINDER_SET_CONTEXT_MGR,NULL)==-1 && errno==EBUSY);
+    CHECK(close(collision)==0 && close(hardware)==0 && close(vendor)==0);
     command(fd,BC_ENTER_LOOPER,NULL,0);
     uint32_t oneway=0, client_pid=0;
     for (;;) {
@@ -176,7 +188,7 @@ static void server(int fd) {
     // Close the service first: unmapping an active receive pool intentionally
     // fails its outstanding work before a later close could report peer death.
     CHECK(close(fd)==0 && munmap(pool,POOL_SIZE)==0);
-    puts("BINDER_SERVER_OK identity=1 reply=1 oneway=3 receive_pool=1 readonly=1");
+    puts("BINDER_SERVER_OK identity=1 reply=1 oneway=3 receive_pool=1 readonly=1 domains=3");
 }
 int main(void) {
     int fd=open("/dev/binder",O_RDWR|O_CLOEXEC); CHECK(fd>=0);

@@ -18,6 +18,24 @@ const MAX_BUFFERS: usize = 128;
 const MAX_EVENTS: usize = 128;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(usize)]
+pub enum Domain {
+    Binder,
+    Hardware,
+    Vendor,
+}
+impl Domain {
+    pub const ALL: [Self; 3] = [Self::Binder, Self::Hardware, Self::Vendor];
+    pub const fn path(self) -> &'static str {
+        match self {
+            Self::Binder => "/dev/binder",
+            Self::Hardware => "/dev/hwbinder",
+            Self::Vendor => "/dev/vndbinder",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Identity {
     pub process: u64,
     pub uid: u32,
@@ -37,6 +55,8 @@ pub struct Stats {
     pub oneway: u64,
     pub failed: u64,
     pub deaths: u64,
+    pub flushes: u64,
+    pub flush_returns: u64,
     pub connections: usize,
     pub transactions: usize,
     pub buffers: usize,
@@ -54,6 +74,7 @@ struct Thread {
     tid: u32,
     looper: u8,
     waiting: bool,
+    need_return: bool,
     outgoing: Option<u64>,
     incoming: Option<u64>,
     error: Option<u32>,
@@ -84,6 +105,7 @@ struct Death {
 }
 struct Connection {
     id: u64,
+    domain: Domain,
     identity: Identity,
     mapping: Option<Mapping>,
     mapped_once: bool,
@@ -142,8 +164,8 @@ pub struct Router {
     connections: Vec<Connection>,
     pending: Vec<Pending>,
     next_id: u64,
-    manager: Option<Manager>,
-    manager_uid: Option<u32>,
+    managers: [Option<Manager>; 3],
+    manager_uids: [Option<u32>; 3],
     stats: Stats,
 }
 impl Default for Router {
@@ -157,8 +179,8 @@ impl Router {
             connections: Vec::new(),
             pending: Vec::new(),
             next_id: 1,
-            manager: None,
-            manager_uid: None,
+            managers: [None; 3],
+            manager_uids: [None; 3],
             stats: Stats {
                 opened: 0,
                 closed: 0,
@@ -167,6 +189,8 @@ impl Router {
                 oneway: 0,
                 failed: 0,
                 deaths: 0,
+                flushes: 0,
+                flush_returns: 0,
                 connections: 0,
                 transactions: 0,
                 buffers: 0,
@@ -196,6 +220,7 @@ impl Router {
             tid,
             looper: 0,
             waiting: false,
+            need_return: false,
             outgoing: None,
             incoming: None,
             error: None,
@@ -204,6 +229,9 @@ impl Router {
         Ok((c, threads.len() - 1))
     }
     pub fn open(&mut self, identity: Identity) -> Result<u64, i64> {
+        self.open_in(identity, Domain::Binder)
+    }
+    pub fn open_in(&mut self, identity: Identity, domain: Domain) -> Result<u64, i64> {
         if identity.process == 0 || self.connections.len() >= MAX_CONNECTIONS {
             return Err(24);
         }
@@ -212,6 +240,7 @@ impl Router {
         self.next_id = id.checked_add(1).ok_or(75)?;
         self.connections.push(Connection {
             id,
+            domain,
             identity,
             mapping: None,
             mapped_once: false,
@@ -271,15 +300,16 @@ impl Router {
     }
     pub fn set_manager(&mut self, id: u64, pointer: u64, cookie: u64) -> Result<(), i64> {
         let c = self.index(id)?;
-        if self.manager.is_some() {
+        let domain = self.connections[c].domain as usize;
+        if self.managers[domain].is_some() {
             return Err(16);
         }
         let uid = self.connections[c].identity.uid;
-        if self.manager_uid.is_some_and(|prior| prior != uid) {
+        if self.manager_uids[domain].is_some_and(|prior| prior != uid) {
             return Err(1);
         }
-        self.manager_uid = Some(uid);
-        self.manager = Some(Manager {
+        self.manager_uids[domain] = Some(uid);
+        self.managers[domain] = Some(Manager {
             connection: id,
             pointer,
             cookie,
@@ -315,6 +345,16 @@ impl Router {
         self.connections[c].threads[t].waiting = waiting;
         Ok(())
     }
+    /// Linux filp_close flushes Binder even while dup/in-flight references
+    /// retain the open file. Idle loopers must return so libbinder can stop.
+    pub fn flush(&mut self, id: u64) {
+        if let Ok(c) = self.index(id) {
+            for thread in &mut self.connections[c].threads {
+                thread.need_return = true;
+            }
+            self.stats.flushes += 1;
+        }
+    }
     pub fn reference(&mut self, id: u64, handle: u32, command: u32) -> Result<(), i64> {
         if handle != 0 {
             return Err(22);
@@ -322,7 +362,7 @@ impl Router {
         let c = self.index(id)?;
         let target = self.connections[c]
             .reference
-            .or(self.manager.map(|m| m.connection))
+            .or(self.managers[self.connections[c].domain as usize].map(|m| m.connection))
             .ok_or(22)?;
         let connection = &mut self.connections[c];
         let count = match command {
@@ -438,10 +478,11 @@ impl Router {
         {
             return Err(11);
         }
+        let manager = self.managers[self.connections[c].domain as usize];
         let target = self.connections[c]
             .reference
-            .or(self.manager.map(|m| m.connection));
-        let Some(manager) = self.manager.filter(|m| Some(m.connection) == target) else {
+            .or(manager.map(|m| m.connection));
+        let Some(manager) = manager.filter(|m| Some(m.connection) == target) else {
             self.error(id, tid, BR_DEAD_REPLY);
             self.stats.failed += 1;
             return Ok(());
@@ -643,6 +684,7 @@ impl Router {
         if capacity < 72 {
             return Err(22);
         }
+        let flushed = core::mem::take(&mut self.connections[c].threads[t].need_return);
         if let Some(error) = self.connections[c].threads[t].error.take() {
             return Ok(Some(Delivery::code(error)));
         }
@@ -688,6 +730,12 @@ impl Router {
                     death.state = DeathState::Delivered;
                     self.stats.deaths += 1;
                 }
+                return Ok(Some(delivery));
+            }
+            if flushed {
+                let mut delivery = Delivery::code(BR_NOOP);
+                delivery.length = 4;
+                self.stats.flush_returns += 1;
                 return Ok(Some(delivery));
             }
             return Ok(None);
@@ -844,8 +892,10 @@ impl Router {
         {
             self.fail_pending(tx, BR_DEAD_REPLY);
         }
-        if self.manager.is_some_and(|m| m.connection == id) {
-            self.manager = None;
+        for manager in &mut self.managers {
+            if manager.is_some_and(|m| m.connection == id) {
+                *manager = None;
+            }
         }
         for c in &mut self.connections {
             if c.reference == Some(id)

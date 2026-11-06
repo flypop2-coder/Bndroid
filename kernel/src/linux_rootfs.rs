@@ -102,15 +102,17 @@ pub fn init(region: Option<FwCfgMmioRegion>) -> Result<(), &'static str> {
             .map_err(|_| "reserved device path")?;
     }
     #[cfg(feature = "art-runtime")]
-    catalog
-        .insert(Node {
-            path: "dev/binder",
-            data: &[],
-            kind: Kind::File,
-            mode: 0o666,
-            inode: 7,
-        })
-        .map_err(|_| "reserved Binder device path")?;
+    for domain in bndroid_kernel::linux_binder::Domain::ALL {
+        catalog
+            .insert(Node {
+                path: &domain.path()[1..],
+                data: &[],
+                kind: Kind::File,
+                mode: 0o666,
+                inode: 7 + domain as u64,
+            })
+            .map_err(|_| "reserved Binder device path")?;
+    }
     #[cfg(feature = "art-runtime")]
     for (index, path) in ["proc", "proc/self", "proc/self/stat", "proc/self/maps"]
         .into_iter()

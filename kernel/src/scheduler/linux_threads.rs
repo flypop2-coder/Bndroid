@@ -8,6 +8,8 @@ use bndroid_kernel::linux_sync::{self, FutexQueue, Wait};
 #[cfg(feature = "art-runtime")]
 pub(crate) mod binder;
 #[cfg(feature = "art-runtime")]
+mod io;
+#[cfg(feature = "art-runtime")]
 pub mod signals;
 
 #[derive(Clone, Copy)]
@@ -238,6 +240,10 @@ fn current_tid() -> u64 {
 // Keep thread/VM branch temporaries out of the common syscall frame under LTO.
 #[cfg_attr(feature = "art-runtime", inline(never))]
 pub fn dispatch(frame: *mut TrapFrame, r: &[u64; 31]) -> Option<*mut TrapFrame> {
+    #[cfg(feature = "art-runtime")]
+    if let Some(next) = io::dispatch(frame, r) {
+        return Some(next);
+    }
     #[cfg(feature = "art-runtime")]
     if let Some(next) = binder::dispatch(frame, r) {
         return Some(next);
@@ -615,6 +621,8 @@ fn wake(selected: u64, result: u64) {
 }
 pub(super) fn wake_expired(now: u64) {
     #[cfg(feature = "art-runtime")]
+    io::wake_ready(now);
+    #[cfg(feature = "art-runtime")]
     binder::wake_ready();
     let selected = queue().expire(now);
     for context in USER_INIT_CONTEXT..CONTEXT_COUNT {
@@ -687,6 +695,7 @@ fn stop_group(
         #[cfg(feature = "art-runtime")]
         {
             binder::cancel(context);
+            io::cancel(context);
             let tid = if local(context).tid == 0 {
                 process as u32
             } else {
@@ -757,6 +766,8 @@ pub(super) fn terminate_group(process: u64) -> Result<bool, TerminateUserError> 
 pub(super) fn reset_context(context: usize) {
     queue().cancel(context);
     #[cfg(feature = "art-runtime")]
+    io::cancel(context);
+    #[cfg(feature = "art-runtime")]
     binder::cancel(context);
     #[cfg(feature = "art-runtime")]
     signals::reset(context);
@@ -808,9 +819,10 @@ pub fn evidence(marker: &str) {
     #[cfg(feature = "art-runtime")]
     {
         assert_eq!(binder::live(), 0);
+        io::evidence();
         let stats = bndroid_kernel::linux_binder::with(|r| r.stats());
         crate::kprintln!(
-            "LINUX_BINDER_OK opened={} closed={} submitted={} replied={} oneway={} failed={} deaths={} connections={} transactions={} buffers={} first_sender={} first_receiver={}",
+            "LINUX_BINDER_OK opened={} closed={} submitted={} replied={} oneway={} failed={} deaths={} connections={} transactions={} buffers={} first_sender={} first_receiver={} flushes={} flush_returns={}",
             stats.opened,
             stats.closed,
             stats.submitted,
@@ -822,7 +834,9 @@ pub fn evidence(marker: &str) {
             stats.transactions,
             stats.buffers,
             stats.first_sender,
-            stats.first_receiver
+            stats.first_receiver,
+            stats.flushes,
+            stats.flush_returns
         );
         assert_eq!(
             (stats.connections, stats.transactions, stats.buffers),

@@ -4,6 +4,7 @@ import android.os.Looper;
 import android.os.Parcel;
 import android.os.SystemClock;
 import android.util.Log;
+import java.util.concurrent.CountDownLatch;
 
 /** Runs through upstream app_process/RuntimeInit, never a replacement Framework. */
 public final class FrameworkMain {
@@ -11,7 +12,7 @@ public final class FrameworkMain {
         if (!condition) throw new AssertionError(message);
     }
 
-    public static void main(String[] arguments) {
+    public static void main(String[] arguments) throws Exception {
         Parcel written = Parcel.obtain();
         Parcel read = Parcel.obtain();
         try {
@@ -37,19 +38,33 @@ public final class FrameworkMain {
         }
         Log.i("bndroid-framework", "FRAMEWORK_STAGE parcel");
         Looper.prepare();
-        long began = SystemClock.uptimeMillis();
+        long[] began = {0};
         Thread owner = Thread.currentThread();
         int[] calls = {0};
         Handler handler = new Handler(Looper.myLooper());
-        require(handler.postDelayed(() -> {
-            require(Thread.currentThread() == owner, "Looper thread ownership");
-            require(SystemClock.uptimeMillis() - began >= 20, "early delayed message");
-            calls[0]++;
-            Looper.myLooper().quit();
-        }, 20), "message enqueue");
+        CountDownLatch idle = new CountDownLatch(1);
+        Looper.myQueue().addIdleHandler(() -> { idle.countDown(); return false; });
+        Thread poster = new Thread(() -> {
+            try { idle.await(); } catch (InterruptedException error) { throw new AssertionError(error); }
+            SystemClock.sleep(50);
+            require(handler.post(() -> {
+                require(Thread.currentThread() == owner, "wake callback ownership");
+                calls[0]++;
+                Log.i("bndroid-framework", "FRAMEWORK_STAGE wake");
+                began[0] = SystemClock.uptimeMillis();
+                require(handler.postDelayed(() -> {
+                    require(Thread.currentThread() == owner, "Looper thread ownership");
+                    require(SystemClock.uptimeMillis() - began[0] >= 20, "early delayed message");
+                    calls[0]++;
+                    Looper.myLooper().quit();
+                }, 20), "delayed message enqueue");
+            }), "cross-thread message enqueue");
+        }, "framework-poster");
+        poster.start();
         Looper.loop();
-        require(calls[0] == 1, "Looper callback count");
+        poster.join();
+        require(calls[0] == 2, "Looper callback count");
         Log.i("bndroid-framework", "FRAMEWORK_STAGE looper");
-        Log.i("bndroid-framework", "FRAMEWORK_MAIN_OK parcel=1 bundle=1 looper=1 delayed=1");
+        Log.i("bndroid-framework", "FRAMEWORK_MAIN_OK parcel=1 bundle=1 looper=1 delayed=1 wake=1");
     }
 }

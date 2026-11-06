@@ -424,7 +424,11 @@ fn target(node: Node<'static>) -> Target {
         "dev/null" => Target::Null,
         "dev/urandom" => Target::Random,
         #[cfg(feature = "art-runtime")]
-        "dev/binder" => Target::Binder,
+        "dev/binder" => Target::Binder(bndroid_kernel::linux_binder::Domain::Binder),
+        #[cfg(feature = "art-runtime")]
+        "dev/hwbinder" => Target::Binder(bndroid_kernel::linux_binder::Domain::Hardware),
+        #[cfg(feature = "art-runtime")]
+        "dev/vndbinder" => Target::Binder(bndroid_kernel::linux_binder::Domain::Vendor),
         _ => Target::Node(node),
     }
 }
@@ -454,7 +458,7 @@ fn open(dir: u64, address: u64, raw_flags: u64) -> Result<u64, i64> {
     let target = target(node);
     if flags & O_PATH == 0 && flags & 3 != 0 {
         match target {
-            Target::Null | Target::Binder => {}
+            Target::Null | Target::Binder(_) => {}
             Target::Node(n) if n.kind == Kind::Directory => return Err(21),
             _ => return Err(30),
         }
@@ -465,12 +469,14 @@ fn open(dir: u64, address: u64, raw_flags: u64) -> Result<u64, i64> {
         flags & !0x80000
     };
     #[cfg(feature = "art-runtime")]
-    if matches!(target, Target::Binder) && flags & O_PATH == 0 {
+    if let Target::Binder(domain) = target
+        && flags & O_PATH == 0
+    {
         let identity = bndroid_kernel::linux_binder::Identity {
             process: process::current_live_user_process_id().ok_or(3)?,
             uid: 10000,
         };
-        let file = FileRef::try_binder(identity, stored)?;
+        let file = FileRef::try_binder(identity, domain, stored)?;
         return process::with_linux_files(|t| t.insert(file, 0, flags & 0x80000 != 0));
     }
     #[cfg(feature = "art-runtime")]
@@ -627,7 +633,8 @@ fn stat(target: Target, address: u64) -> Result<u64, i64> {
         Target::Snapshot { inode, .. } => (inode, 0o100444, 0, 0),
         Target::UnixDatagram => (0, 0o140777, 0, 0),
         Target::Memory { inode, length } => (inode, 0o100777, length, 0),
-        Target::Binder => (7, 0o020666, 0, 0),
+        Target::Binder(domain) => (7 + domain as u64, 0o020666, 0, 0),
+        Target::EventFd | Target::Epoll => (8, 0o600, 0, 0),
     };
     bytes[..8].copy_from_slice(&1_u64.to_le_bytes());
     bytes[8..16].copy_from_slice(&inode.to_le_bytes());
@@ -663,7 +670,12 @@ fn access(dir: u64, pathname: u64, mode: u64, flags: u64) -> Result<u64, i64> {
     }
     let mut buffer = [0; PATH_MAX + 1];
     let node = node(dir, name(pathname, &mut buffer)?, flags & 0x100 == 0)?;
-    if mode & 2 != 0 && !matches!(node.path, "dev/null" | "dev/binder") {
+    if mode & 2 != 0
+        && !matches!(
+            node.path,
+            "dev/null" | "dev/binder" | "dev/hwbinder" | "dev/vndbinder"
+        )
+    {
         return Err(30);
     }
     if node.mode as u64 & mode != mode {
@@ -693,9 +705,18 @@ fn readlink(dir: u64, pathname: u64, output: u64, capacity: u64) -> Result<u64, 
             return out(output, &bytes[..length]).map(|_| length as u64);
         }
         let path = match opened.target() {
+            Target::EventFd | Target::Epoll => {
+                let name: &[u8] = if matches!(opened.target(), Target::EventFd) {
+                    b"anon_inode:[eventfd]"
+                } else {
+                    b"anon_inode:[eventpoll]"
+                };
+                let length = name.len().min(capacity as usize);
+                return out(output, &name[..length]).map(|_| length as u64);
+            }
             Target::Node(node) => node.path,
             Target::Snapshot { path, .. } => path,
-            Target::Binder => "dev/binder",
+            Target::Binder(domain) => &domain.path()[1..],
             _ => return Err(2),
         };
         let mut absolute = [0; PATH_MAX + 1];
