@@ -33,6 +33,7 @@ pub enum Target {
     Snapshot { path: &'static str, inode: u64 },
     UnixDatagram,
     Memory { inode: u64, length: u64 },
+    Binder,
 }
 
 struct Description {
@@ -43,6 +44,16 @@ struct Description {
     snapshot: Option<Vec<u8>>,
     log_connected: AtomicBool,
     memory: Option<crate::linux_memfd::MemoryFile>,
+    binder: Option<BinderFile>,
+}
+pub struct BinderFile {
+    pub id: u64,
+    pub backing: FileRef,
+}
+impl Drop for BinderFile {
+    fn drop(&mut self) {
+        crate::linux_binder::with(|router| router.close(self.id));
+    }
 }
 pub struct FileRef(NonNull<Description>);
 // Descriptions contain immutable bytes, atomic shared descriptor state, or a
@@ -51,7 +62,7 @@ unsafe impl Send for FileRef {}
 unsafe impl Sync for FileRef {}
 impl FileRef {
     pub fn try_new(target: Target, flags: u32) -> Result<Self, i64> {
-        Self::create(target, flags, None, None)
+        Self::create(target, flags, None, None, None)
     }
     pub fn try_snapshot(
         path: &'static str,
@@ -59,7 +70,13 @@ impl FileRef {
         flags: u32,
         bytes: Vec<u8>,
     ) -> Result<Self, i64> {
-        Self::create(Target::Snapshot { path, inode }, flags, Some(bytes), None)
+        Self::create(
+            Target::Snapshot { path, inode },
+            flags,
+            Some(bytes),
+            None,
+            None,
+        )
     }
     pub fn try_memory(name: &[u8], flags: u32) -> Result<Self, i64> {
         let memory = crate::linux_memfd::MemoryFile::new(name, flags)?;
@@ -71,6 +88,18 @@ impl FileRef {
             2 | 0x20000,
             None,
             Some(memory),
+            None,
+        )
+    }
+    pub fn try_binder(owner: crate::linux_binder::Identity, flags: u32) -> Result<Self, i64> {
+        let backing = Self::try_memory(b"binder-receive", 0)?;
+        let id = crate::linux_binder::with(|router| router.open(owner))?;
+        Self::create(
+            Target::Binder,
+            flags,
+            None,
+            None,
+            Some(BinderFile { id, backing }),
         )
     }
     fn create(
@@ -78,6 +107,7 @@ impl FileRef {
         flags: u32,
         snapshot: Option<Vec<u8>>,
         memory: Option<crate::linux_memfd::MemoryFile>,
+        binder: Option<BinderFile>,
     ) -> Result<Self, i64> {
         let pointer =
             NonNull::new(unsafe { alloc(Layout::new::<Description>()) }.cast::<Description>())
@@ -91,6 +121,7 @@ impl FileRef {
                 snapshot,
                 log_connected: AtomicBool::new(false),
                 memory,
+                binder,
             });
         }
         LIVE_DESCRIPTIONS.fetch_add(1, Ordering::Relaxed);
@@ -110,6 +141,9 @@ impl FileRef {
     }
     pub fn memory(&self) -> Option<&crate::linux_memfd::MemoryFile> {
         self.inner().memory.as_ref()
+    }
+    pub fn binder(&self) -> Option<&BinderFile> {
+        self.inner().binder.as_ref()
     }
     pub fn snapshot(&self) -> Option<&[u8]> {
         self.inner().snapshot.as_deref()

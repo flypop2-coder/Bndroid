@@ -177,6 +177,8 @@ mod input_stream;
 mod interrupt;
 mod kernel_heap;
 mod limits;
+#[cfg(feature = "art-runtime")]
+mod linux_binder_driver;
 #[cfg(feature = "linux-abi-runtime")]
 mod linux_entropy;
 #[cfg(feature = "bionic-dynamic-runtime")]

@@ -52,6 +52,8 @@ pub struct FileBacking {
     pub memory: bool,
     /// Permission at mmap time, retained across later FUTURE_WRITE sealing.
     pub may_write: bool,
+    /// Device receive buffers cannot be made executable by mprotect.
+    pub may_execute: bool,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Region {
@@ -146,6 +148,9 @@ impl Layout {
             return Err(EINVAL);
         }
         let protection = Protection::from_linux(prot)?;
+        if protection == Protection::ReadExecute && file_bytes.is_some_and(|f| !f.may_execute) {
+            return Err(EACCES);
+        }
         if shared && file_bytes.is_some_and(|f| !f.may_write) && protection == Protection::ReadWrite
         {
             return Err(EACCES);
@@ -179,6 +184,14 @@ impl Layout {
         let protection = Protection::from_linux(prot)?;
         let size = rounded_length(length)?;
         let end = checked_range(address, size)?;
+        if protection == Protection::ReadExecute
+            && self
+                .regions
+                .iter()
+                .any(|r| r.start < end && address < r.end && r.file.is_some_and(|f| !f.may_execute))
+        {
+            return Err(EACCES);
+        }
         if protection == Protection::ReadWrite
             && self.regions.iter().any(|r| {
                 r.start < end && address < r.end && r.shared && r.file.is_some_and(|f| !f.may_write)
@@ -430,6 +443,24 @@ mod tests {
     use super::*;
     #[test]
     #[cfg(feature = "art-runtime")]
+    fn device_receive_buffers_reject_write_and_execute_after_splitting() {
+        let backing = FileBacking {
+            memory: true,
+            may_write: false,
+            may_execute: false,
+            ..file(PAGE * 3)
+        };
+        let mapped = Layout::default()
+            .map_with_backing(0, PAGE * 3, 1, 0x21, 0, Some(backing))
+            .unwrap();
+        let start = mapped.start;
+        let split = mapped.layout.protect(start + PAGE, PAGE, 0).unwrap().layout;
+        assert_eq!(split.protect(start, PAGE * 3, 3).err().unwrap(), EACCES);
+        assert_eq!(split.protect(start + PAGE, PAGE, 5).err().unwrap(), EACCES);
+        assert!(split.protect(start + PAGE, PAGE, 1).is_ok());
+    }
+    #[test]
+    #[cfg(feature = "art-runtime")]
     fn memfd_mapping_rights_and_inheritance_survive_splits() {
         let backing = FileBacking {
             memory: true,
@@ -527,6 +558,7 @@ mod tests {
             path: "system/data",
             memory: false,
             may_write: false,
+            may_execute: true,
         };
         let mapped = Layout::default()
             .map_with_backing(0, PAGE * 3, 3, 0x22, PAGE * 3, Some(backing))
@@ -573,6 +605,7 @@ mod tests {
             path: "system/test",
             memory: false,
             may_write: false,
+            may_execute: true,
         }
     }
     #[test]

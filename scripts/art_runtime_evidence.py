@@ -29,6 +29,7 @@ def completion_status(text, mode):
     expected = {
         "memory": "ART_MEMORY_OK low_64m=1 protections=1 holes=1 shared_threads=1 kernel_isolation=1\n",
         "memfd": "ART_MEMFD_OK aliases=1 code=1 truncate=1 seals=1 lifetime=1 wx=1\n",
+        "binder": "BINDER_CLIENT_OK identity=1 reply=1 oneway=3 death=1 interrupted=1 fd_reuse=1 readonly=1\n",
         "properties": "ART_PROPERTIES_OK bionic_reader=1 callback=1 enumerate=1 wait=1 immutable=1\n",
         "help": "dalvikvm: [options] class [argument ...]\n",
         "framework-help": "dalvikvm: [options] class [argument ...]\n",
@@ -57,6 +58,17 @@ def completion_status(text, mode):
         if any(sum(pid == owner and message == "FRAMEWORK_STAGE " + stage for pid, message in messages) != 1
                for owner in successes for stage in ("parcel", "looper")):
             return "missing-framework-stage"
+    elif mode == "binder":
+        if complete_lines(text, expected.rstrip("\n")) != 1 or complete_lines(text, "BINDER_SERVER_OK identity=1 reply=1 oneway=3 receive_pool=1 readonly=1") != 1:
+            return "missing-binder-process-proof"
+        try:
+            binder = parse_marker(text, "LINUX_BINDER_OK")
+            if not binder or any(binder.get(key) != "0" for key in ("connections", "transactions", "buffers")):
+                return "invalid-binder-cleanup"
+            if any(int(binder.get(key, 0)) < count for key, count in (("opened", 2), ("submitted", 8), ("replied", 3), ("oneway", 3), ("failed", 5), ("deaths", 1))) or binder["opened"] != binder["closed"]:
+                return "missing-binder-transport-proof"
+        except (ValueError, KeyError):
+            return "invalid-binder-record"
     elif complete_lines(text, expected.rstrip("\n")) != 2 or (mode == "help" and complete_lines(text, "The following ART arguments are supported:") != 2):
         return "exited-without-expected-proof"
     required = {"abi": "70", "native_processes": "2", "native_exits": "2", "native_reaped": "2",
@@ -71,6 +83,15 @@ def completion_status(text, mode):
         return "invalid-process-proof"
     if not threads.get("created") or threads["created"] != threads.get("reaped"):
         return "invalid-thread-proof"
+    if mode == "binder":
+        if {binder.get("first_sender"), binder.get("first_receiver")} != set(exits):
+            return "invalid-binder-process-identity"
+        try:
+            signals = parse_marker(text, "LINUX_SIGNALS_OK")
+            if not signals or signals.get("pending") != "0" or signals.get("delivered") != "3" or signals.get("returned") != "3" or int(signals.get("interrupted", 0)) < 1 or int(threads["created"]) < 2:
+                return "invalid-binder-signal-proof"
+        except ValueError:
+            return "invalid-binder-signal-proof"
     if mode == "memfd":
         try:
             signals = parse_marker(text, "LINUX_SIGNALS_OK")
@@ -169,7 +190,7 @@ def main():
     process = None
     text = ""
     status = "timeout"
-    if mode not in ("java", "managed", "memory", "memfd", "properties", "help", "framework", "framework-help", "signals", "signal-bad-frame", "signal-bad-pc", "signal-bad-fp", "signal-default", "signal-guard"):
+    if mode not in ("java", "managed", "memory", "memfd", "binder", "properties", "help", "framework", "framework-help", "signals", "signal-bad-frame", "signal-bad-pc", "signal-bad-fp", "signal-default", "signal-guard"):
         raise SystemExit("Unknown ART mode")
     with tempfile.NamedTemporaryFile(prefix="bndroid-art-entropy-") as entropy:
         entropy.write(os.urandom(65536))
@@ -213,6 +234,8 @@ def main():
                "apk_dex_jni_verified": mode == "managed" and status == "managed-passed",
                "framework_frontend_verified": mode == "framework-help" and status == "framework-help-passed",
                "shared_memfd_verified": mode == "memfd" and status == "memfd-passed",
+               "binder_transport_verified": mode == "binder" and status == "binder-passed",
+               "binder": diagnostic_record(text, "LINUX_BINDER_OK"),
                "boot_properties_verified": mode == "properties" and status == "properties-passed",
                "framework_parcel_looper_verified": mode == "framework" and status == "framework-passed",
                "abort_messages": re.findall(r"^LINUX_ABORT_MESSAGE pid=\d+ message=(.*)$", text, re.MULTILINE),

@@ -2,6 +2,14 @@
 
 This page records implemented behavior and validation, with a September 9, 2026 platform baseline and dated updates below. Historical test counts belong to the indicated development runs; they are not a claim that every historical gate was rerun during publication. The [complete original status log](docs/archive/originals/IMPLEMENTATION_STATUS.txt) preserves detailed evidence and earlier milestones. Future tasks belong only in [TODO.md](TODO.md).
 
+## Initial Binder transport update — November 6, 2026
+
+Two concurrent Bionic processes now communicate through the custom kernel's LP64 Binder adapter: context-manager byte transactions/replies, ordered one-way messages, authenticated process identity and death notifications. Read-only/non-executable receive pools, retained open-file ownership across descriptor reuse, interrupted reads, failed user copies, peer exit and complete cleanup have real QEMU evidence. The final native gate (`.bndroid/art-runtime/check.OfR9ow`) reports eight submitted transactions, three replies, three one-way messages, five expected failures, one death notification and zero live Binder resources. Its temporary disk is unchanged.
+
+The original Framework starts its Binder pool and reaches the owned Java entry's actual Parcel/Bundle round trip. Looper creation still fails because eventfd is missing; no Looper, ActivityThread, ServiceManager or full-app acceptance is claimed. Binder object/FD transfer and capability policy remain open, so A1–A6 are still incomplete. A boot-stack overflow exposed by the larger root catalog was fixed by parsing directly into static storage, without increasing stack or memory limits. See [Binder Transport-0](docs/milestones/androidbox/BINDER_TRANSPORT_0.md) for scope, commands, evidence and the current failure.
+
+Validation passes 1,139 workspace host tests, 407 Framework library tests, 33 Python checks, host-library and AArch64 lint gates, native boot/mobile UI, dynamic Bionic/thread/EOF regressions, shared code-cache, properties, memory, managed APK/GC/JNI, all signal gates and Framework frontend. Runtime inputs remain unchanged and local; the temporary-disk interactive demo remains available.
+
 ## Framework dynamic JNI update — November 6, 2026
 
 TrafficStats's runtime JNI dependency is now included with its complete ELF dependency graph. The original Framework loads it through the unchanged Tethering namespace and reaches `RuntimeInit.nativeFinishInit`; startup then fails directly at the absent `/dev/binder`. The failed process and all six workers are completely reclaimed. Parcel/Looper, ActivityThread and A1–A6 remain incomplete. The local input set contains 349 files / 265,085,778 bytes. See [Framework JNI-0](docs/milestones/androidbox/FRAMEWORK_JNI_0.md) for current evidence and limits.

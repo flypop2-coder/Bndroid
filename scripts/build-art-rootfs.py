@@ -17,7 +17,7 @@ def main():
     parser.add_argument("--runtime", required=True, type=Path)
     parser.add_argument("--dex", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--mode", choices=("java", "managed", "memory", "memfd", "properties", "help", "framework", "framework-help", "signals", "signal-bad-frame", "signal-bad-pc", "signal-bad-fp", "signal-default", "signal-guard"), default="java")
+    parser.add_argument("--mode", choices=("java", "managed", "memory", "memfd", "binder", "properties", "help", "framework", "framework-help", "signals", "signal-bad-frame", "signal-bad-pc", "signal-bad-fp", "signal-default", "signal-guard"), default="java")
     args = parser.parse_args()
     provenance = json.loads((args.runtime / "art-provenance.json").read_text())
     framework = args.mode.startswith("framework")
@@ -70,6 +70,8 @@ def main():
         inputs["dev/__properties__"] = encode_properties(runtime_properties(provenance["source"]))
     if args.mode == "memfd":
         inputs["system/bin/memfd-probe"] = (args.dex.parent / "memfd-probe").read_bytes()
+    if args.mode == "binder":
+        inputs["system/bin/binder-probe"] = (args.dex.parent / "binder-probe").read_bytes()
     if args.mode == "properties":
         inputs["system/bin/properties-probe"] = (args.dex.parent / "properties-probe").read_bytes()
     if args.mode == "managed":
@@ -95,7 +97,7 @@ def main():
         # The runtime must actually load DEX from the APK. There is no loose
         # managed DEX or extracted application library on its positive path.
         del inputs["system/framework/bndroid-probe.dex"]
-    if len(inputs) + len(aliases) + 4 + 7 > (512 if framework else 128):
+    if len(inputs) + len(aliases) + 4 + 8 > (512 if framework else 128):
         raise SystemExit("Rootfs exceeds catalog capacity")
     if any(len(name.encode()) > 100 for name in (*inputs, *aliases)):
         raise SystemExit("Runtime input exceeds the supported USTAR path field")
@@ -128,6 +130,8 @@ def main():
         arguments = [arguments[0], "/system/bin/art-memory-probe"]
     if args.mode == "memfd":
         arguments = [arguments[0], "/system/bin/memfd-probe"]
+    if args.mode == "binder":
+        arguments = [arguments[0], "/system/bin/binder-probe"]
     if args.mode == "properties":
         arguments = [arguments[0], "/system/bin/properties-probe"]
     if args.mode.startswith("signal"):

@@ -43,6 +43,13 @@ export CARGO_TARGET_DIR="$TARGET_ROOT"
 
 KERNEL_FEATURES="${BNDROID_KERNEL_FEATURES:-}"
 USERSPACE_FEATURES="${BNDROID_USERSPACE_FEATURES:-}"
+if feature_list_contains "$KERNEL_FEATURES" "binder-runtime"; then
+  feature_list_contains "$USERSPACE_FEATURES" "binder-runtime" || { echo "binder-runtime must match kernel and userspace" >&2; exit 1; }
+  KERNEL_FEATURES="$(append_feature "$KERNEL_FEATURES" "art-runtime")"
+  USERSPACE_FEATURES="$(append_feature "$USERSPACE_FEATURES" "art-runtime")"
+elif feature_list_contains "$USERSPACE_FEATURES" "binder-runtime"; then
+  echo "binder-runtime must match kernel and userspace" >&2; exit 1
+fi
 if feature_list_contains "$KERNEL_FEATURES" "framework-runtime"; then
   KERNEL_FEATURES="$(append_feature "$KERNEL_FEATURES" "art-runtime")"
 fi

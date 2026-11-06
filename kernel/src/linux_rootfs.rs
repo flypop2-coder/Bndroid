@@ -26,9 +26,9 @@ const DIRECTORY_BYTES: usize = FILE_DIRECTORY_HEADER_BYTES + 64 * FILE_ENTRY_BYT
 struct Storage(UnsafeCell<[u8; ROOTFS_BYTES]>);
 unsafe impl Sync for Storage {}
 static STORAGE: Storage = Storage(UnsafeCell::new([0; ROOTFS_BYTES]));
-struct Catalog(UnsafeCell<Option<Archive<'static>>>);
+struct Catalog(UnsafeCell<Archive<'static>>);
 unsafe impl Sync for Catalog {}
-static CATALOG: Catalog = Catalog(UnsafeCell::new(None));
+static CATALOG: Catalog = Catalog(UnsafeCell::new(Archive::empty()));
 static READY: AtomicBool = AtomicBool::new(false);
 
 pub fn init(region: Option<FwCfgMmioRegion>) -> Result<(), &'static str> {
@@ -75,7 +75,12 @@ pub fn init(region: Option<FwCfgMmioRegion>) -> Result<(), &'static str> {
     // immutable for all remaining kernel and guest lifetimes.
     let bytes =
         unsafe { core::slice::from_raw_parts(STORAGE.0.get().cast::<u8>(), file.size as usize) };
-    let mut catalog = Archive::parse(bytes).map_err(|_| "invalid runtime USTAR archive")?;
+    // The 512-entry catalog is 24 KiB. Returning/copying several such values
+    // crossed the fixed boot stack before the heap/scheduler were initialized.
+    let catalog = unsafe { &mut *CATALOG.0.get() };
+    catalog
+        .parse_into(bytes)
+        .map_err(|_| "invalid runtime USTAR archive")?;
     catalog
         .insert(Node {
             path: "apex/com.android.runtime/bin/linker64",
@@ -97,6 +102,16 @@ pub fn init(region: Option<FwCfgMmioRegion>) -> Result<(), &'static str> {
             .map_err(|_| "reserved device path")?;
     }
     #[cfg(feature = "art-runtime")]
+    catalog
+        .insert(Node {
+            path: "dev/binder",
+            data: &[],
+            kind: Kind::File,
+            mode: 0o666,
+            inode: 7,
+        })
+        .map_err(|_| "reserved Binder device path")?;
+    #[cfg(feature = "art-runtime")]
     for (index, path) in ["proc", "proc/self", "proc/self/stat", "proc/self/maps"]
         .into_iter()
         .enumerate()
@@ -116,9 +131,6 @@ pub fn init(region: Option<FwCfgMmioRegion>) -> Result<(), &'static str> {
             .map_err(|_| "reserved proc path")?;
     }
     let files = catalog.len();
-    unsafe {
-        *CATALOG.0.get() = Some(catalog);
-    }
     READY.store(true, Ordering::Release);
     crate::kprintln!(
         "LINUX_ROOTFS_OK files={} bytes={} writable=0",
@@ -130,11 +142,11 @@ pub fn init(region: Option<FwCfgMmioRegion>) -> Result<(), &'static str> {
 
 pub fn resolve(path: &Path, follow: bool) -> Result<Node<'static>, i64> {
     assert!(READY.load(Ordering::Acquire));
-    unsafe { (*CATALOG.0.get()).as_ref().unwrap() }.resolve(path, follow)
+    unsafe { &*CATALOG.0.get() }.resolve(path, follow)
 }
 
 pub fn usage() -> (usize, usize) {
     assert!(READY.load(Ordering::Acquire));
-    let catalog = unsafe { (*CATALOG.0.get()).as_ref().unwrap() };
+    let catalog = unsafe { &*CATALOG.0.get() };
     (catalog.file_bytes(), catalog.len())
 }

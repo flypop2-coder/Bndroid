@@ -423,6 +423,8 @@ fn target(node: Node<'static>) -> Target {
     match node.path {
         "dev/null" => Target::Null,
         "dev/urandom" => Target::Random,
+        #[cfg(feature = "art-runtime")]
+        "dev/binder" => Target::Binder,
         _ => Target::Node(node),
     }
 }
@@ -452,7 +454,7 @@ fn open(dir: u64, address: u64, raw_flags: u64) -> Result<u64, i64> {
     let target = target(node);
     if flags & O_PATH == 0 && flags & 3 != 0 {
         match target {
-            Target::Null => {}
+            Target::Null | Target::Binder => {}
             Target::Node(n) if n.kind == Kind::Directory => return Err(21),
             _ => return Err(30),
         }
@@ -462,6 +464,15 @@ fn open(dir: u64, address: u64, raw_flags: u64) -> Result<u64, i64> {
     } else {
         flags & !0x80000
     };
+    #[cfg(feature = "art-runtime")]
+    if matches!(target, Target::Binder) && flags & O_PATH == 0 {
+        let identity = bndroid_kernel::linux_binder::Identity {
+            process: process::current_live_user_process_id().ok_or(3)?,
+            uid: 10000,
+        };
+        let file = FileRef::try_binder(identity, stored)?;
+        return process::with_linux_files(|t| t.insert(file, 0, flags & 0x80000 != 0));
+    }
     #[cfg(feature = "art-runtime")]
     let file = if matches!(node.path, "proc/self/stat" | "proc/self/maps") {
         FileRef::try_snapshot(
@@ -616,6 +627,7 @@ fn stat(target: Target, address: u64) -> Result<u64, i64> {
         Target::Snapshot { inode, .. } => (inode, 0o100444, 0, 0),
         Target::UnixDatagram => (0, 0o140777, 0, 0),
         Target::Memory { inode, length } => (inode, 0o100777, length, 0),
+        Target::Binder => (7, 0o020666, 0, 0),
     };
     bytes[..8].copy_from_slice(&1_u64.to_le_bytes());
     bytes[8..16].copy_from_slice(&inode.to_le_bytes());
@@ -651,7 +663,7 @@ fn access(dir: u64, pathname: u64, mode: u64, flags: u64) -> Result<u64, i64> {
     }
     let mut buffer = [0; PATH_MAX + 1];
     let node = node(dir, name(pathname, &mut buffer)?, flags & 0x100 == 0)?;
-    if mode & 2 != 0 && node.path != "dev/null" {
+    if mode & 2 != 0 && !matches!(node.path, "dev/null" | "dev/binder") {
         return Err(30);
     }
     if node.mode as u64 & mode != mode {
@@ -683,6 +695,7 @@ fn readlink(dir: u64, pathname: u64, output: u64, capacity: u64) -> Result<u64, 
         let path = match opened.target() {
             Target::Node(node) => node.path,
             Target::Snapshot { path, .. } => path,
+            Target::Binder => "dev/binder",
             _ => return Err(2),
         };
         let mut absolute = [0; PATH_MAX + 1];
@@ -702,6 +715,10 @@ fn mmap_file(args: [u64; 6]) -> Result<u64, i64> {
     let opened = file(args[4])?;
     if !opened.readable() {
         return Err(13);
+    }
+    #[cfg(feature = "art-runtime")]
+    if opened.binder().is_some() {
+        return crate::linux_binder_driver::map(args, &opened);
     }
     #[cfg(feature = "art-runtime")]
     if opened.memory().is_some() {

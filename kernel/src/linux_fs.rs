@@ -104,14 +104,34 @@ pub struct Archive<'a> {
     count: usize,
 }
 impl<'a> Archive<'a> {
+    pub const fn empty() -> Self {
+        Self {
+            entries: [None; FILE_MAX],
+            count: 0,
+        }
+    }
     pub fn parse(bytes: &'a [u8]) -> Result<Self, ArchiveError> {
+        let mut result = Self::empty();
+        result.parse_into(bytes)?;
+        Ok(result)
+    }
+    /// Populate caller-owned storage without copying a full catalog onto the
+    /// boot stack. Failure clears all entries; no partial namespace is usable.
+    pub fn parse_into(&mut self, bytes: &'a [u8]) -> Result<(), ArchiveError> {
+        self.entries.fill(None);
+        self.count = 0;
+        let result = self.read_entries(bytes);
+        if result.is_err() {
+            self.entries.fill(None);
+            self.count = 0;
+        }
+        result
+    }
+    fn read_entries(&mut self, bytes: &'a [u8]) -> Result<(), ArchiveError> {
         if !bytes.len().is_multiple_of(512) {
             return Err(ArchiveError::Truncated);
         }
-        let mut result = Self {
-            entries: [None; FILE_MAX],
-            count: 0,
-        };
+        let result = self;
         let mut at = 0;
         loop {
             let header = bytes.get(at..at + 512).ok_or(ArchiveError::Truncated)?;
@@ -123,7 +143,7 @@ impl<'a> Archive<'a> {
                     return Err(ArchiveError::Format);
                 }
                 result.validate_namespace()?;
-                return Ok(result);
+                return Ok(());
             }
             if &header[257..263] != b"ustar\0"
                 || &header[263..265] != b"00"
@@ -385,6 +405,19 @@ fn number(bytes: &[u8]) -> Result<u64, ArchiveError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn in_place_catalog_rejects_partial_namespace_and_can_be_reused() {
+        let valid = tar(&[("file", b'0', b"data")]);
+        let invalid = tar(&[("first", b'0', b"one"), ("first", b'0', b"two")]);
+        let mut catalog = Archive::empty();
+        catalog.parse_into(&valid).unwrap();
+        assert_eq!(catalog.len(), 1);
+        assert_eq!(catalog.parse_into(&invalid), Err(ArchiveError::Duplicate));
+        assert!(catalog.is_empty());
+        assert!(catalog.exact("first").is_none());
+        catalog.parse_into(&valid).unwrap();
+        assert_eq!(catalog.exact("file").unwrap().data, b"data");
+    }
     use alloc::vec::Vec;
     fn tar(files: &[(&str, u8, &[u8])]) -> Vec<u8> {
         let mut result = Vec::new();

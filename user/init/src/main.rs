@@ -2158,6 +2158,8 @@ fn process_terminate_self_test() -> ! {
 #[cfg(feature = "linux-abi-runtime")]
 fn linux_abi_init(system_root: u64) -> ! {
     let mut previous_pid = 0;
+    #[cfg(feature = "binder-runtime")]
+    let mut children = [0; 2];
     for _ in 0..2 {
         let channel = syscall(SyscallNumber::ChannelCreate, 0, 0, 0);
         if channel.status != Status::Ok.raw() {
@@ -2173,14 +2175,35 @@ fn linux_abi_init(system_root: u64) -> ! {
             fail(0x7002);
         }
         previous_pid = child.out1;
+        #[cfg(feature = "binder-runtime")]
+        {
+            children[usize::from(children[0] != 0)] = child.out1;
+        }
         if syscall(SyscallNumber::HandleClose, channel.out1, 0, 0).status != Status::Ok.raw() {
             fail(0x7003);
         }
-        let result = syscall(SyscallNumber::ProcessWait, child.out1, 0, 0);
+        #[cfg(not(feature = "binder-runtime"))]
+        {
+            let result = syscall(SyscallNumber::ProcessWait, child.out1, 0, 0);
+            if result.status != Status::Ok.raw()
+                || result.out1 != 0
+                || result.out2 != ProcessTerminationReason::Exited.raw()
+            {
+                fail(0x7100 + result.out1);
+            }
+        }
+    }
+    #[cfg(feature = "binder-runtime")]
+    for (index, child) in children.into_iter().enumerate() {
+        let result = syscall(SyscallNumber::ProcessWait, child, 0, 0);
         if result.status != Status::Ok.raw()
             || result.out1 != 0
             || result.out2 != ProcessTerminationReason::Exited.raw()
         {
+            for remaining in &children[index + 1..] {
+                let _ = syscall(SyscallNumber::ProcessTerminate, *remaining, 0, 0);
+                let _ = syscall(SyscallNumber::ProcessWait, *remaining, 0, 0);
+            }
             fail(0x7100 + result.out1);
         }
     }

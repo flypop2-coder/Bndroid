@@ -13,6 +13,7 @@ python3 scripts/extract-bionic-runtime.py \
 BNDROID_ART_MODE=help scripts/check-art-runtime.sh
 BNDROID_ART_MODE=memory scripts/check-art-runtime.sh
 BNDROID_ART_MODE=memfd scripts/check-art-runtime.sh
+BNDROID_ART_MODE=binder scripts/check-art-runtime.sh
 BNDROID_ART_MODE=properties scripts/check-art-runtime.sh
 scripts/check-art-signals.sh
 scripts/check-art-runtime.sh
@@ -30,6 +31,20 @@ by Git; remove a specific old run only after retaining any evidence you need.
 Managed mode also uses the existing Android 36 platform jar, aapt2, zipalign and apksigner. It signs the owned `org.bndroid.runtimeprobe` APK with the repository's public test-only AndroidBox key, verifies APK v2 signing and alignment, and retains `managed.apk`, `apk-signature.txt` and `apk-badging.txt`. The root contains the APK and an intentionally inaccessible system-library copy for the namespace negative check, with no loose managed DEX or extracted application library. The root receipt includes the APK hash. No production signing material or upstream runtime binary is imported.
 
 The ART-only gates build a verified immutable USTAR root, a standard DEX program, native probes, and a separate `art-runtime` kernel. QEMU receives 512 MiB RAM, one CPU, a temporary writable disk overlay, and fresh host entropy. A supervisor retains `serial.log`, input receipts, build logs and `summary.json`, then stops only its QEMU process. Tracing is off by default; `BNDROID_ART_SYSCALL_TRACE=1` enables per-syscall/abort diagnostics, which add substantial overhead and can interleave console output. ART has a 90-second guest limit and a 120-second default host timeout. A missing proof, unexpected exit, fault, panic or timeout fails the command.
+
+The `binder` mode adds matching `binder-runtime` kernel/init features and launches
+two concurrent native Bionic peers instead of two sequential generations. One
+registers as context manager; the other sends real byte transactions through
+`/dev/binder`. The probe verifies authenticated identity, replies, ordered one-way
+messages, an 8,201-byte payload, interrupted blocking reads, descriptor close/reuse,
+read-only mapping faults, invalid user buffers, an outstanding call at service
+close and death notification/acknowledgment. It requires both zero-status exits,
+matching kernel process identities and zero live connections, transactions,
+buffers, threads, waits, pages, tables and file descriptions.
+`binder_transport_verified` only covers this initial context-manager byte
+transport. Exported Binder objects, FD transfer, nested calls, ServiceManager and
+app permission/capability policy remain incomplete. See
+[Binder Transport-0](../../docs/milestones/androidbox/BINDER_TRANSPORT_0.md).
 
 Java mode currently uses ART's interpreter option, a 4 MiB initial / 16 MiB maximum heap, matching core-library DEX jars, and no image compiler. These diagnostic limits reduce initial memory demand; they are not the final app runtime configuration. The program must produce its collection/arithmetic/exception marker in two distinct process generations before `managed_java_verified` becomes true.
 
@@ -69,9 +84,11 @@ The measured input set contains 349 files / 265,085,778 bytes and 46 boot jars, 
 If the Framework extension is interrupted after its ART receipt was produced, repeat extraction with `--resume-framework --include-framework` and the same output. This also upgrades an older completed receipt missing the version metadata or runtime JNI dependency. The helper checks source identity, existing file/metadata hashes and each saved progress entry. It atomically checkpoints successful pulls and replaces the final receipt only after dependencies resolve. A completed receipt containing all required metadata and the entire runtime JNI dependency graph returns without starting an emulator. Each actual extraction still uses and stops its own temporary offline AVD.
 
 The current full attempt loads the JNI library through the unchanged Tethering
-namespace and reaches `RuntimeInit.nativeFinishInit`, where the missing
-`/dev/binder` stops startup. [Framework JNI-0](../../docs/milestones/androidbox/FRAMEWORK_JNI_0.md)
-records this failure and fresh regression results; the gate still exits nonzero.
+namespace, opens/maps Binder, starts its pool and enters the Java probe through
+`RuntimeInit.nativeFinishInit`. Parcel/Bundle checks complete. Looper creation
+then fails with `Could not make wake event fd: Function not implemented`.
+[Binder Transport-0](../../docs/milestones/androidbox/BINDER_TRANSPORT_0.md)
+records the result and cleanup; the full gate still exits nonzero.
 
 Framework modes select `framework-runtime`: one CPU, 1 GiB guest RAM, a 320 MiB immutable archive / 512-entry catalog, 512 file descriptors, 4,096 mapping regions, a combined 512 MiB physical budget for private pages and memfd backing, and 512 page-table pages. Shared aliases do not allocate a second physical copy. The ART-only bounds remain unchanged. The Framework guest/host timeouts are 300/360 seconds because loading and reclaiming hundreds of libraries exceeds the earlier two-launch bound. The source boot and compiler boot classpaths are supplied through the startup environment. No alternate Java/Framework implementation or global library search override is supplied.
 

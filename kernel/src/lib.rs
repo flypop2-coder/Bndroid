@@ -31,6 +31,7 @@ pub mod input_server_restart_trace;
 ))]
 pub mod input_surface_recovery_trace;
 pub mod linux_abi;
+pub mod linux_binder;
 pub mod linux_fd;
 pub mod linux_fs;
 pub mod linux_memfd;

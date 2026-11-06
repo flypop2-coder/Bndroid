@@ -20,6 +20,22 @@ PROCESS = "LINUX_PROCESS_EXIT pid=4294967298 code=0 native_handles=0\nLINUX_PROC
 
 
 class EvidenceTests(unittest.TestCase):
+    def test_binder_requires_cross_process_transport_signal_and_cleanup_proof(self):
+        client = "BINDER_CLIENT_OK identity=1 reply=1 oneway=3 death=1 interrupted=1 fd_reuse=1 readonly=1\n"
+        server = "BINDER_SERVER_OK identity=1 reply=1 oneway=3 receive_pool=1 readonly=1\n"
+        binder = "LINUX_BINDER_OK opened=2 closed=2 submitted=8 replied=3 oneway=3 failed=5 deaths=1 connections=0 transactions=0 buffers=0 first_sender=4294967298 first_receiver=8589934594\n"
+        signals = "LINUX_SIGNALS_OK delivered=3 returned=3 interrupted=1 pending=0\n"
+        log = client + server + binder + signals + PROCESS + PROOF
+        self.assertEqual(completion_status(log, "binder"), "binder-passed")
+        for old, new, expected in (("connections=0", "connections=1", "invalid-binder-cleanup"),
+                                   ("replied=3", "replied=0", "missing-binder-transport-proof"),
+                                   ("first_receiver=8589934594", "first_receiver=4294967298", "invalid-binder-process-identity"),
+                                   ("returned=3", "returned=2", "invalid-binder-signal-proof"),
+                                   ("submitted=8", "submitted=oops", "invalid-binder-record")):
+            self.assertEqual(completion_status(log.replace(old,new), "binder"), expected)
+        self.assertEqual(completion_status(log+binder, "binder"), "invalid-binder-record")
+        self.assertEqual(completion_status(log.replace(server,""), "binder"), "missing-binder-process-proof")
+
     def test_memfd_needs_both_processes_fault_returns_and_zero_live_resources(self):
         marker = "ART_MEMFD_OK aliases=1 code=1 truncate=1 seals=1 lifetime=1 wx=1\n"
         signals = "LINUX_SIGNALS_OK delivered=6 returned=6 interrupted=0 pending=0\n"

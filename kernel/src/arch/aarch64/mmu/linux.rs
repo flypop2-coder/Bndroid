@@ -118,6 +118,36 @@ impl Drop for Prepared {
 impl LinuxMappings {
     #[cfg(feature = "art-runtime")]
     fn retain_memories(&mut self) {
+        for opened in &self.memories {
+            let inode = opened.memory().unwrap().inode();
+            if let Some(mapping) =
+                bndroid_kernel::linux_binder::with(|r| r.mapping_for_inode(inode))
+            {
+                let end = mapping.base + mapping.length;
+                let mut cursor = mapping.base;
+                for region in &self.layout.regions {
+                    if region.end <= cursor {
+                        continue;
+                    }
+                    if region.start > cursor
+                        || !region.file.is_some_and(|f| {
+                            f.memory
+                                && f.inode == inode
+                                && f.offset + cursor - region.file_origin == cursor - mapping.base
+                        })
+                    {
+                        break;
+                    }
+                    cursor = region.end;
+                    if cursor >= end {
+                        break;
+                    }
+                }
+                if cursor < end {
+                    bndroid_kernel::linux_binder::with(|r| r.unmap_inode(inode));
+                }
+            }
+        }
         self.memories.retain(|opened| {
             let inode = opened.memory().unwrap().inode();
             self.layout
@@ -884,6 +914,29 @@ impl UserAddressSpace {
         args: [u64; 6],
         opened: &bndroid_kernel::linux_fd::FileRef,
     ) -> Result<u64, i64> {
+        self.linux_mmap_backing(args, opened, false)
+    }
+    #[cfg(feature = "art-runtime")]
+    pub fn linux_mmap_binder(
+        &mut self,
+        mut args: [u64; 6],
+        opened: &bndroid_kernel::linux_fd::FileRef,
+    ) -> Result<u64, i64> {
+        // Binder accepts MAP_PRIVATE but its receive pool is kernel-owned;
+        // userspace can never write it, obtain a COW view, or execute it.
+        if args[2] != 1 || args[5] != 0 || !matches!(args[3] & 3, 1 | 2) {
+            return Err(EACCES);
+        }
+        args[3] = (args[3] & !3) | 1;
+        self.linux_mmap_backing(args, opened, true)
+    }
+    #[cfg(feature = "art-runtime")]
+    fn linux_mmap_backing(
+        &mut self,
+        args: [u64; 6],
+        opened: &bndroid_kernel::linux_fd::FileRef,
+        device: bool,
+    ) -> Result<u64, i64> {
         let memory = opened.memory().ok_or(19)?;
         if args[5] > i64::MAX as u64 || !args[5].is_multiple_of(PAGE_SIZE as u64) {
             return Err(EINVAL);
@@ -902,7 +955,7 @@ impl UserAddressSpace {
         if args[2] & 2 != 0 && !memory.may_write() {
             return Err(1);
         }
-        let change = self.linux.layout.map_with_backing(
+        let mut change = self.linux.layout.map_with_backing(
             args[0],
             args[1],
             args[2],
@@ -912,11 +965,23 @@ impl UserAddressSpace {
                 available: memory.len().saturating_sub(args[5]),
                 offset: args[5],
                 inode: memory.inode(),
-                path: "memfd:anonymous (deleted)",
+                path: if device {
+                    "/dev/binder"
+                } else {
+                    "memfd:anonymous (deleted)"
+                },
                 memory: true,
-                may_write: opened.writable() && memory.may_write(),
+                may_write: !device && opened.writable() && memory.may_write(),
+                may_execute: !device,
             }),
         )?;
+        if device {
+            for region in &mut change.layout.regions {
+                if region.file.is_some_and(|f| f.inode == memory.inode()) {
+                    region.dont_fork = true;
+                }
+            }
+        }
         let start = change.start;
         if !self
             .linux
@@ -1220,6 +1285,7 @@ impl UserAddressSpace {
                 inode: node.inode,
                 memory: false,
                 may_write: false,
+                may_execute: true,
             }),
         )?;
         let start = change.start;

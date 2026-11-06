@@ -336,6 +336,7 @@ pub(super) fn interrupt(context: usize) {
         return;
     }
     let wait = thread(context).wait;
+    super::binder::cancel(context);
     let mut result = errno(4);
     if let Waiting::Futex(call) = wait {
         thread(context).interrupted = Some(call);
@@ -558,6 +559,10 @@ extern "C" fn linux_signal_return(frame: *mut TrapFrame) -> *mut TrapFrame {
     {
         return frame;
     }
+    // Binder completions can copy user buffers only here, after both TTBR and
+    // SP belong to the resumed process. Signal delivery then sees the final
+    // syscall result, or EINTR if the queued read was cancelled.
+    super::binder::complete_ready(frame);
     let c = current_running_context();
     let info = loop {
         match pop(c, !local(c).signal_mask) {
