@@ -20,6 +20,31 @@ PROCESS = "LINUX_PROCESS_EXIT pid=4294967298 code=0 native_handles=0\nLINUX_PROC
 
 
 class EvidenceTests(unittest.TestCase):
+    def test_service_bridge_requires_restart_authority_and_all_process_owners(self):
+        provider = "RUNTIME_SERVICE_READY pid=3 uid=1001 instance=100\nRUNTIME_SERVICE_STOPPED instance=100\nRUNTIME_SERVICE_READY pid=3 uid=1001 instance=200\n"
+        controller = "SERVICE_BRIDGE_CONTROLLER_OK pid=5 uid=1002 instance=100 control=authorized\n"
+        client = "SERVICE_BRIDGE_CLIENT_OK pid=4 uid=10000 first=100 second=200 facts=1 identity=1 add_denied=1 stop_denied=1 malformed=1 death=1 stale=1 rediscovery=1 daemon_ready=1\n"
+        binder = "LINUX_BINDER_OK opened=5 closed=5 submitted=12 replied=12 security_contexts=8 deaths=2 connections=0 transactions=0 buffers=0 nodes=0 references=0 call_frames=0 pending_fds=0\n"
+        poll = "LINUX_POLL_OK eventfds=1 epolls=1 external=5 timers=1 closed=8 external_delivered=3 live=0 watches=0\n"
+        processes = "".join(f"LINUX_PROCESS_EXIT pid={4294967296 + pid} code=0 native_handles=0\n" for pid in (3, 4, 5))
+        processes += "LINUX_THREADS_OK created=2 reaped=2 live=0 waiting=0\n"
+        proof = PROOF.replace("native_processes=2 native_exits=2 native_reaped=2", "native_processes=5 native_exits=3 native_killed=2 native_reaped=5")
+        log = provider + controller + client + binder + poll + processes + proof
+        self.assertEqual(completion_status(log, "framework-bridge"), "framework-bridge-passed")
+        for old, new, expected in (
+                ("instance=200", "instance=100", "invalid-provider-restart-proof"),
+                ("control=authorized", "control=denied", "missing-service-control-proof"),
+                ("stop_denied=1", "stop_denied=0", "missing-service-client-proof"),
+                ("second=200", "second=100", "missing-service-client-proof"),
+                ("pid=4294967301", "pid=4294967302", "invalid-service-owner-proof"),
+                ("security_contexts=8", "security_contexts=0", "missing-service-bridge-transport-proof"),
+                ("deaths=2", "deaths=0", "missing-service-bridge-transport-proof"),
+                ("native_killed=2", "native_killed=0", "invalid-cleanup-proof"),
+                ("nodes=0", "nodes=1", "invalid-service-binder-proof"),
+                ("instance=200", "instance=bad", "invalid-service-bridge-record")):
+            self.assertEqual(completion_status(log.replace(old, new), "framework-bridge"), expected)
+        self.assertEqual(completion_status(log + controller, "framework-bridge"), "invalid-service-bridge-record")
+
     def test_launch_requires_both_identities_ppoll_timers_and_cleanup(self):
         timers = "LAUNCH_TIMERS_OK periodic=1 absolute=1 poll=1 lifetime=1 interrupted=1\n"
         ppoll = "LAUNCH_PPOLL_OK invalid=1 ignored=1 timer_wake=1 timeout=1\n"

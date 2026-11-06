@@ -35,6 +35,7 @@ pub struct Profile {
     pub manager_domains: u8,
     pub service_grants: &'static [bndr_sm::service_authority::Grant<'static>],
     pub property_grants: &'static [&'static str],
+    pub control_grants: &'static [&'static str],
 }
 
 pub fn profile_index(flags: u64, linux: bool, count: usize) -> Option<usize> {
@@ -49,6 +50,7 @@ pub struct Parsed<'a> {
     pub manager_domains: u8,
     pub service_grants: Vec<bndr_sm::service_authority::Grant<'a>>,
     pub property_grants: Vec<&'a str>,
+    pub control_grants: Vec<&'a str>,
 }
 impl Default for Parsed<'_> {
     fn default() -> Self {
@@ -59,6 +61,7 @@ impl Default for Parsed<'_> {
             manager_domains: 7,
             service_grants: Vec::new(),
             property_grants: Vec::new(),
+            control_grants: Vec::new(),
         }
     }
 }
@@ -91,6 +94,7 @@ pub fn parse(input: &str) -> Result<Vec<Parsed<'_>>, &'static str> {
                     || domains_seen
                     || !current.service_grants.is_empty()
                     || !current.property_grants.is_empty()
+                    || !current.control_grants.is_empty()
                 {
                     validate(&current)?;
                     profiles.push(current);
@@ -105,6 +109,20 @@ pub fn parse(input: &str) -> Result<Vec<Parsed<'_>>, &'static str> {
                 domains_seen = false;
             }
             "arg" => current.arguments.push(value),
+            "control_grant" => {
+                if value.len() > 160
+                    || !value.starts_with("u:object_r:")
+                    || !value.ends_with(":s0")
+                    || !value
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"_:".contains(&b))
+                    || current.control_grants.len() >= 16
+                    || current.control_grants.contains(&value)
+                {
+                    return Err("invalid or duplicate service control grant");
+                }
+                current.control_grants.push(value);
+            }
             "service_grant" => {
                 let (rights, target) = value
                     .split_once(' ')
@@ -300,5 +318,31 @@ mod tests {
         ] {
             assert!(parse(&format!("{text}{field}")).is_err());
         }
+    }
+    #[test]
+    fn maintenance_grants_are_explicit_bounded_and_profile_local() {
+        let target = "u:object_r:bndroid_runtime_service:s0";
+        let text = format!(
+            "profile=0\n{BASE}uid=0\nservice_grant=7 {target}\nprofile=1\n{BASE}control_grant={target}\n"
+        );
+        let p = parse(&text).unwrap();
+        assert!(p[0].control_grants.is_empty());
+        assert_eq!(p[1].control_grants, [target]);
+        assert!(p[1].service_grants.is_empty());
+        for field in [
+            format!("control_grant={target}\n"),
+            "control_grant=u:r:bndroid_profile_1:s0\n".into(),
+            "control_grant=u:object_r:runtime:*\n".into(),
+            "control_grant=u:object_r:runtime:s0 extra\n".into(),
+        ] {
+            assert!(parse(&format!("{text}{field}")).is_err());
+        }
+        let mut bounded = alloc::string::String::from(BASE);
+        for i in 0..16 {
+            bounded += &format!("control_grant=u:object_r:service_{i}:s0\n");
+        }
+        assert!(parse(&bounded).is_ok());
+        bounded += &format!("control_grant={target}\n");
+        assert!(parse(&bounded).is_err());
     }
 }

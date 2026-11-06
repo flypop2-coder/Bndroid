@@ -552,21 +552,28 @@ pub fn monitor() -> ! {
             panic!("LINUX_RUNTIME_FAIL init_failure={}", syscalls.failure);
         }
         if syscalls.ready {
-            assert_eq!(processes.created, 3);
-            assert_eq!(processes.reaped, 2);
-            let exits = if cfg!(feature = "service-manager-runtime") {
+            let children = if cfg!(feature = "service-bridge-runtime") {
+                5
+            } else {
+                2
+            };
+            assert_eq!(processes.created, children + 1);
+            assert_eq!(processes.reaped, children);
+            let exits = if cfg!(feature = "service-bridge-runtime") {
+                3
+            } else if cfg!(feature = "service-manager-runtime") {
                 1
             } else {
                 2
             };
             assert_eq!(processes.terminated_exited, exits);
-            assert_eq!(processes.terminated_killed, 2 - exits);
+            assert_eq!(processes.terminated_killed, children - exits);
             assert_eq!(processes.terminated_faulted, 0);
             assert_eq!(processes.live, 1);
             assert_eq!(processes.linux_app_live, 0);
             assert_eq!(processes.linux_app_handles, 0);
             assert_eq!(processes.total_handles, 0);
-            assert_eq!(syscalls.channels_created, 2);
+            assert_eq!(syscalls.channels_created, children);
             assert_eq!(EXITS.load(Ordering::Acquire), exits);
             let memory = aarch64::mmu::linux_memory_snapshot();
             #[cfg(feature = "art-runtime")]
@@ -585,14 +592,16 @@ pub fn monitor() -> ! {
                 #[cfg(feature = "bionic-dynamic-runtime")]
                 assert_eq!(bndroid_kernel::linux_fd::live_descriptions(), 0);
                 crate::kprintln!(
-                    "{} abi=70 native_processes=2 native_exits={} native_killed={} native_reaped=2 remaining_processes=1 native_handles=0 linux_calls={} unsupported={} bad_address={} live_anonymous_pages={} live_anonymous_tables={} peak_anonymous_pages={} reclaimed_anonymous_pages={} entropy_bytes={} loader={} live_file_descriptions={} bionic_startup=1 art=0",
+                    "{} abi=70 native_processes={} native_exits={} native_killed={} native_reaped={} remaining_processes=1 native_handles=0 linux_calls={} unsupported={} bad_address={} live_anonymous_pages={} live_anonymous_tables={} peak_anonymous_pages={} reclaimed_anonymous_pages={} entropy_bytes={} loader={} live_file_descriptions={} bionic_startup=1 art=0",
                     if cfg!(feature = "bionic-dynamic-runtime") {
                         "BIONIC_DYNAMIC_RUNTIME_OK"
                     } else {
                         "BIONIC_RUNTIME_OK"
                     },
+                    children,
                     exits,
-                    2 - exits,
+                    children - exits,
+                    children,
                     CALLS.load(Ordering::Relaxed),
                     UNKNOWN.load(Ordering::Relaxed),
                     BAD_ADDRESS.load(Ordering::Relaxed),

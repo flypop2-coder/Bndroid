@@ -12,12 +12,35 @@ from android_properties import encode_properties, runtime_properties
 from android_framework_inputs import framework_inputs_complete, service_inputs_complete
 
 
+def service_profiles(mode):
+    manager = "u:object_r:service_manager_service:s0"
+    runtime = "u:object_r:bndroid_runtime_service:s0"
+    profiles = [dict(uid=1000, executable="servicemanager", args=[], binder_managers=1,
+                     service_grants=[(3, manager), (4, "u:r:bndroid_profile_0:s0")],
+                     property_grants=["servicemanager.ready"], control_grants=[])]
+    if mode == "framework-bridge":
+        profiles += [dict(uid=1001, executable="bndroid-runtime-service", args=[], binder_managers=0,
+                          service_grants=[(2, manager), (3, runtime)], property_grants=[], control_grants=[]),
+                     dict(uid=10000, executable="service-bridge-client", args=["client"], binder_managers=0,
+                          service_grants=[(2, manager), (2, runtime)], property_grants=["bndroid.runtime.client_ready"], control_grants=[]),
+                     dict(uid=1002, executable="service-bridge-client", args=["controller"], binder_managers=0,
+                          service_grants=[(2, manager), (2, runtime)], property_grants=[], control_grants=[runtime])]
+    else:
+        profiles.append(dict(uid=10000, executable="launch-probe", args=["lookup" if mode == "framework-services" else "app"],
+                             binder_managers=0, service_grants=[(2, manager)], property_grants=[], control_grants=[]))
+        if mode == "framework-identities":
+            profiles[0].update(executable="launch-probe", args=["system"])
+    for index, profile in enumerate(profiles):
+        profile.update(index=index, gid=profile["uid"], executable="/system/bin/" + profile["executable"])
+    return profiles
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--runtime", required=True, type=Path)
     parser.add_argument("--dex", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--mode", choices=("java", "managed", "memory", "memfd", "binder", "poll", "properties", "help", "framework", "framework-help", "framework-identities", "framework-services", "signals", "signal-bad-frame", "signal-bad-pc", "signal-bad-fp", "signal-default", "signal-guard"), default="java")
+    parser.add_argument("--mode", choices=("java", "managed", "memory", "memfd", "binder", "poll", "properties", "help", "framework", "framework-help", "framework-identities", "framework-services", "framework-bridge", "signals", "signal-bad-frame", "signal-bad-pc", "signal-bad-fp", "signal-default", "signal-guard"), default="java")
     args = parser.parse_args()
     provenance = json.loads((args.runtime / "art-provenance.json").read_text())
     framework = args.mode.startswith("framework")
@@ -25,10 +48,12 @@ def main():
         raise SystemExit("Framework mode requires inputs extracted with --include-framework")
     if framework and not framework_inputs_complete(provenance):
         raise SystemExit("Framework metadata/JNI inputs are incomplete; re-run extraction with --resume-framework --include-framework")
-    service_mode = args.mode in ("framework-identities", "framework-services")
+    bridge = args.mode == "framework-bridge"
+    service_mode = args.mode in ("framework-identities", "framework-services", "framework-bridge")
     if service_mode and not service_inputs_complete(provenance):
         raise SystemExit("Service mode requires verified inputs from extract-android-services.py")
     inputs = {}
+    owned_inputs = {}
     for name, receipt in provenance["files"].items():
         path = PurePosixPath(name)
         if not name.startswith("/") or ".." in path.parts or str(path) != name:
@@ -73,15 +98,28 @@ def main():
         properties = runtime_properties(provenance["source"])
         if service_mode:
             properties.update({"ro.property_service.version": "2", "servicemanager.ready": ""})
-        inputs["dev/__properties__"] = encode_properties(properties, mutable=("servicemanager.ready",) if service_mode else ())
+        mutable = ["servicemanager.ready"] if service_mode else []
+        if bridge:
+            properties["bndroid.runtime.client_ready"] = ""
+            mutable.append("bndroid.runtime.client_ready")
+        inputs["dev/__properties__"] = encode_properties(properties, mutable=mutable)
     if args.mode == "memfd":
         inputs["system/bin/memfd-probe"] = (args.dex.parent / "memfd-probe").read_bytes()
     if args.mode == "binder":
         inputs["system/bin/binder-probe"] = (args.dex.parent / "binder-probe").read_bytes()
     if args.mode == "poll":
         inputs["system/bin/poll-probe"] = (args.dex.parent / "poll-probe").read_bytes()
-    if service_mode:
+    if service_mode and not bridge:
         inputs["system/bin/launch-probe"] = (args.dex.parent / "launch-probe").read_bytes()
+    if bridge:
+        for name in ("bndroid-runtime-service", "service-bridge-client"):
+            inputs["system/bin/" + name] = (args.dex.parent / name).read_bytes()
+            owned_inputs["/system/bin/" + name] = hashlib.sha256(inputs["system/bin/" + name]).hexdigest()
+        overlay = "product/etc/selinux/product_service_contexts"
+        if overlay in inputs:
+            raise SystemExit("Owned service-context overlay must not replace a verified source input")
+        inputs[overlay] = b"bndroid.runtime u:object_r:bndroid_runtime_service:s0\n"
+        owned_inputs["/" + overlay] = hashlib.sha256(inputs[overlay]).hexdigest()
     if args.mode == "properties":
         inputs["system/bin/properties-probe"] = (args.dex.parent / "properties-probe").read_bytes()
     if args.mode == "managed":
@@ -164,17 +202,15 @@ def main():
     launch = ["arg=" + s for s in arguments] + ["env=" + s for s in environment]
     if service_mode:
         launch = []
-        for index, (uid, executable, role) in enumerate([
-            (1000, "/system/bin/servicemanager" if args.mode == "framework-services" else "/system/bin/launch-probe", "system"),
-            (10000, "/system/bin/launch-probe", "lookup" if args.mode == "framework-services" else "app"),
-        ]):
-            launch += [f"profile={index}", f"uid={uid}", f"gid={uid}", f"binder_managers={1 if index == 0 else 0}",
-                       "arg=/apex/com.android.runtime/bin/linker64", "arg=" + executable]
-            launch += [f"service_grant={3 if index == 0 else 2} u:object_r:service_manager_service:s0"]
-            if index == 0:
-                launch += ["service_grant=4 u:r:bndroid_profile_0:s0", "property_grant=servicemanager.ready"]
-            if executable.endswith("launch-probe"):
-                launch.append("arg=" + role)
+        profiles = service_profiles(args.mode)
+        for profile in profiles:
+            launch += [f"profile={profile['index']}", f"uid={profile['uid']}", f"gid={profile['gid']}",
+                       f"binder_managers={profile['binder_managers']}",
+                       "arg=/apex/com.android.runtime/bin/linker64", "arg=" + profile["executable"]]
+            launch += ["arg=" + arg for arg in profile["args"]]
+            launch += [f"service_grant={rights} {target}" for rights, target in profile["service_grants"]]
+            launch += ["property_grant=" + name for name in profile["property_grants"]]
+            launch += ["control_grant=" + target for target in profile["control_grants"]]
             launch += ["env=" + entry for entry in environment if not entry.startswith(("CLASSPATH=", "BOOTCLASSPATH=", "DEX2OATBOOTCLASSPATH="))]
     args.output.with_suffix(".launch").write_text("\n".join(launch) + "\n")
     receipt = {"source": provenance, "rootfs_sha256": hashlib.sha256(args.output.read_bytes()).hexdigest(),
@@ -186,9 +222,10 @@ def main():
     if framework:
         receipt["entrypoint"] = "/system/bin/app_process64"
     if service_mode:
-        receipt["entrypoint"] = "/system/bin/servicemanager" if args.mode == "framework-services" else "/system/bin/launch-probe"
-        receipt["launch_profiles"] = [{"index": 0, "uid": 1000, "gid": 1000, "binder_managers": 1},
-                                      {"index": 1, "uid": 10000, "gid": 10000, "binder_managers": 0}]
+        receipt["entrypoint"] = profiles[0]["executable"]
+        receipt["launch_profiles"] = profiles
+    if owned_inputs:
+        receipt["owned_inputs_sha256"] = owned_inputs
     if framework or args.mode == "properties":
         receipt["boot_properties"] = properties
     args.output.with_suffix(".json").write_text(json.dumps(receipt, indent=2) + "\n")

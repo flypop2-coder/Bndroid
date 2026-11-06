@@ -2155,7 +2155,7 @@ fn process_terminate_self_test() -> ! {
     }
 }
 
-#[cfg(feature = "linux-abi-runtime")]
+#[cfg(all(feature = "linux-abi-runtime", not(feature = "service-bridge-runtime")))]
 fn linux_abi_init(system_root: u64) -> ! {
     let mut previous_pid = 0;
     #[cfg(feature = "binder-runtime")]
@@ -2235,6 +2235,137 @@ fn linux_abi_init(system_root: u64) -> ! {
     if syscall(SyscallNumber::InitReady, INIT_READY_MAGIC, 0x4c4e5831, 2).status != Status::Ok.raw()
     {
         fail(0x7005);
+    }
+    loop {
+        wait_for_lower_el_timer_preemption();
+    }
+}
+
+#[cfg(feature = "service-bridge-runtime")]
+fn linux_abi_init(system_root: u64) -> ! {
+    fn spawn(profile: u64) -> Option<u64> {
+        let channel = syscall(SyscallNumber::ChannelCreate, 0, 0, 0);
+        if channel.status != Status::Ok.raw() {
+            return None;
+        }
+        let child = syscall(
+            SyscallNumber::ProcessSpawn,
+            channel.out2,
+            UserImageId::LinuxApp.raw(),
+            profile << bndr_abi::PROCESS_SPAWN_LINUX_PROFILE_SHIFT,
+        );
+        let _ = syscall(SyscallNumber::HandleClose, channel.out1, 0, 0);
+        if child.status != Status::Ok.raw() {
+            let _ = syscall(SyscallNumber::HandleClose, channel.out2, 0, 0);
+            None
+        } else {
+            Some(child.out1)
+        }
+    }
+    fn cleanup(children: &mut [u64; 4]) {
+        for pid in children.iter().copied().filter(|p| *p != 0) {
+            let _ = syscall(SyscallNumber::ProcessTerminate, pid, 0, 0);
+        }
+        for pid in children.iter_mut().filter(|p| **p != 0) {
+            let _ = syscall(SyscallNumber::ProcessWait, *pid, 0, 0);
+            *pid = 0;
+        }
+    }
+    let mut children = [0; 4];
+    for index in 0..children.len() {
+        let Some(pid) = spawn(index as u64) else {
+            cleanup(&mut children);
+            fail(0x7301);
+        };
+        children[index] = pid;
+    }
+    if syscall(SyscallNumber::ProcessWait, children[0], 2, 0).status
+        != Status::InvalidArgument.raw()
+    {
+        cleanup(&mut children);
+        fail(0x7302);
+    }
+    let mut restarted = false;
+    let mut client_done = false;
+    loop {
+        for index in 0..children.len() {
+            let pid = children[index];
+            if pid == 0 {
+                continue;
+            }
+            let result = syscall(
+                SyscallNumber::ProcessWait,
+                pid,
+                bndr_abi::PROCESS_WAIT_NONBLOCK,
+                0,
+            );
+            if result.status == Status::ShouldWait.raw() {
+                continue;
+            }
+            if result.status != Status::Ok.raw() {
+                cleanup(&mut children);
+                fail(0x7303);
+            }
+            children[index] = 0;
+            if result.out1 != 0 || result.out2 != ProcessTerminationReason::Exited.raw() {
+                cleanup(&mut children);
+                fail(0x7303);
+            }
+            match index {
+                1 if !restarted => {
+                    let Some(next) = spawn(1) else {
+                        cleanup(&mut children);
+                        fail(0x7304);
+                    };
+                    children[1] = next;
+                    restarted = true;
+                    if next == pid
+                        || syscall(
+                            SyscallNumber::ProcessWait,
+                            pid,
+                            bndr_abi::PROCESS_WAIT_NONBLOCK,
+                            0,
+                        )
+                        .status
+                            != Status::NotFound.raw()
+                    {
+                        cleanup(&mut children);
+                        fail(0x7305);
+                    }
+                }
+                2 if restarted => client_done = true,
+                3 => {}
+                _ => {
+                    cleanup(&mut children);
+                    fail(0x7306);
+                }
+            }
+        }
+        if client_done && children[3] == 0 {
+            break;
+        }
+        wait_for_lower_el_timer_preemption();
+    }
+    for index in [1, 0] {
+        let stopped = syscall(SyscallNumber::ProcessTerminate, children[index], 0, 0);
+        let waited = syscall(SyscallNumber::ProcessWait, children[index], 0, 0);
+        if waited.status == Status::Ok.raw() {
+            children[index] = 0;
+        }
+        if stopped.status != Status::Ok.raw()
+            || waited.status != Status::Ok.raw()
+            || waited.out1 != PROCESS_KILLED_EXIT_CODE
+            || waited.out2 != ProcessTerminationReason::Killed.raw()
+        {
+            cleanup(&mut children);
+            fail(0x7307);
+        }
+    }
+    if syscall(SyscallNumber::HandleClose, system_root, 0, 0).status != Status::Ok.raw()
+        || syscall(SyscallNumber::InitReady, INIT_READY_MAGIC, 0x4c4e5831, 5).status
+            != Status::Ok.raw()
+    {
+        fail(0x7308);
     }
     loop {
         wait_for_lower_el_timer_preemption();

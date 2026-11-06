@@ -33,6 +33,9 @@ if [[ "$BNDROID_ART_MODE" == framework-identities ]]; then
 elif [[ "$BNDROID_ART_MODE" == framework-services ]]; then
   FEATURES+=,service-manager-runtime
   USER_FEATURES+=,service-manager-runtime
+elif [[ "$BNDROID_ART_MODE" == framework-bridge ]]; then
+  FEATURES+=,service-bridge-runtime
+  USER_FEATURES+=,service-bridge-runtime
 fi
 [[ "${BNDROID_ART_SYSCALL_TRACE:-0}" != 1 ]] || FEATURES+=,linux-syscall-trace
 CARGO_TARGET_DIR="$ROOT/target/art-build" BNDROID_PROFILE=release \

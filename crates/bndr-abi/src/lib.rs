@@ -323,6 +323,8 @@ pub const PROCESS_SPAWN_FLAGS_NONE: u64 = 0;
 /// Init-only Linux launch profile selector; low flag bits remain reserved.
 /// Profile zero preserves the original single-executable spawn behavior.
 pub const PROCESS_SPAWN_LINUX_PROFILE_SHIFT: u32 = 32;
+/// Observe a child completion without blocking behind a still-live child.
+pub const PROCESS_WAIT_NONBLOCK: u64 = 1;
 /// Forced process termination (introduced in ABI 18) accepts no optional flags.
 pub const PROCESS_TERMINATE_FLAGS_NONE: u64 = 0;
 /// Stable exit code reported for a process stopped by `ProcessTerminate`.
@@ -6561,6 +6563,9 @@ pub enum SyscallNumber {
     ///
     /// On ABI-19 success `x1` is the exit code and `x2` is a canonical
     /// [`ProcessTerminationReason`]. Only init may call this operation.
+    /// On entry `x0` is the generation-qualified child ID, `x1` selects flags,
+    /// and `x2` must be zero. [`PROCESS_WAIT_NONBLOCK`] reports `ShouldWait`
+    /// for a live child without consuming its later completion.
     ProcessWait = 12,
     ChannelWriteTransfer = 13,
     ChannelReadTransfer = 14,

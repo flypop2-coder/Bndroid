@@ -18,6 +18,38 @@ def complete_lines(text, line):
     return len(re.findall("^" + re.escape(line + "\n"), text, re.MULTILINE))
 
 
+def service_bridge_status(text):
+    """Require both provider instances, authority checks and generation cleanup."""
+    try:
+        ready = [parse_marker(line + "\n", "RUNTIME_SERVICE_READY") for line in text.splitlines()
+                 if line.startswith("RUNTIME_SERVICE_READY ")]
+        stopped = parse_marker(text, "RUNTIME_SERVICE_STOPPED")
+        client = parse_marker(text, "SERVICE_BRIDGE_CLIENT_OK")
+        controller = parse_marker(text, "SERVICE_BRIDGE_CONTROLLER_OK")
+        if len(ready) != 2 or any(int(r["pid"]) <= 0 or r.get("uid") != "1001" or int(r["instance"]) <= 0 for r in ready):
+            return "invalid-provider-start-proof"
+        first, second = (r["instance"] for r in ready)
+        if first == second or not stopped or stopped.get("instance") != first:
+            return "invalid-provider-restart-proof"
+        if not controller or controller.get("uid") != "1002" or controller.get("instance") != first or controller.get("control") != "authorized":
+            return "missing-service-control-proof"
+        if not client or client.get("uid") != "10000" or client.get("first") != first or client.get("second") != second or any(
+                client.get(k) != "1" for k in ("facts", "identity", "add_denied", "stop_denied", "malformed", "death", "stale", "rediscovery", "daemon_ready")):
+            return "missing-service-client-proof"
+        exits = re.findall(r"^LINUX_PROCESS_EXIT pid=(\d+) code=0 native_handles=0$", text, re.MULTILINE)
+        # Native wait uses generation-qualified IDs; Linux exposes their slots.
+        exited_slots = sorted(int(pid) & 0xffffffff for pid in exits)
+        owners = [int(ready[0]["pid"]), int(client["pid"]), int(controller["pid"])]
+        if len(set(owners)) != 3 or sorted(owners) != exited_slots:
+            return "invalid-service-owner-proof"
+        binder = parse_marker(text, "LINUX_BINDER_OK")
+        if not binder or any(int(binder.get(k, 0)) < n for k, n in (("opened", 5), ("submitted", 12), ("replied", 12), ("security_contexts", 8), ("deaths", 2))):
+            return "missing-service-bridge-transport-proof"
+    except (ValueError, KeyError):
+        return "invalid-service-bridge-record"
+    return None
+
+
 def completion_status(text, mode):
     try:
         proof = parse_marker(text, "BIONIC_DYNAMIC_RUNTIME_OK")
@@ -36,13 +68,18 @@ def completion_status(text, mode):
         "framework-help": "dalvikvm: [options] class [argument ...]\n",
         "framework-identities": "LAUNCH_TIMERS_OK periodic=1 absolute=1 poll=1 lifetime=1 interrupted=1\n",
         "framework-services": "SERVICE_MANAGER_CLIENT_OK upstream=1 lookup=1 ping=1 uid=10000\n",
+        "framework-bridge": "",
         "framework": "FRAMEWORK_MAIN_OK parcel=1 bundle=1 looper=1 delayed=1 wake=1\n",
         "java": "ART_JAVA_CORE_OK sum=4950 exceptions=1 collections=1\n",
         "managed": "ART_MANAGED_OK java_threads=3 monitors=1 interrupt=1 gc=1 jni=1 native_thread=1 clocks=1\n",
         "signals": "ART_SIGNALS_OK handlers=1 altstack=1 registers=1 masks=1 realtime=1 faults=1 threads=1 restart=1 waits=1\n",
     }[mode]
-    if mode in ("framework-identities", "framework-services"):
-        if complete_lines(text, expected.rstrip("\n")) != (2 if mode == "framework-identities" else 1):
+    if mode in ("framework-identities", "framework-services", "framework-bridge"):
+        if mode == "framework-bridge":
+            bridge_error = service_bridge_status(text)
+            if bridge_error:
+                return bridge_error
+        elif complete_lines(text, expected.rstrip("\n")) != (2 if mode == "framework-identities" else 1):
             return "missing-service-launch-proof"
         if mode == "framework-identities":
             if complete_lines(text, "LAUNCH_PPOLL_OK invalid=1 ignored=1 timer_wake=1 timeout=1") != 2:
@@ -52,7 +89,7 @@ def completion_status(text, mode):
             for role, uid in (("system", 1000), ("app", 10000)):
                 if complete_lines(text, f"LAUNCH_IDENTITY_OK role={role} uid={uid} gid={uid} auxv=1 signals=1 binder=1 authority=1") != 1:
                     return "missing-distinct-identity-proof"
-        elif complete_lines(text, "SERVICE_MANAGER_POLICY_OK ready=1 spoof_denied=1 unknown_service_denied=1") != 1:
+        elif mode == "framework-services" and complete_lines(text, "SERVICE_MANAGER_POLICY_OK ready=1 spoof_denied=1 unknown_service_denied=1") != 1:
             return "missing-native-policy-proof"
         try:
             binder = parse_marker(text, "LINUX_BINDER_OK")
@@ -136,6 +173,8 @@ def completion_status(text, mode):
                 "live_anonymous_tables": "0", "live_file_descriptions": "0", "loader": "upstream-android-linker"}
     if mode == "framework-services":
         required.update(native_exits="1", native_killed="1")
+    elif mode == "framework-bridge":
+        required.update(native_processes="5", native_exits="3", native_killed="2", native_reaped="5")
     if any(proof.get(key) != value for key, value in required.items()):
         return "invalid-cleanup-proof"
     exits = re.findall(r"^LINUX_PROCESS_EXIT pid=(\d+) code=0 native_handles=0$", text, re.MULTILINE)
@@ -264,7 +303,7 @@ def main():
     process = None
     text = ""
     status = "timeout"
-    if mode not in ("java", "managed", "memory", "memfd", "binder", "poll", "properties", "help", "framework", "framework-help", "framework-identities", "framework-services", "signals", "signal-bad-frame", "signal-bad-pc", "signal-bad-fp", "signal-default", "signal-guard"):
+    if mode not in ("java", "managed", "memory", "memfd", "binder", "poll", "properties", "help", "framework", "framework-help", "framework-identities", "framework-services", "framework-bridge", "signals", "signal-bad-frame", "signal-bad-pc", "signal-bad-fp", "signal-default", "signal-guard"):
         raise SystemExit("Unknown ART mode")
     with tempfile.NamedTemporaryFile(prefix="bndroid-art-entropy-") as entropy:
         entropy.write(os.urandom(65536))
@@ -307,7 +346,8 @@ def main():
                "managed_runtime_verified": mode == "managed" and status == "managed-passed",
                "apk_dex_jni_verified": mode == "managed" and status == "managed-passed",
                "launch_profiles_verified": mode == "framework-identities" and status == "framework-identities-passed",
-               "service_manager_verified": mode == "framework-services" and status == "framework-services-passed",
+               "service_manager_verified": mode in ("framework-services", "framework-bridge") and status == mode + "-passed",
+               "service_bridge_verified": mode == "framework-bridge" and status == "framework-bridge-passed",
                "framework_frontend_verified": mode == "framework-help" and status == "framework-help-passed",
                "shared_memfd_verified": mode == "memfd" and status == "memfd-passed",
                "binder_transport_verified": mode == "binder" and status == "binder-passed",

@@ -433,6 +433,7 @@ pub(crate) fn linux_launch(index: usize) -> Option<bndroid_kernel::linux_launch:
             manager_domains: 7,
             service_grants: &[],
             property_grants: &[],
+            control_grants: &[],
         })
     }
 }

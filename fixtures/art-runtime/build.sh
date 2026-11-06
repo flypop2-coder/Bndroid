@@ -82,4 +82,14 @@ if [[ "${BNDROID_ART_MODE:-java}" == framework-identities || "${BNDROID_ART_MODE
     -Wl,-z,max-page-size=4096 -Wl,-z,separate-loadable-segments \
     "$ROOT/fixtures/art-runtime/launch.c" -ldl -lbinder_ndk -o "$OUT/launch-probe"
 fi
+if [[ "${BNDROID_ART_MODE:-java}" == framework-bridge ]]; then
+  for SOURCE in "$ROOT/user/runtime-service/main.c" "$ROOT/fixtures/art-runtime/service-bridge.c"; do
+    NAME=bndroid-runtime-service
+    [[ "$SOURCE" != *service-bridge.c ]] || NAME=service-bridge-client
+    "$NDK_ROOT/toolchains/llvm/prebuilt/$HOST_TAG/bin/aarch64-linux-android35-clang" \
+      -O2 -g -Wall -Wextra -Werror -pthread -fPIE -pie \
+      -Wl,-z,max-page-size=4096 -Wl,-z,separate-loadable-segments \
+      "$SOURCE" "$ROOT/user/runtime-service/platform.c" -ldl -lbinder_ndk -o "$OUT/$NAME"
+  done
+fi
 printf 'ART_DEX_BUILD_OK path=%s\n' "$OUT/probe.dex"

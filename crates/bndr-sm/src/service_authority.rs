@@ -29,6 +29,11 @@ pub fn property_name(name: &str) -> bool {
 pub fn may_set_property(grants: &[&str], name: &str) -> bool {
     property_name(name) && !name.starts_with("ro.") && grants.contains(&name)
 }
+/// A maintenance capability is separate from service discovery/registration.
+/// Possession of an application-facing Binder never grants lifecycle control.
+pub fn may_stop_service(grants: &[&str], target: &str) -> bool {
+    grants.contains(&target)
+}
 
 #[cfg(test)]
 mod tests {
@@ -48,6 +53,9 @@ mod tests {
         ));
         assert!(!may_set_property(&["servicemanager.ready"], "sys.powerctl"));
         assert!(!may_set_property(&["ro.foo"], "ro.foo"));
+        assert!(may_stop_service(&["manager"], "manager"));
+        assert!(!may_stop_service(&["manager"], "manager.child"));
+        assert!(!may_stop_service(&[], "manager"));
         for bad in ["", ".x", "x.", "x..y", "x/y", "x\0y"] {
             assert!(!property_name(bad));
         }

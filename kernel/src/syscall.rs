@@ -5234,13 +5234,13 @@ fn thread_exit(
 fn process_wait(
     frame: *mut TrapFrame,
     process_id: u64,
-    reserved1: u64,
+    flags: u64,
     reserved2: u64,
 ) -> *mut TrapFrame {
     if !crate::process::current_is_init() {
         return complete(frame, Status::PermissionDenied, 0, 0);
     }
-    if process_id == 0 || reserved1 != 0 || reserved2 != 0 {
+    if process_id == 0 || flags & !bndr_abi::PROCESS_WAIT_NONBLOCK != 0 || reserved2 != 0 {
         return complete(frame, Status::InvalidArgument, 0, 0);
     }
     match crate::process::wait_child(process_id) {
@@ -5248,6 +5248,9 @@ fn process_wait(
             complete(frame, Status::Ok, exit_code, reason.raw())
         }
         Ok(crate::process::ChildWait::Live) => {
+            if flags & bndr_abi::PROCESS_WAIT_NONBLOCK != 0 {
+                return complete(frame, Status::ShouldWait, 0, 0);
+            }
             crate::scheduler::wait_current_user_process(frame, process_id)
         }
         Err(crate::process::ChildWaitError::NotFound) => complete(frame, Status::NotFound, 0, 0),
@@ -16279,7 +16282,12 @@ fn init_ready(
     #[cfg(feature = "linux-abi-runtime")]
     if magic == INIT_READY_MAGIC
         && register_sentinel == 0x4c4e5831
-        && stack_sentinel == 2
+        && stack_sentinel
+            == if cfg!(feature = "service-bridge-runtime") {
+                5
+            } else {
+                2
+            }
         && with_table(|table| table.is_empty())
     {
         INIT_READY.store(true, Ordering::Release);

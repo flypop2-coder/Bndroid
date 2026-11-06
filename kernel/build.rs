@@ -901,8 +901,8 @@ fn configure_linux_launch() {
         }
         source.push_str(
             &format!(
-                "service_grants: &{:?}, property_grants: &{:?},\n",
-                profile.service_grants, profile.property_grants
+                "service_grants: &{:?}, property_grants: &{:?}, control_grants: &{:?},\n",
+                profile.service_grants, profile.property_grants, profile.control_grants
             )
             .replace("Grant {", "bndr_sm::service_authority::Grant {"),
         );
@@ -921,6 +921,7 @@ fn add_userspace_feature_cfgs(command: &mut Command) {
         "binder-runtime",
         "linux-launch-runtime",
         "service-manager-runtime",
+        "service-bridge-runtime",
     ] {
         let key = format!("CARGO_FEATURE_{}", feature.replace('-', "_").to_uppercase());
         if env::var_os(key).is_some() {

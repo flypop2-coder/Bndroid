@@ -47,6 +47,16 @@ pub fn nodes() -> impl Iterator<Item = Node<'static>> {
             b"3".as_slice(),
             0o444,
         ),
+        (
+            "sys/fs/selinux/class/bndroid_service/index",
+            b"2".as_slice(),
+            0o444,
+        ),
+        (
+            "sys/fs/selinux/class/bndroid_service/perms/stop",
+            b"1".as_slice(),
+            0o444,
+        ),
     ]
     .into_iter()
     .enumerate()
@@ -92,6 +102,7 @@ fn known_context(context: &str) -> bool {
     for path in [
         "/system/etc/selinux/plat_service_contexts",
         "/system_ext/etc/selinux/system_ext_service_contexts",
+        "/product/etc/selinux/product_service_contexts",
     ] {
         let Ok(node) = linux_rootfs::resolve(&Path::normalize("", path).unwrap(), true) else {
             continue;
@@ -136,6 +147,17 @@ pub fn write(file: &FileRef, kind: ControlKind, bytes: &[u8]) -> Result<u64, i64
                     .and_then(userboot::linux_launch)
                     .map_or(0, |p| {
                         bndr_sm::service_authority::allowed(p.service_grants, target)
+                    })
+            } else if class == 2 {
+                CONTEXTS
+                    .iter()
+                    .position(|c| *c == source)
+                    .and_then(userboot::linux_launch)
+                    .map_or(0, |p| {
+                        u32::from(bndr_sm::service_authority::may_stop_service(
+                            p.control_grants,
+                            target,
+                        ))
                     })
             } else {
                 0

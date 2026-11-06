@@ -171,7 +171,8 @@ Tasks follow dependencies, not optimistic calendar dates. Each stage requires co
 - [x] Add Init-selected Linux launch profiles with distinct UID/GID, matching auxiliary-vector/signal/Binder identities and explicit context-manager domain authority.
 - [x] Add timerfd expiration accounting and event waits; supply bounded ppoll readiness for existing files, timers, Binder and epoll.
 - [x] Start the original ServiceManager with Init-issued service grants, authenticated Binder security contexts and a live shared readiness property; verify original NDK lookup/ping, denied property spoofing and full teardown.
-- [ ] Extend service grants into CoreSystem-owned dynamic application policy; register native/Framework providers through the original ServiceManager, and verify lookup/calls/death/restart across separate provider and app processes.
+- [x] Register an owned native runtime provider with the original ServiceManager; verify real calls/caller identity, distinct maintenance authority, death notifications, stale references and rediscovery after Init reaps/restarts the provider.
+- [ ] Extend service grants into CoreSystem-owned dynamic application policy and integrate managed Framework providers/clients with resident supervision and application lifecycle.
 - [ ] Extend readiness to socket/pipe and other devices, add select and ppoll remaining-time writeback, and implement clock-change cancellation, alarm wakeups and native power policy.
 - [ ] Run a non-customized managed APK through ActivityThread and Framework.
 - [ ] Run a JNI/native-library APK with W^X, RELRO, ASLR, and crash-isolation checks.
