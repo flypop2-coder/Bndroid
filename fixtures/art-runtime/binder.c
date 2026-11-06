@@ -10,6 +10,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/epoll.h>
+#include <sys/eventfd.h>
+#include <sys/syscall.h>
+#include <linux/memfd.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <ucontext.h>
@@ -27,10 +31,19 @@ static unsigned ref_incs, ref_acquires, ref_releases, ref_decs;
 #define SERVER_PTR 0x567800
 #define COOKIE(p) ((p)+0x55)
 static void *pool;
+static void *fd_fault_address;
+static volatile sig_atomic_t fd_faults;
+static int binder_poll=-1, binder_outer=-1, polled_binder=-1;
+static unsigned binder_poll_wakes;
+static int survivor_fd=-1;
+static const char *survivor_map;
 struct payload { uint32_t pid, serial; uint64_t value; };
 struct event { uint32_t command; struct binder_transaction_data transaction; uint64_t cookie; };
 
 static void handler(int signal, siginfo_t *info, void *context) {
+    if(signal==SIGBUS && info->si_code==BUS_ADRERR && info->si_addr==fd_fault_address) {
+        ++fd_faults;((ucontext_t *)context)->uc_mcontext.pc+=4;return;
+    }
     if (signal==SIGUSR1) { ++signals_seen; return; }
     if (signal!=SIGSEGV || info->si_code!=SEGV_ACCERR || info->si_addr!=pool) _exit(92);
     ++faults; ((ucontext_t *)context)->uc_mcontext.pc+=4;
@@ -50,7 +63,14 @@ static struct event receive_from(int fd, int fallback) {
     for (;;) {
         unsigned char bytes[256];
         struct binder_write_read io={.read_size=sizeof(bytes),.read_buffer=(uintptr_t)bytes};
-        CHECK(ioctl(fd,BINDER_WRITE_READ,&io)==0 && io.read_consumed>=4 && io.read_consumed<=sizeof(bytes));
+        int status=ioctl(fd,BINDER_WRITE_READ,&io);
+        if(status==-1 && errno==EAGAIN && binder_poll>=0 && fd==polled_binder) {
+            struct epoll_event event;
+            CHECK(epoll_wait(binder_outer,&event,1,5000)==1 && event.events&EPOLLIN && event.data.u64==0xb2);
+            CHECK(epoll_wait(binder_poll,&event,1,0)==1 && event.events&EPOLLIN && event.data.u64==0xb1);
+            ++binder_poll_wakes;continue;
+        }
+        CHECK(status==0 && io.read_consumed>=4 && io.read_consumed<=sizeof(bytes));
         struct event result={0}; size_t at=0;
         while (at<io.read_consumed) {
             uint32_t code; CHECK(io.read_consumed-at>=4); memcpy(&code,bytes+at,4); at+=4;
@@ -60,7 +80,7 @@ static struct event receive_from(int fd, int fallback) {
             else if (code==BR_DEAD_REPLY || code==BR_FAILED_REPLY) { CHECK(!result.command); result.command=code; }
             else if (code==BR_INCREFS || code==BR_ACQUIRE || code==BR_RELEASE || code==BR_DECREFS) {
                 struct binder_ptr_cookie ref; memcpy(&ref,bytes+at,sizeof(ref));
-                CHECK((ref.ptr==CLIENT_PTR || ref.ptr==CLIENT_PTR+0x100 || ref.ptr==SERVER_PTR || ref.ptr==SERVER_PTR+0x100) && ref.cookie==COOKIE(ref.ptr));
+                CHECK((ref.ptr==CLIENT_PTR || ref.ptr==CLIENT_PTR+0x100 || ref.ptr==SERVER_PTR || ref.ptr==SERVER_PTR+0x100 || ref.ptr==SERVER_PTR+0x200) && ref.cookie==COOKIE(ref.ptr));
                 if(code==BR_INCREFS) {++ref_incs;command(fd,BC_INCREFS_DONE,&ref,sizeof(ref));}
                 else if(code==BR_ACQUIRE) {++ref_acquires;command(fd,BC_ACQUIRE_DONE,&ref,sizeof(ref));}
                 else if(code==BR_RELEASE) ++ref_releases;
@@ -166,6 +186,8 @@ static void object_server(int fd,const struct event *request) {
     CHECK(ref_incs==2 && ref_acquires==2);
     puts("BINDER_OBJECT_SERVER_OK export=2 callback=1 nested=2 per_node_oneway=1 refs=1");
 }
+#include "binder_files.h"
+
 static void *waiting_reply(void *unused) {
     (void)unused;
     struct payload request={(uint32_t)getpid(),1,0x1122334455667788ULL};
@@ -233,6 +255,7 @@ static void client(int fd) {
     transmit(control_fd,BC_TRANSACTION,99,0,&finish,sizeof(finish));
     reply=receive(control_fd); CHECK(reply.command==BR_REPLY); release_buffer(control_fd,&reply);
     object_client(control_fd);
+    files_client(control_fd);
     // The service exits with this synchronous request still outstanding.
     transmit(control_fd,BC_TRANSACTION,100,0,&finish,sizeof(finish));
     CHECK(receive(control_fd).command==BR_DEAD_REPLY);
@@ -254,7 +277,11 @@ static void client(int fd) {
     puts("BINDER_OBJECT_CLIENT_OK export=2 handles=2 roundtrip=1 malformed=3 deaths=2 refs=1");
     transmit(control_fd,BC_TRANSACTION,101,0,&finish,sizeof(finish)); CHECK(receive(control_fd).command==BR_DEAD_REPLY);
     command(control_fd,BC_RELEASE,&handle,4); command(control_fd,BC_DECREFS,&handle,4);
-    CHECK(munmap(pool,POOL_SIZE)==0 && close(control_fd)==0);
+    char survived[16];CHECK(pread(survivor_fd,survived,15,0)==15 && memcmp(survived,"binder survives",15)==0);
+    CHECK(memcmp(survivor_map,"binder survives",15)==0 && munmap((void *)survivor_map,4096)==0 && close(survivor_fd)==0);
+    CHECK(fd_faults==1 && binder_poll_wakes>0);
+    CHECK(munmap(pool,POOL_SIZE)==0 && close(control_fd)==0);stop_binder_poll();
+    puts("BINDER_FD_CLIENT_OK shared=1 offset=1 cloexec=1 truncate=1 regrow=1 seals=1 full=1 peer_exit=1 poll=1");
     puts("BINDER_CLIENT_OK identity=1 reply=1 oneway=3 death=1 interrupted=1 fd_reuse=1 readonly=1");
 }
 static void server(int fd) {
@@ -273,6 +300,7 @@ static void server(int fd) {
         CHECK(request.transaction.sender_euid==(uint32_t)getuid());
         uint32_t code=request.transaction.code;
         if (code==60) {object_server(fd,&request);continue;}
+        if (code==70) {files_server(fd,&request);continue;}
         if (code==40) {
             CHECK(oneway==3 && request.transaction.sender_pid==(int32_t)client_pid && request.transaction.data_size==8201);
             unsigned char response[8201]; const unsigned char *data=(void *)(uintptr_t)request.transaction.data.ptr.buffer;
@@ -301,7 +329,7 @@ static void server(int fd) {
     }
     // Close the service first: unmapping an active receive pool intentionally
     // fails its outstanding work before a later close could report peer death.
-    CHECK(close(fd)==0 && munmap(pool,POOL_SIZE)==0);
+    CHECK(close(fd)==0 && munmap(pool,POOL_SIZE)==0);stop_binder_poll();
     puts("BINDER_SERVER_OK identity=1 reply=1 oneway=3 receive_pool=1 readonly=1 domains=3");
 }
 int main(void) {
@@ -318,12 +346,13 @@ int main(void) {
     CHECK(mprotect(pool,4096,PROT_READ|PROT_WRITE)==-1 && errno==EACCES);
     CHECK(mprotect(pool,4096,PROT_READ|PROT_EXEC)==-1 && errno==EACCES);
     struct sigaction action={.sa_sigaction=handler,.sa_flags=SA_SIGINFO}; sigemptyset(&action.sa_mask);
-    CHECK(sigaction(SIGSEGV,&action,NULL)==0 && sigaction(SIGUSR1,&action,NULL)==0);
+    CHECK(sigaction(SIGSEGV,&action,NULL)==0 && sigaction(SIGUSR1,&action,NULL)==0 && sigaction(SIGBUS,&action,NULL)==0);
     __asm__ volatile("strb %w1, [%0]" :: "r"(pool),"r"(255) : "memory");
     CHECK(faults==1 && *(const unsigned char *)pool==0);
     struct binder_write_read invalid={.write_size=4,.write_consumed=5};
     CHECK(ioctl(fd,BINDER_WRITE_READ,&invalid)==-1 && errno==EINVAL);
-    int manager=ioctl(fd,BINDER_SET_CONTEXT_MGR,NULL);
+    struct flat_binder_object manager_node={.flags=FLAT_BINDER_FLAG_ACCEPTS_FDS};
+    int manager=ioctl(fd,BINDER_SET_CONTEXT_MGR_EXT,&manager_node);
     if (manager==0) server(fd); else { CHECK(errno==EBUSY); client(fd); }
     return 0;
 }

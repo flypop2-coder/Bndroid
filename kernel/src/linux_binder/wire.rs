@@ -35,12 +35,14 @@ pub const BR_DEAD_BINDER: u32 = 0x8008_720f;
 pub const BR_CLEAR_DEATH_DONE: u32 = 0x8008_7210;
 pub const BR_FAILED_REPLY: u32 = 0x0000_7211;
 pub const ONE_WAY: u32 = 1;
+pub const ACCEPT_FDS: u32 = 0x10;
 pub const MAX_MAPPING: u64 = 4 * 1024 * 1024;
 pub const MAX_OBJECTS: u64 = 256;
 pub const TYPE_BINDER: u32 = 0x7362_2a85;
 pub const TYPE_WEAK_BINDER: u32 = 0x7762_2a85;
 pub const TYPE_HANDLE: u32 = 0x7368_2a85;
 pub const TYPE_WEAK_HANDLE: u32 = 0x7768_2a85;
+pub const TYPE_FD: u32 = 0x6664_2a85;
 
 pub fn u32_at(bytes: &[u8], at: usize) -> u32 {
     u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap())
@@ -118,6 +120,38 @@ pub struct Transaction {
     pub offsets: u64,
 }
 impl Transaction {
+    pub fn object_offsets(self, bytes: &[u8]) -> Result<alloc::vec::Vec<usize>, i64> {
+        self.validate_payload()?;
+        if bytes.len() != self.payload_length()? {
+            return Err(22);
+        }
+        let mut result = alloc::vec::Vec::new();
+        result
+            .try_reserve_exact(self.offsets_size as usize / 8)
+            .map_err(|_| 12)?;
+        let offsets = (self.data_size as usize + 7) & !7;
+        let mut minimum = 0;
+        for i in 0..self.offsets_size as usize / 8 {
+            let at = usize::try_from(u64_at(bytes, offsets + i * 8)).map_err(|_| 22)?;
+            if !at.is_multiple_of(4)
+                || at < minimum
+                || at
+                    .checked_add(24)
+                    .is_none_or(|end| end > self.data_size as usize)
+            {
+                return Err(22);
+            }
+            if !matches!(
+                u32_at(bytes, at),
+                TYPE_BINDER | TYPE_WEAK_BINDER | TYPE_HANDLE | TYPE_WEAK_HANDLE | TYPE_FD
+            ) {
+                return Err(95);
+            }
+            result.push(at);
+            minimum = at + 24;
+        }
+        Ok(result)
+    }
     pub fn decode(bytes: &[u8; 64]) -> Self {
         Self {
             target: u64_at(bytes, 0),

@@ -44,5 +44,6 @@ Public Markdown documentation is maintained in English. Paths already establishe
 - [Initial Binder byte transport and Framework Parcel progress](milestones/androidbox/BINDER_TRANSPORT_0.md)
 - [Framework Looper, event notification and normal VM shutdown](milestones/androidbox/FRAMEWORK_LOOPER_0.md)
 - [Binder objects, handle ownership and nested callbacks](milestones/androidbox/BINDER_OBJECTS_1.md)
+- [Binder file transfer, shared-memory ownership and epoll](milestones/androidbox/BINDER_FILES_2.md)
 
 Historical pages report their original profile and validation date, not universal compatibility or a fresh test run. See [the archive policy](archive/README.md) for source preservation.

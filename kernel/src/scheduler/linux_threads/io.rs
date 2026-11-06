@@ -21,6 +21,8 @@ struct Call {
     operation: Operation,
     deadline: Option<u64>,
     args: [u64; 6],
+    owner: u64,
+    tid: u32,
 }
 struct Calls(UnsafeCell<[Option<Call>; CONTEXT_COUNT]>);
 unsafe impl Sync for Calls {}
@@ -67,6 +69,15 @@ fn control(r: &[u64; 31]) -> Result<u64, i64> {
     let target = file(r[2])?;
     if !matches!(ep.target(), Target::Epoll) {
         return Err(22);
+    }
+    if let Some(binder) = target.binder() {
+        bndroid_kernel::linux_binder::with(|router| {
+            router.register_poll(
+                binder.id,
+                owner(current_running_context()),
+                current_tid() as u32,
+            )
+        })?;
     }
     let target = target.poll().ok_or(1)?.id;
     let mut bytes = [0; 16];
@@ -151,6 +162,8 @@ fn counter_io(frame: *mut TrapFrame, r: &[u64; 31], file: FileRef) -> *mut TrapF
             operation,
             deadline: None,
             args: r[..6].try_into().unwrap(),
+            owner: owner(current_running_context()),
+            tid: current_tid() as u32,
         })
     })();
     // Consume a signal-restored syscall record; eventfd has no timeout to reuse.
@@ -219,6 +232,8 @@ fn wait_epoll(frame: *mut TrapFrame, r: &[u64; 31]) -> *mut TrapFrame {
             },
             deadline,
             args: r[..6].try_into().unwrap(),
+            owner: owner(current_running_context()),
+            tid: current_tid() as u32,
         })
     })();
     match result {
@@ -228,10 +243,17 @@ fn wait_epoll(frame: *mut TrapFrame, r: &[u64; 31]) -> *mut TrapFrame {
 }
 fn ready(call: &Call) -> Result<bool, i64> {
     let id = call.file.poll().unwrap().id;
+    if matches!(call.operation, Operation::Poll { .. }) {
+        let snapshot = bndroid_kernel::linux_binder::with(|r| r.readiness(call.owner, call.tid));
+        return poll::with(|h| {
+            h.sync_external(snapshot.revision);
+            h.epoll_ready_using(id, |key| snapshot.mask(key))
+        });
+    }
     poll::with(|h| match call.operation {
         Operation::Read(_) => h.can_read(id),
         Operation::Write(value) => h.can_write(id, value),
-        Operation::Poll { .. } => h.epoll_ready(id),
+        Operation::Poll { .. } => unreachable!(),
     })
 }
 #[inline(never)]
@@ -256,7 +278,12 @@ fn attempt(call: &Call) -> Result<Option<u64>, i64> {
         }
         Operation::Write(value) => Ok(poll::with(|h| h.write(id, *value))?.then_some(8)),
         Operation::Poll { address, maximum } => {
-            let events = poll::with(|h| h.prepare(id, *maximum))?;
+            let snapshot =
+                bndroid_kernel::linux_binder::with(|r| r.readiness(call.owner, call.tid));
+            let events = poll::with(|h| {
+                h.sync_external(snapshot.revision);
+                h.prepare_using(id, *maximum, |key| snapshot.mask(key))
+            })?;
             if events.is_empty() {
                 return Ok(call
                     .deadline
@@ -359,7 +386,7 @@ pub(super) fn evidence() {
     assert!((0..CONTEXT_COUNT).all(|c| slot(c).is_none()));
     let s = poll::with(|h| h.stats());
     crate::kprintln!(
-        "LINUX_POLL_OK eventfds={} epolls={} closed={} reads={} writes={} delivered={} controls={} blocked={} ready={} expired={} cancelled={} live={} watches={}",
+        "LINUX_POLL_OK eventfds={} epolls={} closed={} reads={} writes={} delivered={} controls={} blocked={} ready={} expired={} cancelled={} live={} watches={} external={} external_delivered={}",
         s.eventfds,
         s.epolls,
         s.closed,
@@ -372,7 +399,9 @@ pub(super) fn evidence() {
         EXPIRED.load(Ordering::Relaxed),
         CANCELLED.load(Ordering::Relaxed),
         s.live,
-        s.watches
+        s.watches,
+        s.external,
+        s.external_delivered
     );
     assert_eq!((s.live, s.watches), (0, 0));
 }

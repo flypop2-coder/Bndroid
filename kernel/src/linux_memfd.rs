@@ -1,6 +1,7 @@
 //! Bounded anonymous memory files. File descriptors and VMAs retain the same
 //! open description. The runtime serializes syscalls and EL0 access on one CPU.
-//! No host filesystem, disk, or cross-process sharing is involved.
+//! Explicit Binder FD transfer can share the file across process mappings.
+//! No host filesystem or disk backing is involved.
 use crate::{
     linux_pages::Page,
     memory::{PAGE_SIZE, PhysFrame},

@@ -163,10 +163,12 @@ Tasks follow dependencies, not optimistic calendar dates. Each stage requires co
 - [ ] Inspect and integrate the frozen image's upstream Framework/ActivityThread dependencies; connect real app startup to Binder and native service bridges.
 - [ ] Complete timezone/properties, writable runtime storage, directory/proc/scheduling interfaces, shared/file paging and broader managed-runtime/API stress before general APK claims.
 - [x] Extend Binder with strong/weak objects, connection-scoped handles, reference acknowledgment/release, per-node one-way ordering, nested callbacks and descendant failure cleanup. This bounded native transport does not complete A2.
-- [ ] Complete Binder identity and capability mapping: add FD/SG ownership, service-manager registration/lookup, per-app identities, scheduler/security-context policy and native capability/permission enforcement; retain stale-handle and failure-path coverage.
+- [x] Transfer flat Binder FDs with receiver consent, source-close lifetime, atomic destination installation/rollback, failed-request resuspension and cross-process memfd resize/seal safety.
+- [ ] Complete Binder identity and capability mapping: add SG/FD-array ownership, Binder-device transfer lifecycle, service-manager registration/lookup, per-app identities, scheduler/security-context policy and native capability/permission enforcement; retain stale-handle and failure-path coverage.
 - [x] Supply real eventfd/epoll readiness, blocking, wake, timeout, signal-mask/restart and descriptor-lifetime semantics for upstream Looper; pass both cross-thread wake/delayed-callback Framework generations with normal VM shutdown and complete cleanup.
 - [x] Separate Binder/hwbinder/vndbinder context managers and close-flush returns; keep in-flight ownership while letting the upstream pool detach. Fit complete Framework proc-map snapshots within a declared text bound without truncation.
-- [ ] Extend readiness to Binder, socket/pipe and device descriptors; add poll/select, timerfd and native permission/power policy as their services become available.
+- [x] Connect Binder to epoll with process/thread-specific readiness, nested/edge/one-shot notification, non-consuming snapshots and close cleanup.
+- [ ] Extend readiness to socket/pipe and other device descriptors; add poll/select, timerfd and native permission/power policy as their services become available.
 - [ ] Run a non-customized managed APK through ActivityThread and Framework.
 - [ ] Run a JNI/native-library APK with W^X, RELRO, ASLR, and crash-isolation checks.
 - [ ] Bridge packages, permissions, windows/input, storage, networking, and media in order.

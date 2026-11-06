@@ -46,16 +46,20 @@ The object phase adds strong/weak exports, nonzero handles, object round trips,
 reference acknowledgments, two nested callbacks, per-object one-way ordering,
 malformed-transfer rollback and two additional death subscriptions. The verifier
 also requires zero live nodes, handle references and synchronous call frames.
-`binder_transport_verified` covers these bounded native transport operations;
-FD transfer, ServiceManager and app permission/capability policy remain open.
-See [Binder Objects-1](../../docs/milestones/androidbox/BINDER_OBJECTS_1.md).
+`binder_transport_verified` covers these bounded native transport operations.
+The FD phase also transfers actual memfd/eventfd descriptions, checks shared
+offsets and CLOEXEC, shrinks/regrows foreign mappings, enforces cross-process
+seals, exhausts both recipient tables, retries a failed blocking receive and
+retains a file after peer exit. Nested epoll drives nonblocking Binder reads.
+SG/FD-array transfer, ServiceManager and app permission/capability policy remain
+open. See [Binder Files-2](../../docs/milestones/androidbox/BINDER_FILES_2.md).
 
 The `poll` mode runs two native generations through actual eventfd/epoll objects.
 It tests counter/semaphore behavior, vectored I/O, nested/edge/one-shot watches,
 timeouts, blocked-descriptor reuse, competing readers, invalid/unmapped buffers,
 signal interruption/restart, atomic temporary masks and exit with a waiting
 sibling. `event_poll_verified` requires kernel wait/wake/timeout counters and full
-resource cleanup. Epoll currently supports eventfd and nested epoll targets;
+resource cleanup. Epoll currently supports eventfd, Binder and nested epoll targets;
 other device readiness remains separate work.
 
 Binder now has independent framework/hardware/vendor device domains. Descriptor

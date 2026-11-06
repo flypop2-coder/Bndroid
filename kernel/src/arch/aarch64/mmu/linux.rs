@@ -158,13 +158,19 @@ impl LinuxMappings {
     }
 
     #[cfg(feature = "art-runtime")]
-    fn resize_memory(
+    fn update_memory_aliases(
         &mut self,
         asid: u8,
         memory: &bndroid_kernel::linux_memfd::MemoryFile,
         length: u64,
-    ) -> Result<u64, i64> {
-        let prepared = memory.prepare_resize(length)?;
+    ) {
+        if !self
+            .memories
+            .iter()
+            .any(|f| f.memory().is_some_and(|m| m.inode() == memory.inode()))
+        {
+            return;
+        }
         let eof = length.div_ceil(PAGE_SIZE as u64) * PAGE_SIZE as u64;
         let remove = |page: &Page| {
             self.layout.regions.iter().any(|r| {
@@ -177,7 +183,6 @@ impl LinuxMappings {
                     })
             })
         };
-        let guard = PageTableGuard::acquire().map_err(|_| ENOMEM)?;
         for page in &self.pages {
             if remove(page) {
                 unsafe {
@@ -191,9 +196,6 @@ impl LinuxMappings {
         // Shared Page entries do not own physical frames. Drop their aliases
         // before truncating the backing object's unique frame ownership.
         self.pages.retain(|page| !remove(page));
-        unsafe {
-            memory.commit_resize(prepared);
-        }
         for region in &mut self.layout.regions {
             if let Some(file) = region.file.as_mut()
                 && file.memory
@@ -204,8 +206,6 @@ impl LinuxMappings {
                     + file.available.div_ceil(PAGE_SIZE as u64) * PAGE_SIZE as u64;
             }
         }
-        drop(guard);
-        Ok(0)
     }
 
     #[cfg(feature = "art-runtime")]
@@ -888,25 +888,33 @@ fn page_descriptor(page: &Page) -> u64 {
 
 impl UserAddressSpace {
     #[cfg(feature = "art-runtime")]
-    pub fn linux_memfd_resize(
-        &mut self,
+    pub fn linux_resize_memory_file<'a>(
         memory: &bndroid_kernel::linux_memfd::MemoryFile,
         length: u64,
+        spaces: impl Iterator<Item = &'a mut UserAddressSpace>,
     ) -> Result<u64, i64> {
-        self.linux.resize_memory(self.asid(), memory, length)
+        let prepared = memory.prepare_resize(length)?;
+        let guard = PageTableGuard::acquire().map_err(|_| ENOMEM)?;
+        // Every address space withdraws stale translations before any backing
+        // frame can be freed. Allocation and lock failure precede all changes.
+        for space in spaces {
+            space
+                .linux
+                .update_memory_aliases(space.asid(), memory, length);
+        }
+        unsafe {
+            memory.commit_resize(prepared);
+        }
+        drop(guard);
+        Ok(0)
     }
     #[cfg(feature = "art-runtime")]
-    pub fn linux_memfd_seal(
-        &self,
-        memory: &bndroid_kernel::linux_memfd::MemoryFile,
-        seals: u64,
-    ) -> Result<u64, i64> {
-        let writable = self.linux.layout.regions.iter().any(|r| {
+    pub fn linux_memfd_may_write(&self, inode: u64) -> bool {
+        self.linux.layout.regions.iter().any(|r| {
             r.shared
                 && r.file
-                    .is_some_and(|f| f.memory && f.inode == memory.inode() && f.may_write)
-        });
-        memory.add_seals(seals, writable)
+                    .is_some_and(|f| f.memory && f.inode == inode && f.may_write)
+        })
     }
     #[cfg(feature = "art-runtime")]
     pub fn linux_mmap_memory(

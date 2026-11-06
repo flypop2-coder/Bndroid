@@ -24,6 +24,8 @@ const MAX_COUNTER: u64 = u64::MAX - 1;
 pub struct Stats {
     pub eventfds: u64,
     pub epolls: u64,
+    pub external: u64,
+    pub external_delivered: u64,
     pub closed: u64,
     pub reads: u64,
     pub writes: u64,
@@ -44,6 +46,7 @@ struct Watch {
 enum Object {
     Counter { value: u64, semaphore: bool },
     Epoll { watches: Vec<Watch>, cursor: usize },
+    External { key: u64 },
 }
 struct Entry {
     id: u64,
@@ -70,6 +73,7 @@ pub struct Hub {
     next: u64,
     notification: u64,
     stats: Stats,
+    external_revision: u64,
 }
 impl Default for Hub {
     fn default() -> Self {
@@ -82,9 +86,12 @@ impl Hub {
             entries: Vec::new(),
             next: 1,
             notification: 0,
+            external_revision: 0,
             stats: Stats {
                 eventfds: 0,
                 epolls: 0,
+                external: 0,
+                external_delivered: 0,
                 closed: 0,
                 reads: 0,
                 writes: 0,
@@ -131,6 +138,24 @@ impl Hub {
         })?;
         self.stats.epolls += 1;
         Ok(id)
+    }
+    pub fn external(&mut self, key: u64) -> Result<u64, i64> {
+        let id = self.create(Object::External { key })?;
+        self.stats.external += 1;
+        Ok(id)
+    }
+    /// Conservative wake notifications are filtered by the caller's immutable
+    /// readiness snapshot. Propagation also rearms edge watches on nested epoll.
+    pub fn sync_external(&mut self, revision: u64) {
+        if self.external_revision == revision {
+            return;
+        }
+        self.external_revision = revision;
+        for i in 0..self.entries.len() {
+            if matches!(self.entries[i].object, Object::External { .. }) {
+                self.notify(self.entries[i].id, IN | ERR | HUP);
+            }
+        }
     }
     pub fn can_read(&self, id: u64) -> Result<bool, i64> {
         match self.entries[self.index(id)?].object {
@@ -312,12 +337,15 @@ impl Hub {
         self.notify(id, IN);
         Ok(())
     }
-    fn readiness(&self) -> [u32; MAX_OBJECTS] {
+    fn readiness(&self, external: &impl Fn(u64) -> u32) -> [u32; MAX_OBJECTS] {
         let mut ready = [0; MAX_OBJECTS];
         for (i, e) in self.entries.iter().enumerate() {
             if let Object::Counter { value, .. } = e.object {
                 ready[i] =
                     if value > 0 { IN } else { 0 } | if value < MAX_COUNTER { OUT } else { 0 };
+            }
+            if let Object::External { key } = e.object {
+                ready[i] = external(key);
             }
         }
         // The acyclic graph has at most MAX_DEPTH epoll levels. Bounded passes
@@ -340,10 +368,21 @@ impl Hub {
         ready
     }
     pub fn epoll_ready(&self, id: u64) -> Result<bool, i64> {
+        self.epoll_ready_using(id, |_| 0)
+    }
+    pub fn epoll_ready_using(&self, id: u64, external: impl Fn(u64) -> u32) -> Result<bool, i64> {
         self.watches(id)?;
-        Ok(self.readiness()[self.index(id)?] != 0)
+        Ok(self.readiness(&external)[self.index(id)?] != 0)
     }
     pub fn prepare(&self, id: u64, maximum: usize) -> Result<Vec<Event>, i64> {
+        self.prepare_using(id, maximum, |_| 0)
+    }
+    pub fn prepare_using(
+        &self,
+        id: u64,
+        maximum: usize,
+        external: impl Fn(u64) -> u32,
+    ) -> Result<Vec<Event>, i64> {
         if maximum == 0 {
             return Err(22);
         }
@@ -352,7 +391,7 @@ impl Hub {
         result
             .try_reserve_exact(maximum.min(watches.len()))
             .map_err(|_| 12)?;
-        let ready = self.readiness();
+        let ready = self.readiness(&external);
         for at in 0..watches.len() {
             let w = &watches[(at + cursor) % watches.len()];
             if !w.armed || w.mask & EDGE != 0 && !w.pending {
@@ -379,12 +418,19 @@ impl Hub {
         };
         let at = watches.iter().position(|w| w.id == event.watch).ok_or(2)?;
         let w = &mut watches[at];
+        let target = w.target;
         w.pending = false;
         if w.mask & ONESHOT != 0 {
             w.armed = false;
         }
         *cursor = (at + 1) % watches.len();
         self.stats.delivered += 1;
+        if self
+            .index(target)
+            .is_ok_and(|i| matches!(self.entries[i].object, Object::External { .. }))
+        {
+            self.stats.external_delivered += 1;
+        }
         Ok(())
     }
     pub fn close(&mut self, id: u64) {

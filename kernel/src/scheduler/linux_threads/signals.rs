@@ -580,7 +580,11 @@ extern "C" fn linux_signal_return(frame: *mut TrapFrame) -> *mut TrapFrame {
     // Binder completions can copy user buffers only here, after both TTBR and
     // SP belong to the resumed process. Signal delivery then sees the final
     // syscall result, or EINTR if the queued read was cancelled.
-    super::binder::complete_ready(frame);
+    if let Some(next) = super::binder::complete_ready(frame)
+        && next != frame
+    {
+        return next;
+    }
     if let Some(next) = super::io::complete_ready(frame) {
         // run() may reblock after another reader consumed the readiness. In
         // that case assembly must switch stacks before any further user copy.

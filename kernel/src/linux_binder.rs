@@ -1,9 +1,13 @@
 //! Binder transaction ownership, independent of user copies and page tables.
 //! Byte and Binder-object transport with bounded, connection-scoped handles.
-//! FD/SG transfer and Android service/policy integration remain unsupported.
+//! Flat FD transfer is receiver-owned; SG and Android service policy remain open.
+#[cfg(test)]
+mod fd_tests;
 #[cfg(test)]
 mod object_tests;
 mod objects;
+mod parcel;
+pub use parcel::{FileTransfer, Parcel};
 #[cfg(test)]
 mod tests;
 pub mod wire;
@@ -70,6 +74,10 @@ pub struct Stats {
     pub nested: u64,
     pub max_call_depth: usize,
     pub call_frames: usize,
+    pub fds_submitted: u64,
+    pub fds_delivered: u64,
+    pub fd_install_failures: u64,
+    pub pending_fds: usize,
     pub connections: usize,
     pub transactions: usize,
     pub buffers: usize,
@@ -108,6 +116,8 @@ struct Buffer {
     asynchronous: bool,
     node: Option<u64>,
     holds: Vec<Hold>,
+    files: Vec<FileTransfer>,
+    file_count: usize,
 }
 struct Connection {
     id: u64,
@@ -131,6 +141,7 @@ struct Pending {
     oneway: bool,
     node: u64,
     parent: Option<u64>,
+    accepts_files: bool,
 }
 #[derive(Clone, Copy)]
 struct Manager {
@@ -143,11 +154,19 @@ pub struct Delivery {
     pub length: usize,
     pub offset: Option<u64>,
     pub payload: Option<Vec<u8>>,
+    pub files: Vec<FileTransfer>,
     transaction: Option<u64>,
     buffer_id: Option<u64>,
     control: Option<Control>,
+    flushed: bool,
 }
 impl Delivery {
+    pub fn failed_reply() -> Self {
+        Self::code(BR_FAILED_REPLY)
+    }
+    pub fn is_reply(&self) -> bool {
+        u32_at(&self.bytes, 4) == BR_REPLY
+    }
     fn control(control: Control, command: u32, first: u64, second: u64) -> Self {
         let mut delivery = Self::code(command);
         delivery.control = Some(control);
@@ -168,13 +187,31 @@ impl Delivery {
             length: 8,
             offset: None,
             payload: None,
+            files: Vec::new(),
             transaction: None,
             buffer_id: None,
             control: None,
+            flushed: false,
         }
     }
 }
 
+/// A small immutable snapshot keeps the epoll lock out of Binder's lock order.
+/// Masks are computed for the original waiting process/thread, never the timer's
+/// current address space. An unavailable/private connection reports an error.
+pub struct Readiness {
+    pub revision: u64,
+    entries: [(u64, u32); MAX_CONNECTIONS],
+}
+impl Readiness {
+    pub fn mask(&self, connection: u64) -> u32 {
+        self.entries
+            .iter()
+            .find(|e| e.0 == connection)
+            .map(|e| e.1)
+            .unwrap_or(0x18)
+    }
+}
 pub struct Router {
     connections: Vec<Connection>,
     pending: Vec<Pending>,
@@ -183,6 +220,7 @@ pub struct Router {
     manager_uids: [Option<u32>; 3],
     stats: Stats,
     objects: Objects,
+    revision: u64,
 }
 impl Default for Router {
     fn default() -> Self {
@@ -196,6 +234,7 @@ impl Router {
             pending: Vec::new(),
             next_id: 1,
             objects: Objects::new(),
+            revision: 1,
             managers: [None; 3],
             manager_uids: [None; 3],
             stats: Stats {
@@ -216,6 +255,10 @@ impl Router {
                 nested: 0,
                 max_call_depth: 0,
                 call_frames: 0,
+                fds_submitted: 0,
+                fds_delivered: 0,
+                fd_install_failures: 0,
+                pending_fds: 0,
                 connections: 0,
                 transactions: 0,
                 buffers: 0,
@@ -223,6 +266,63 @@ impl Router {
                 first_receiver: 0,
             },
         }
+    }
+    fn changed(&mut self) {
+        self.revision = self.revision.wrapping_add(1).max(1);
+    }
+    pub fn register_poll(&mut self, id: u64, owner: u64, tid: u32) -> Result<(), i64> {
+        self.authenticate(id, owner)?;
+        self.thread_index(id, tid)?;
+        self.changed();
+        Ok(())
+    }
+    pub fn readiness(&self, owner: u64, tid: u32) -> Readiness {
+        let mut snapshot = Readiness {
+            revision: self.revision,
+            entries: [(0, 0); MAX_CONNECTIONS],
+        };
+        for (slot, c) in snapshot.entries.iter_mut().zip(&self.connections) {
+            *slot = (
+                c.id,
+                if c.identity.process == owner {
+                    self.poll_mask(c, tid)
+                } else {
+                    8
+                },
+            );
+        }
+        snapshot
+    }
+    fn request_ready(&self, c: &Connection, event: &Event) -> bool {
+        match event {
+            Event::Request(tx) => self.pending.iter().find(|p| p.id == *tx).is_some_and(|p| {
+                !p.oneway
+                    || !c
+                        .buffers
+                        .iter()
+                        .any(|b| b.asynchronous && b.node == Some(p.node) && b.payload.is_none())
+            }),
+            _ => true,
+        }
+    }
+    fn poll_mask(&self, c: &Connection, tid: u32) -> u32 {
+        let Some(t) = c.threads.iter().find(|t| t.tid == tid) else {
+            return 0;
+        };
+        let control = self.objects.ready(c.id, false);
+        if self.objects.unannounced(c.id) {
+            return u32::from(control);
+        }
+        let process = t.stack.is_empty() && matches!(t.looper, 1 | 2);
+        u32::from(
+            control
+                || t.need_return
+                || t.error.is_some()
+                || !t.events.is_empty()
+                || (process
+                    && (self.objects.ready(c.id, true)
+                        || c.process_events.iter().any(|e| self.request_ready(c, e)))),
+        )
     }
     fn index(&self, id: u64) -> Result<usize, i64> {
         self.connections.iter().position(|c| c.id == id).ok_or(9)
@@ -256,6 +356,7 @@ impl Router {
         self.open_in(identity, Domain::Binder)
     }
     pub fn open_in(&mut self, identity: Identity, domain: Domain) -> Result<u64, i64> {
+        self.changed();
         if identity.process == 0 || self.connections.len() >= MAX_CONNECTIONS {
             return Err(24);
         }
@@ -291,6 +392,7 @@ impl Router {
         }
     }
     pub fn map(&mut self, id: u64, mapping: Mapping) -> Result<(), i64> {
+        self.changed();
         self.can_map(id)?;
         if mapping.base == 0
             || mapping.length == 0
@@ -327,6 +429,7 @@ impl Router {
         cookie: u64,
         flags: u32,
     ) -> Result<(), i64> {
+        self.changed();
         let c = self.index(id)?;
         let domain = self.connections[c].domain as usize;
         if self.managers[domain].is_some() {
@@ -345,6 +448,7 @@ impl Router {
         Ok(())
     }
     pub fn set_max_threads(&mut self, id: u64, maximum: u32) -> Result<(), i64> {
+        self.changed();
         if maximum as usize > MAX_THREADS {
             return Err(22);
         }
@@ -353,6 +457,7 @@ impl Router {
         Ok(())
     }
     pub fn looper(&mut self, id: u64, tid: u32, command: u32) -> Result<(), i64> {
+        self.changed();
         let (c, t) = self.thread_index(id, tid)?;
         let connection = &mut self.connections[c];
         match command {
@@ -376,6 +481,7 @@ impl Router {
     /// Linux filp_close flushes Binder even while dup/in-flight references
     /// retain the open file. Idle loopers must return so libbinder can stop.
     pub fn flush(&mut self, id: u64) {
+        self.changed();
         if let Ok(c) = self.index(id) {
             for thread in &mut self.connections[c].threads {
                 thread.need_return = true;
@@ -384,6 +490,7 @@ impl Router {
         }
     }
     pub fn reference(&mut self, id: u64, handle: u32, command: u32) -> Result<(), i64> {
+        self.changed();
         let c = self.index(id)?;
         let manager = self.managers[self.connections[c].domain as usize].map(|m| m.node);
         self.objects.change(id, handle, command, manager)
@@ -395,6 +502,7 @@ impl Router {
         cookie: u64,
         command: u32,
     ) -> Result<(), i64> {
+        self.changed();
         self.index(id)?;
         self.objects.acknowledge(id, pointer, cookie, command)
     }
@@ -410,17 +518,17 @@ impl Router {
         from: u64,
         node: Option<u64>,
         mut transaction: Transaction,
-        mut payload: Vec<u8>,
+        mut payload: Parcel,
         transaction_id: Option<u64>,
     ) -> Result<u64, i64> {
         let connection = &mut self.connections[c];
         let mapping = connection.mapping.ok_or(12)?;
         if connection.buffers.len() >= MAX_BUFFERS
-            || payload.len() != transaction.payload_length()?
+            || payload.bytes.len() != transaction.payload_length()?
         {
             return Err(12);
         }
-        let length = (payload.len().max(1) as u64 + 7) & !7;
+        let length = (payload.bytes.len().max(1) as u64 + 7) & !7;
         let mut offset = 0;
         for b in &connection.buffers {
             if offset + length <= b.offset {
@@ -439,6 +547,7 @@ impl Router {
         let holds = self
             .objects
             .translate(from, connection.id, transaction, &mut payload, node)?;
+        self.stats.fds_submitted += payload.files.len() as u64;
         let at = connection.buffers.partition_point(|b| b.offset < offset);
         connection.buffers.insert(
             at,
@@ -447,7 +556,9 @@ impl Router {
                 transaction_id,
                 offset,
                 length,
-                payload: Some(payload),
+                payload: Some(payload.bytes),
+                file_count: payload.files.len(),
+                files: payload.files,
                 transaction,
                 delivered: false,
                 asynchronous: transaction.flags & ONE_WAY != 0,
@@ -468,17 +579,30 @@ impl Router {
         }
     }
     pub fn fail_transaction(&mut self, id: u64, tid: u32) -> Result<(), i64> {
+        self.changed();
         self.thread_index(id, tid)?;
         self.error(id, tid, BR_FAILED_REPLY);
         self.stats.failed += 1;
         Ok(())
     }
     pub fn fail_reply(&mut self, id: u64, tid: u32) -> Result<(), i64> {
+        self.changed();
         let (c, t) = self.thread_index(id, tid)?;
         if let Some(frame) = self.connections[c].threads[t].stack.last().copied()
             && frame.incoming
         {
+            let queued = Self::reserve_event(&mut self.connections[c].threads[t].events).is_ok();
             self.fail_pending(frame.transaction, BR_FAILED_REPLY);
+            if queued {
+                self.connections[c].threads[t]
+                    .events
+                    .push_back(Event::Code(BR_COMPLETE));
+            } else {
+                // A full queue or allocation failure must not leave the
+                // caller blocked on an already rejected reply.
+                self.error(id, tid, BR_COMPLETE);
+            }
+            return Ok(());
         }
         self.fail_transaction(id, tid)
     }
@@ -494,9 +618,19 @@ impl Router {
         &mut self,
         id: u64,
         tid: u32,
-        mut data: Transaction,
+        data: Transaction,
         payload: Vec<u8>,
     ) -> Result<(), i64> {
+        self.transact_parcel(id, tid, data, payload.into())
+    }
+    pub fn transact_parcel(
+        &mut self,
+        id: u64,
+        tid: u32,
+        mut data: Transaction,
+        payload: Parcel,
+    ) -> Result<(), i64> {
+        self.changed();
         let (c, t) = self.thread_index(id, tid)?;
         data.validate_payload()?;
         self.stats.last_transfer_error = 0;
@@ -535,6 +669,9 @@ impl Router {
             self.stats.failed += 1;
             return Ok(());
         };
+        if !payload.files.is_empty() && !self.objects.accepts_files(node)? {
+            return Err(1);
+        }
         let receiver = self.index(target)?;
         if self.connections[c].identity.process == self.connections[receiver].identity.process {
             return self.fail_transaction(id, tid);
@@ -601,6 +738,7 @@ impl Router {
             oneway,
             node,
             parent: if oneway { None } else { parent },
+            accepts_files: data.flags & ACCEPT_FDS != 0,
         });
         if !oneway {
             self.connections[c].threads[t].stack.push(CallFrame {
@@ -637,9 +775,19 @@ impl Router {
         &mut self,
         id: u64,
         tid: u32,
-        mut data: Transaction,
+        data: Transaction,
         payload: Vec<u8>,
     ) -> Result<(), i64> {
+        self.reply_parcel(id, tid, data, payload.into())
+    }
+    pub fn reply_parcel(
+        &mut self,
+        id: u64,
+        tid: u32,
+        mut data: Transaction,
+        payload: Parcel,
+    ) -> Result<(), i64> {
+        self.changed();
         let (c, t) = self.thread_index(id, tid)?;
         data.validate_payload()?;
         self.stats.last_transfer_error = 0;
@@ -657,6 +805,9 @@ impl Router {
             .iter()
             .position(|p| p.id == txid && p.to == id && p.receiver == Some(tid))
             .ok_or(22)?;
+        if !payload.files.is_empty() && !self.pending[p].accepts_files {
+            return Err(1);
+        }
         let from = self.pending[p].from;
         let caller_tid = self.pending[p].tid;
         let (caller, ct) = self.thread_index(from, caller_tid)?;
@@ -750,6 +901,7 @@ impl Router {
         self.stats.failed += 1;
     }
     pub fn free_buffer(&mut self, id: u64, address: u64) -> Result<(u64, u64), i64> {
+        self.changed();
         let c = self.index(id)?;
         let mapping = self.connections[c].mapping.ok_or(22)?;
         let offset = address.checked_sub(mapping.base).ok_or(22)?;
@@ -763,18 +915,35 @@ impl Router {
         Ok((offset, buffer.length))
     }
     pub fn request_death(&mut self, id: u64, handle: u32, cookie: u64) -> Result<(), i64> {
+        self.changed();
         self.index(id)?;
         self.objects.request_death(id, handle, cookie)
     }
     pub fn clear_death(&mut self, id: u64, handle: u32, cookie: u64) -> Result<(), i64> {
+        self.changed();
         self.index(id)?;
         self.objects.clear_death(id, handle, cookie)
     }
     pub fn dead_done(&mut self, id: u64, cookie: u64) -> Result<(), i64> {
+        self.changed();
         self.index(id)?;
         self.objects.dead_done(id, cookie)
     }
     pub fn read(&mut self, id: u64, tid: u32, capacity: usize) -> Result<Option<Delivery>, i64> {
+        let flushed = self.index(id).is_ok_and(|c| {
+            self.connections[c]
+                .threads
+                .iter()
+                .any(|t| t.tid == tid && t.need_return)
+        });
+        let mut result = self.read_inner(id, tid, capacity);
+        if let Ok(Some(delivery)) = &mut result {
+            delivery.flushed = flushed;
+            self.changed();
+        }
+        result
+    }
+    fn read_inner(&mut self, id: u64, tid: u32, capacity: usize) -> Result<Option<Delivery>, i64> {
         let (c, t) = self.thread_index(id, tid)?;
         // One transaction record plus BR_NOOP. Never consume work that does
         // not fit, including a short user buffer at the end of a stream.
@@ -808,17 +977,7 @@ impl Router {
             let at = self.connections[c]
                 .process_events
                 .iter()
-                .position(|e| match e {
-                    Event::Request(tx) => {
-                        self.pending.iter().find(|p| p.id == *tx).is_some_and(|p| {
-                            !p.oneway
-                                || !self.connections[c].buffers.iter().any(|b| {
-                                    b.asynchronous && b.node == Some(p.node) && b.payload.is_none()
-                                })
-                        })
-                    }
-                    _ => true,
-                })?;
+                .position(|e| self.request_ready(&self.connections[c], e))?;
             self.connections[c].process_events.remove(at)
         });
         let Some(event) = event else {
@@ -870,6 +1029,7 @@ impl Router {
         result.length = 72;
         result.offset = Some(offset);
         result.payload = b.payload.take();
+        result.files = core::mem::take(&mut b.files);
         result.transaction = transaction;
         result.buffer_id = Some(b.id);
         let connection = &mut self.connections[c];
@@ -887,6 +1047,7 @@ impl Router {
         Ok(Some(result))
     }
     pub fn discard_delivery(&mut self, id: u64, delivery: &Delivery) {
+        self.changed();
         if let Some(control) = delivery.control {
             self.objects.finish(control, false);
         }
@@ -920,7 +1081,24 @@ impl Router {
         }
         Ok(())
     }
+    pub fn reject_files(&mut self, id: u64, tid: u32, delivery: &Delivery) {
+        if delivery.flushed
+            && !delivery.is_reply()
+            && let Ok((c, t)) = self.thread_index(id, tid)
+        {
+            self.connections[c].threads[t].need_return = true;
+        }
+        self.stats.fd_install_failures += 1;
+        if !delivery
+            .transaction
+            .is_some_and(|id| self.pending.iter().any(|p| p.id == id))
+        {
+            self.stats.failed += 1;
+        }
+        self.discard_delivery(id, delivery);
+    }
     pub fn finish_delivery(&mut self, id: u64, delivery: &Delivery) -> Result<(), i64> {
+        self.changed();
         self.validate_delivery(id, delivery)?;
         if let Some(control) = delivery.control {
             self.objects.finish(control, true);
@@ -930,16 +1108,19 @@ impl Router {
         }
         let c = self.index(id)?;
         if let Some(buffer) = delivery.buffer_id {
-            self.connections[c]
+            let buffer = self.connections[c]
                 .buffers
                 .iter_mut()
                 .find(|b| b.id == buffer)
-                .unwrap()
-                .delivered = true;
+                .unwrap();
+            buffer.delivered = true;
+            buffer.file_count = 0;
+            self.stats.fds_delivered += delivery.files.len() as u64;
         }
         Ok(())
     }
     pub fn thread_exit(&mut self, id: u64, tid: u32) {
+        self.changed();
         while let Some(tx) = self
             .pending
             .iter()
@@ -984,6 +1165,7 @@ impl Router {
         }
     }
     pub fn unmap_inode(&mut self, inode: u64) {
+        self.changed();
         if let Some(id) = self
             .connections
             .iter()
@@ -1004,6 +1186,7 @@ impl Router {
         }
     }
     pub fn close(&mut self, id: u64) {
+        self.changed();
         let Ok(c) = self.index(id) else {
             return;
         };
@@ -1038,6 +1221,12 @@ impl Router {
                 .iter()
                 .flat_map(|c| &c.threads)
                 .map(|t| t.stack.len())
+                .sum(),
+            pending_fds: self
+                .connections
+                .iter()
+                .flat_map(|c| &c.buffers)
+                .map(|b| b.file_count)
                 .sum(),
             connections: self.connections.len(),
             transactions: self.pending.len(),

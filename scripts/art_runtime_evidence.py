@@ -67,9 +67,9 @@ def completion_status(text, mode):
             if not poll or any(poll.get(key) != "0" for key in ("live", "watches")) or any(int(poll.get(key, 0)) < 2 for key in ("eventfds", "epolls", "reads", "writes", "delivered", "blocked", "ready")):
                 return "missing-framework-wake-proof"
             binder = parse_marker(text, "LINUX_BINDER_OK")
-            if not binder or any(binder.get(key) != "0" for key in ("connections", "transactions", "buffers", "nodes", "references", "call_frames")) or int(binder.get("opened", 0)) < 4 or binder["opened"] != binder.get("closed") or int(binder.get("flush_returns", 0)) < 2:
+            if not binder or any(binder.get(key) != "0" for key in ("connections", "transactions", "buffers", "nodes", "references", "call_frames", "pending_fds")) or int(binder.get("opened", 0)) < 4 or binder["opened"] != binder.get("closed") or int(binder.get("flush_returns", 0)) < 2:
                 return "missing-framework-shutdown-proof"
-            if int(poll["closed"]) != int(poll["eventfds"]) + int(poll["epolls"]):
+            if int(poll["closed"]) != int(poll["eventfds"]) + int(poll["epolls"]) + int(poll.get("external", 0)):
                 return "missing-framework-shutdown-proof"
         except (ValueError, KeyError):
             return "invalid-poll-record"
@@ -80,12 +80,21 @@ def completion_status(text, mode):
                        "BINDER_OBJECT_SERVER_OK export=2 callback=1 nested=2 per_node_oneway=1 refs=1"):
             if complete_lines(text, marker) != 1:
                 return "missing-binder-object-proof"
+        for marker in ("BINDER_FD_CLIENT_OK shared=1 offset=1 cloexec=1 truncate=1 regrow=1 seals=1 full=1 peer_exit=1 poll=1",
+                       "BINDER_FD_SERVER_OK accept=1 capture=1 full=1 copy_fault=1 cross_process_maps=1 poll=1"):
+            if complete_lines(text, marker) != 1:
+                return "missing-binder-fd-proof"
         try:
             binder = parse_marker(text, "LINUX_BINDER_OK")
-            if not binder or any(binder.get(key) != "0" for key in ("connections", "transactions", "buffers", "nodes", "references", "call_frames")):
+            if not binder or any(binder.get(key) != "0" for key in ("connections", "transactions", "buffers", "nodes", "references", "call_frames", "pending_fds")):
                 return "invalid-binder-cleanup"
-            if any(int(binder.get(key, 0)) < count for key, count in (("opened", 5), ("submitted", 16), ("replied", 8), ("oneway", 6), ("failed", 10), ("deaths", 3), ("flush_returns", 1), ("objects", 7), ("reference_events", 10), ("nested", 2), ("max_depth", 3))) or binder["opened"] != binder["closed"]:
+            if any(int(binder.get(key, 0)) < count for key, count in (("opened", 5), ("submitted", 25), ("replied", 14), ("oneway", 6), ("failed", 16), ("deaths", 3), ("flush_returns", 1), ("objects", 8), ("reference_events", 14), ("nested", 2), ("max_depth", 3), ("fds_submitted", 11), ("fds_delivered", 5), ("fd_install_failures", 2))) or binder["opened"] != binder["closed"]:
                 return "missing-binder-transport-proof"
+            poll = parse_marker(text, "LINUX_POLL_OK")
+            if not poll or any(poll.get(key) != "0" for key in ("live", "watches")) or any(int(poll.get(key,0)) < count for key,count in (("external",5),("external_delivered",2),("epolls",4),("eventfds",1))):
+                return "missing-binder-poll-proof"
+            if int(poll["closed"]) != int(poll["eventfds"]) + int(poll["epolls"]) + int(poll["external"]):
+                return "invalid-binder-poll-cleanup"
         except (ValueError, KeyError):
             return "invalid-binder-record"
     elif complete_lines(text, expected.rstrip("\n")) != 2 or (mode == "help" and complete_lines(text, "The following ART arguments are supported:") != 2):
@@ -106,7 +115,7 @@ def completion_status(text, mode):
         try:
             poll = parse_marker(text, "LINUX_POLL_OK")
             signals = parse_marker(text, "LINUX_SIGNALS_OK")
-            if not poll or poll.get("live") != "0" or poll.get("watches") != "0" or int(poll["closed"]) != int(poll["eventfds"]) + int(poll["epolls"]):
+            if not poll or poll.get("live") != "0" or poll.get("watches") != "0" or int(poll["closed"]) != int(poll["eventfds"]) + int(poll["epolls"]) + int(poll.get("external", 0)):
                 return "invalid-poll-cleanup"
             if any(int(poll.get(key, 0)) < count for key, count in (("eventfds", 20), ("epolls", 10), ("reads", 30), ("writes", 30), ("delivered", 20), ("blocked", 16), ("ready", 10), ("expired", 4), ("cancelled", 8))) or int(threads["created"]) < 20:
                 return "missing-poll-transport-proof"
@@ -119,7 +128,7 @@ def completion_status(text, mode):
             return "invalid-binder-process-identity"
         try:
             signals = parse_marker(text, "LINUX_SIGNALS_OK")
-            if not signals or signals.get("pending") != "0" or signals.get("delivered") != "3" or signals.get("returned") != "3" or int(signals.get("interrupted", 0)) < 1 or int(threads["created"]) < 2:
+            if not signals or signals.get("pending") != "0" or signals.get("delivered") != "4" or signals.get("returned") != "4" or int(signals.get("interrupted", 0)) < 1 or int(threads["created"]) < 3:
                 return "invalid-binder-signal-proof"
         except ValueError:
             return "invalid-binder-signal-proof"

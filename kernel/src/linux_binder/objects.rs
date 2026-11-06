@@ -1,6 +1,6 @@
 //! Connection-scoped Binder handles and owner reference handshakes. Buffer
 //! holds are distinct from userspace references, including during failed reads.
-use super::wire::*;
+use super::{Parcel, wire::*};
 use alloc::vec::Vec;
 
 const MAX_NODES: usize = 512;
@@ -101,7 +101,7 @@ impl Objects {
         flags: u32,
         manager: bool,
     ) -> Result<u64, i64> {
-        // FD acceptance is metadata; FD and SG objects remain unsupported.
+        // FD transfer follows the node acceptance flag; SG remains unsupported.
         // Security contexts and RT inheritance require a separate policy.
         if flags & !0x1ff != 0 {
             return Err(95);
@@ -140,6 +140,9 @@ impl Objects {
             reserved: None,
         });
         Ok(id)
+    }
+    pub fn accepts_files(&self, node: u64) -> Result<bool, i64> {
+        Ok(self.nodes[self.node_index(node)?].flags & 0x100 != 0)
     }
     pub fn target(&self, node: u64) -> Result<(u64, u64, u64), i64> {
         let n = &self.nodes[self.node_index(node)?];
@@ -285,13 +288,11 @@ impl Objects {
         from: u64,
         to: u64,
         tx: Transaction,
-        bytes: &mut [u8],
+        parcel: &mut Parcel,
         target: Option<u64>,
     ) -> Result<Vec<Hold>, i64> {
-        tx.validate_payload()?;
-        if bytes.len() != tx.payload_length()? {
-            return Err(22);
-        }
+        let bytes = &mut parcel.bytes;
+        let offsets = tx.object_offsets(bytes)?;
         let mut holds = Vec::new();
         holds
             .try_reserve_exact(tx.offsets_size as usize / 8 + usize::from(target.is_some()))
@@ -300,20 +301,21 @@ impl Objects {
             if let Some(node) = target {
                 holds.push(self.hold(None, node, true)?);
             }
-            let offsets = (tx.data_size as usize + 7) & !7;
-            let mut minimum = 0;
-            for i in 0..tx.offsets_size as usize / 8 {
-                let at = usize::try_from(u64_at(bytes, offsets + i * 8)).map_err(|_| 22)?;
-                if !at.is_multiple_of(4)
-                    || at < minimum
-                    || at
-                        .checked_add(24)
-                        .is_none_or(|end| end > tx.data_size as usize)
-                {
-                    return Err(22);
-                }
-                minimum = at + 24;
+            let mut file_index = 0;
+            for &at in &offsets {
                 let kind = u32_at(bytes, at);
+                if kind == TYPE_FD {
+                    let file = parcel.files.get(file_index).ok_or(22)?;
+                    if file.offset() != at + 8 {
+                        return Err(22);
+                    }
+                    // A descriptor is assigned in the receiver's context only.
+                    put64(bytes, at + 8, 0);
+                    // FD cookies belong to userspace (Parcel uses ownership
+                    // metadata here), unlike remote Binder-object cookies.
+                    file_index += 1;
+                    continue;
+                }
                 let strong = match kind {
                     TYPE_BINDER | TYPE_HANDLE => true,
                     TYPE_WEAK_BINDER | TYPE_WEAK_HANDLE => false,
@@ -365,13 +367,16 @@ impl Objects {
                     put64(bytes, at + 16, 0);
                 }
             }
+            if file_index != parcel.files.len() {
+                return Err(22);
+            }
             Ok(())
         })();
         if let Err(error) = result {
             self.release(&holds);
             return Err(error);
         }
-        self.translated += tx.offsets_size / 8;
+        self.translated += tx.offsets_size / 8 - parcel.files.len() as u64;
         Ok(holds)
     }
     fn wanted(&self, n: &Node) -> (bool, bool) {
@@ -397,22 +402,43 @@ impl Objects {
                 || (weak && !n.has_weak)
         })
     }
+    fn next_command(&self, n: &Node) -> Option<u32> {
+        if !n.alive || n.manager || n.reserved.is_some() {
+            return None;
+        }
+        let (strong, weak) = self.wanted(n);
+        if weak && !n.has_weak {
+            Some(BR_INCREFS)
+        } else if strong && !n.has_strong {
+            Some(BR_ACQUIRE)
+        } else if !strong && n.has_strong && !n.pending_strong {
+            Some(BR_RELEASE)
+        } else if !weak && !n.has_strong && n.has_weak && !n.pending_weak {
+            Some(BR_DECREFS)
+        } else {
+            None
+        }
+    }
+    pub fn ready(&self, owner: u64, deaths: bool) -> bool {
+        self.nodes
+            .iter()
+            .any(|n| n.owner == owner && self.next_command(n).is_some())
+            || (deaths
+                && self.references.iter().any(|r| {
+                    r.owner == owner
+                        && r.death.as_ref().is_some_and(|d| {
+                            !d.reserved
+                                && matches!(d.state, DeathState::Ready | DeathState::ClearReady)
+                        })
+                }))
+    }
     pub fn prepare(&mut self, owner: u64, deaths: bool) -> Option<(Control, u32, u64, u64)> {
         for i in 0..self.nodes.len() {
             let n = &self.nodes[i];
-            if n.owner != owner || !n.alive || n.manager || n.reserved.is_some() {
+            if n.owner != owner {
                 continue;
             }
-            let (strong, weak) = self.wanted(n);
-            let command = if weak && !n.has_weak {
-                BR_INCREFS
-            } else if strong && !n.has_strong {
-                BR_ACQUIRE
-            } else if !strong && n.has_strong && !n.pending_strong {
-                BR_RELEASE
-            } else if !weak && !n.has_strong && n.has_weak && !n.pending_weak {
-                BR_DECREFS
-            } else {
+            let Some(command) = self.next_command(n) else {
                 continue;
             };
             let n = &mut self.nodes[i];

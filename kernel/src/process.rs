@@ -2545,6 +2545,35 @@ pub fn with_current_linux_address_space<R>(
     )
 }
 
+#[cfg(feature = "art-runtime")]
+pub fn linux_memfd_resize(
+    memory: &bndroid_kernel::linux_memfd::MemoryFile,
+    length: u64,
+) -> Result<u64, i64> {
+    assert!(crate::arch::aarch64::irq_is_masked());
+    mmu::UserAddressSpace::linux_resize_memory_file(
+        memory,
+        length,
+        slots_mut()
+            .iter_mut()
+            .filter_map(|slot| slot.process.as_deref_mut())
+            .filter_map(|p| p.address_space.as_mut()),
+    )
+}
+#[cfg(feature = "art-runtime")]
+pub fn linux_memfd_seal(
+    memory: &bndroid_kernel::linux_memfd::MemoryFile,
+    seals: u64,
+) -> Result<u64, i64> {
+    assert!(crate::arch::aarch64::irq_is_masked());
+    let writable = slots_ref()
+        .iter()
+        .filter_map(|slot| slot.process.as_deref())
+        .filter_map(|p| p.address_space.as_ref())
+        .any(|space| space.linux_memfd_may_write(memory.inode()));
+    memory.add_seals(seals, writable)
+}
+
 #[cfg(feature = "linux-abi-runtime")]
 pub fn linux_set_tid_address(address: u64) -> u64 {
     assert!(crate::arch::aarch64::irq_is_masked());

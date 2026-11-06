@@ -2,6 +2,36 @@
 
 This page records implemented behavior and validation, with a September 9, 2026 platform baseline and dated updates below. Historical test counts belong to the indicated development runs; they are not a claim that every historical gate was rerun during publication. The [complete original status log](docs/archive/originals/IMPLEMENTATION_STATUS.txt) preserves detailed evidence and earlier milestones. Future tasks belong only in [TODO.md](TODO.md).
 
+## Binder file transfer and service event-loop update — November 6, 2026
+
+Binder now captures actual open descriptions, installs whole FD batches in the
+receiver with CLOEXEC, shares offsets/status flags and rolls back failed receives.
+Node/caller consent gates request/reply FD transfer. Full descriptor tables fail
+without partial installation; a failed request resumes the receiving thread's
+blocking loop. Memory-file resize invalidates all affected process mappings before
+freeing frames, and write seals inspect mappings in every process.
+
+Binder epoll readiness is computed for the original waiting process/thread from
+non-consuming snapshots. External notifications propagate through nested epoll,
+and last-close cleanup removes watches without retaining Binder devices. The
+snapshot boundary avoids Binder/event-lock inversion during transferred-file
+cleanup. SG/FD-array transport, Binder-device transfer, ServiceManager, ActivityThread
+and per-app policy remain open. Full Android application compatibility is still
+unproven; A1–A6 remain incomplete.
+
+The final native gate (`check.ixHTrO`) verifies real file sharing, cross-process EOF
+faults and regrowth, seal enforcement, both receiver-table exhaustion directions,
+invalid copies, creator exit and nested Binder epoll. Eleven FD submissions include
+five delivered descriptors and two atomic installation failures, with zero
+remaining resources. Host validation passes 1,165 workspace library tests, 434
+Framework library tests and 34 Python checks. Memfd, managed APK/GC/JNI and
+eventfd/epoll regressions pass with unchanged temporary disks. The final Framework
+repeat (`check.mY1RXD`) completes both normal startup/shutdown generations and
+reclaims all 16 workers; an earlier second-generation deadline remains recorded
+as a failure. Host/AArch64 Clippy passes with warnings denied. Evidence and
+regression diagnostics are recorded in
+[Binder Files-2](docs/milestones/androidbox/BINDER_FILES_2.md).
+
 ## Binder objects and nested callbacks update — November 6, 2026
 
 Binder now translates strong/weak objects into connection-scoped handles, restores

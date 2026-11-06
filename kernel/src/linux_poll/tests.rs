@@ -1,4 +1,48 @@
 use super::*;
+
+#[test]
+fn external_readiness_rechecks_context_and_wakes_nested_edge_and_oneshot_watches() {
+    let mut h = Hub::new();
+    let fd = h.external(99).unwrap();
+    let inner = h.epoll().unwrap();
+    let outer = h.epoll().unwrap();
+    h.control(inner, 1, 3, fd, IN | EDGE | ONESHOT, 123)
+        .unwrap();
+    h.control(outer, 1, 4, inner, IN | EDGE, 456).unwrap();
+    h.sync_external(1);
+    assert!(!h.epoll_ready_using(outer, |_| 0).unwrap());
+    assert!(
+        h.epoll_ready_using(outer, |key| if key == 99 { IN } else { 0 })
+            .unwrap()
+    );
+    let parent = h.prepare_using(outer, 1, |_| IN).unwrap()[0];
+    h.commit(outer, parent).unwrap();
+    let event = h.prepare_using(inner, 1, |_| IN).unwrap()[0];
+    h.commit(inner, event).unwrap();
+    assert_eq!(h.stats().external_delivered, 1);
+    h.sync_external(2);
+    assert!(!h.epoll_ready_using(outer, |_| IN).unwrap());
+    h.control(inner, 3, 3, fd, IN | EDGE | ONESHOT, 123)
+        .unwrap();
+    assert!(h.epoll_ready_using(outer, |_| IN).unwrap());
+    // A speculative prepare neither consumes the notification nor reuses a
+    // different calling thread's readiness mask.
+    assert!(h.prepare_using(inner, 1, |_| 0).unwrap().is_empty());
+    assert_eq!(h.prepare_using(inner, 1, |_| IN).unwrap().len(), 1);
+    h.close(fd);
+    assert!(h.prepare_using(inner, 1, |_| IN).unwrap().is_empty());
+    h.close(inner);
+    h.close(outer);
+    assert_eq!(
+        (
+            h.stats().external,
+            h.stats().closed,
+            h.stats().live,
+            h.stats().watches
+        ),
+        (1, 3, 0, 0)
+    );
+}
 fn take(h: &mut Hub, ep: u64, n: usize) -> Vec<Event> {
     let events = h.prepare(ep, n).unwrap();
     for e in &events {

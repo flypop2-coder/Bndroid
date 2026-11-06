@@ -39,23 +39,30 @@ class EvidenceTests(unittest.TestCase):
     def test_binder_requires_cross_process_transport_signal_and_cleanup_proof(self):
         client = "BINDER_CLIENT_OK identity=1 reply=1 oneway=3 death=1 interrupted=1 fd_reuse=1 readonly=1\n"
         server = "BINDER_SERVER_OK identity=1 reply=1 oneway=3 receive_pool=1 readonly=1 domains=3\n"
-        binder = "LINUX_BINDER_OK opened=5 closed=5 submitted=16 replied=8 oneway=6 failed=10 deaths=3 connections=0 transactions=0 buffers=0 nodes=0 references=0 call_frames=0 objects=7 reference_events=10 nested=2 max_depth=3 first_sender=4294967298 first_receiver=8589934594 flush_returns=1\n"
-        signals = "LINUX_SIGNALS_OK delivered=3 returned=3 interrupted=1 pending=0\n"
+        binder = "LINUX_BINDER_OK opened=5 closed=5 submitted=25 replied=14 oneway=6 failed=16 deaths=3 connections=0 transactions=0 buffers=0 nodes=0 references=0 call_frames=0 pending_fds=0 fds_submitted=11 fds_delivered=5 fd_install_failures=2 objects=8 reference_events=14 nested=2 max_depth=3 first_sender=4294967298 first_receiver=8589934594 flush_returns=1\n"
+        signals = "LINUX_SIGNALS_OK delivered=4 returned=4 interrupted=1 pending=0\n"
         objects = "BINDER_OBJECT_CLIENT_OK export=2 handles=2 roundtrip=1 malformed=3 deaths=2 refs=1\nBINDER_OBJECT_SERVER_OK export=2 callback=1 nested=2 per_node_oneway=1 refs=1\n"
-        log = client + server + objects + binder + signals + PROCESS + PROOF
+        fds = "BINDER_FD_CLIENT_OK shared=1 offset=1 cloexec=1 truncate=1 regrow=1 seals=1 full=1 peer_exit=1 poll=1\nBINDER_FD_SERVER_OK accept=1 capture=1 full=1 copy_fault=1 cross_process_maps=1 poll=1\n"
+        poll = "LINUX_POLL_OK external=5 external_delivered=2 epolls=4 eventfds=1 closed=10 live=0 watches=0\n"
+        log = client + server + objects + binder + fds + poll + signals + PROCESS.replace("created=2 reaped=2", "created=3 reaped=3") + PROOF
         self.assertEqual(completion_status(log, "binder"), "binder-passed")
         for old, new, expected in (("connections=0", "connections=1", "invalid-binder-cleanup"),
-                                   ("replied=8", "replied=0", "missing-binder-transport-proof"),
+                                   ("replied=14", "replied=0", "missing-binder-transport-proof"),
                                    ("first_receiver=8589934594", "first_receiver=4294967298", "invalid-binder-process-identity"),
-                                   ("returned=3", "returned=2", "invalid-binder-signal-proof"),
-                                   ("submitted=16", "submitted=oops", "invalid-binder-record")):
+                                   ("returned=4", "returned=2", "invalid-binder-signal-proof"),
+                                   ("submitted=25", "submitted=oops", "invalid-binder-record")):
             self.assertEqual(completion_status(log.replace(old,new), "binder"), expected)
         for old, new in (("nodes=0", "nodes=1"), ("references=0", "references=1")):
             self.assertEqual(completion_status(log.replace(old, new), "binder"), "invalid-binder-cleanup")
-        for key in ("objects=7", "reference_events=10"):
+        for key in ("objects=8", "reference_events=14", "fds_delivered=5", "fd_install_failures=2"):
             self.assertEqual(completion_status(log.replace(key, key.split("=")[0] + "=0"), "binder"), "missing-binder-transport-proof")
         self.assertEqual(completion_status(log.replace(objects, ""), "binder"), "missing-binder-object-proof")
         self.assertEqual(completion_status(log+objects, "binder"), "missing-binder-object-proof")
+        self.assertEqual(completion_status(log.replace(fds,""), "binder"), "missing-binder-fd-proof")
+        self.assertEqual(completion_status(log+fds, "binder"), "missing-binder-fd-proof")
+        self.assertEqual(completion_status(log.replace("pending_fds=0","pending_fds=1"), "binder"), "invalid-binder-cleanup")
+        self.assertEqual(completion_status(log.replace("external_delivered=2","external_delivered=0"), "binder"), "missing-binder-poll-proof")
+        self.assertEqual(completion_status(log.replace("closed=10","closed=9"), "binder"), "invalid-binder-poll-cleanup")
         self.assertEqual(completion_status(log+binder, "binder"), "invalid-binder-record")
         self.assertEqual(completion_status(log.replace(server,""), "binder"), "missing-binder-process-proof")
 
@@ -77,7 +84,7 @@ class EvidenceTests(unittest.TestCase):
                            for message in ("FRAMEWORK_STAGE parcel", "FRAMEWORK_STAGE wake", "FRAMEWORK_STAGE looper",
                                            "FRAMEWORK_MAIN_OK parcel=1 bundle=1 looper=1 delayed=1 wake=1")) + f"ANDROID_LOG pid={pid} buffer=0 priority=3 tag=AndroidRuntime message=Shutting down VM \n"
         poll = "LINUX_POLL_OK eventfds=2 epolls=2 closed=4 reads=2 writes=2 delivered=2 blocked=2 ready=2 live=0 watches=0\n"
-        binder = "LINUX_BINDER_OK opened=4 closed=4 connections=0 transactions=0 buffers=0 nodes=0 references=0 call_frames=0 flush_returns=2\n"
+        binder = "LINUX_BINDER_OK opened=4 closed=4 connections=0 transactions=0 buffers=0 nodes=0 references=0 call_frames=0 pending_fds=0 flush_returns=2\n"
         log = messages(4294967298) + messages(8589934594) + PROCESS + PROOF + poll + binder
         self.assertEqual(completion_status(log, "framework"), "framework-passed")
         self.assertEqual(completion_status(log.replace("FRAMEWORK_STAGE looper", "wrong-stage"), "framework"), "missing-framework-stage")

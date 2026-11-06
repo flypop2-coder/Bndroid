@@ -17,6 +17,9 @@ fn slot(context: usize) -> &'static mut Option<Pending> {
 }
 pub(super) fn dispatch(frame: *mut TrapFrame, r: &[u64; 31]) -> Option<*mut TrapFrame> {
     let result = driver::ioctl(r, current_tid() as u32)?;
+    Some(complete_or_wait(frame, result))
+}
+fn complete_or_wait(frame: *mut TrapFrame, result: Result<Call, i64>) -> *mut TrapFrame {
     let context = current_running_context();
     let value = match result {
         Ok(Call::Complete(value)) => value,
@@ -32,15 +35,15 @@ pub(super) fn dispatch(frame: *mut TrapFrame, r: &[u64; 31]) -> Option<*mut Trap
                 },
             ) {
                 driver::cancel(&call, None);
-                return Some(runtime::complete(frame, errno(error)));
+                return runtime::complete(frame, errno(error));
             }
             assert!(slot(context).is_none());
             *slot(context) = Some(Pending { call, ready: None });
             WAITS.fetch_add(1, Ordering::Relaxed);
-            return Some(block(frame, ThreadState::Waiting));
+            return block(frame, ThreadState::Waiting);
         }
     };
-    Some(runtime::complete(frame, value))
+    runtime::complete(frame, value)
 }
 pub(super) fn wake_ready() {
     for (context, state) in CONTEXTS.iter().enumerate().skip(DYNAMIC_USER_CONTEXT_START) {
@@ -64,18 +67,20 @@ pub(super) fn wake_ready() {
         }
     }
 }
-pub(crate) fn complete_ready(frame: *mut TrapFrame) {
-    let Some(pending) = slot(current_running_context()).take() else {
-        return;
-    };
+pub(crate) fn complete_ready(frame: *mut TrapFrame) -> Option<*mut TrapFrame> {
+    let pending = slot(current_running_context()).take()?;
     let result = match pending
         .ready
         .expect("only a prepared Binder read becomes runnable")
     {
-        Ok(delivery) => driver::finish(&pending.call, delivery),
+        Ok(delivery) => match driver::finish(&pending.call, delivery) {
+            Ok(true) => Ok(Call::Complete(0)),
+            Ok(false) => driver::resume(pending.call),
+            Err(error) => Err(error),
+        },
         Err(error) => Err(error),
     };
-    runtime::complete(frame, result.map(|_| 0).unwrap_or_else(errno));
+    Some(complete_or_wait(frame, result))
 }
 pub(super) fn cancel(context: usize) {
     if let Some(pending) = slot(context).take() {

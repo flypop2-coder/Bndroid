@@ -4,7 +4,7 @@
 use crate::{linux_runtime as runtime, process};
 use alloc::vec::Vec;
 use bndroid_kernel::{
-    linux_binder::{self as binder, Delivery, Mapping, wire::*},
+    linux_binder::{self as binder, Delivery, Mapping, Parcel, wire::*},
     linux_fd::FileRef,
 };
 
@@ -37,7 +37,7 @@ pub fn map(args: [u64; 6], file: &FileRef) -> Result<u64, i64> {
     }
     let backing = &file.binder().unwrap().backing;
     let memory = backing.memory().unwrap();
-    process::with_current_linux_address_space(|space| space.linux_memfd_resize(memory, length))?;
+    process::linux_memfd_resize(memory, length)?;
     let bndroid_kernel::linux_fd::Target::Binder(domain) = file.target() else {
         return Err(9);
     };
@@ -59,7 +59,7 @@ pub fn map(args: [u64; 6], file: &FileRef) -> Result<u64, i64> {
             Ok(base)
         }
         Err(error) => {
-            process::with_current_linux_address_space(|space| space.linux_memfd_resize(memory, 0))?;
+            process::linux_memfd_resize(memory, 0)?;
             Err(error)
         }
     }
@@ -88,8 +88,7 @@ fn start(file: FileRef, tid: u32, request: u64, address: u64) -> Result<Call, i6
         SET_CONTEXT_MGR_EXT => {
             let mut b = [0; 24];
             runtime::copy_in(address, &mut b)?;
-            // FD acceptance metadata is retained, but actual FD objects still
-            // fail. Security contexts and RT inheritance need separate policy.
+            // Security contexts and RT inheritance need separate policy.
             if u32_at(&b, 4) & !0x1ff != 0 {
                 return Err(95);
             }
@@ -152,15 +151,19 @@ fn write_read(file: FileRef, tid: u32, address: u64) -> Result<Call, i64> {
         io,
         tid,
     };
-    if let Some(delivery) = poll(&call)? {
-        finish(&call, delivery)?;
-        return Ok(Call::Complete(0));
+    resume(call)
+}
+pub fn resume(call: ReadCall) -> Result<Call, i64> {
+    while let Some(delivery) = poll(&call)? {
+        if finish(&call, delivery)? {
+            return Ok(Call::Complete(0));
+        }
     }
     if call.file.flags() & 0x800 != 0 {
         cancel(&call, None);
         return Err(11);
     }
-    binder::with(|r| r.waiting(id, tid, true))?;
+    binder::with(|r| r.waiting(call.file.binder().unwrap().id, call.tid, true))?;
     Ok(Call::Wait(call))
 }
 #[inline(never)]
@@ -180,14 +183,14 @@ fn execute(file: &FileRef, tid: u32, command: u32, body: &[u8; 64]) -> Result<()
                     let at = (data.data_size as usize + 7) & !7;
                     runtime::copy_in(data.offsets, &mut bytes[at..])?;
                 }
-                Ok(bytes)
+                process::with_linux_files(|table| Parcel::capture(data, bytes, table))
             })();
             let result = match payload {
                 Ok(bytes) => binder::with(|r| {
                     if command == BC_TRANSACTION {
-                        r.transact(id, tid, data, bytes)
+                        r.transact_parcel(id, tid, data, bytes)
                     } else {
-                        r.reply(id, tid, data, bytes)
+                        r.reply_parcel(id, tid, data, bytes)
                     }
                 }),
                 Err(error) => Err(error),
@@ -273,21 +276,39 @@ pub fn poll(call: &ReadCall) -> Result<Option<Delivery>, i64> {
     })
 }
 #[inline(never)]
-pub fn finish(call: &ReadCall, delivery: Delivery) -> Result<(), i64> {
+pub fn finish(call: &ReadCall, mut delivery: Delivery) -> Result<bool, i64> {
     let id = call.file.binder().unwrap().id;
+    let mut received = Vec::new();
     let result = (|| {
         binder::with(|r| r.validate_delivery(id, &delivery))?;
         let skip = if call.io.read_consumed == 0 { 0 } else { 4 };
-        let bytes = &delivery.bytes[skip..delivery.length];
         // Validate both destinations again: another thread may have unmapped
         // them while this ioctl slept. No stale user pointer is trusted.
         if !process::current_user_range_is_writable(runtime::user_address(call.address), 48)
             || !process::current_user_range_is_writable(
                 runtime::user_address(call.io.read_buffer + call.io.read_consumed),
-                bytes.len(),
+                delivery.length - skip,
             )
         {
             return Err(14);
+        }
+        if !delivery.files.is_empty() {
+            match process::with_linux_files(|table| table.receive_files(&delivery.files)) {
+                Ok(numbers) => received = numbers,
+                Err(_) => {
+                    let reply = delivery.is_reply();
+                    binder::with(|r| r.reject_files(id, call.tid, &delivery));
+                    if !reply {
+                        return Ok(false);
+                    }
+                    delivery = Delivery::failed_reply();
+                }
+            }
+            if let Some(payload) = delivery.payload.as_mut() {
+                for (transfer, number) in delivery.files.iter().zip(&received) {
+                    put32(payload, transfer.offset(), *number);
+                }
+            }
         }
         if let (Some(offset), Some(payload)) = (delivery.offset, delivery.payload.as_ref()) {
             call.file
@@ -298,13 +319,16 @@ pub fn finish(call: &ReadCall, delivery: Delivery) -> Result<(), i64> {
                 .unwrap()
                 .write(offset, payload)?;
         }
+        let bytes = &delivery.bytes[skip..delivery.length];
         output(call.io.read_buffer + call.io.read_consumed, bytes)?;
         let mut io = call.io;
         io.read_consumed += bytes.len() as u64;
         output(call.address, &io.encode())?;
-        binder::with(|r| r.finish_delivery(id, &delivery))
+        binder::with(|r| r.finish_delivery(id, &delivery))?;
+        Ok(true)
     })();
     if let Err(error) = result {
+        process::with_linux_files(|table| table.undo_received_files(&received, &delivery.files));
         crate::kprintln!(
             "LINUX_BINDER_DELIVERY_FAILED tid={} bytes={} errno={}",
             call.tid,

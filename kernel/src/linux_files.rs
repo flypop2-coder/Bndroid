@@ -227,7 +227,7 @@ fn truncate(fd: u64, length: u64) -> Result<u64, i64> {
         return Err(EINVAL);
     }
     let memory = opened.memory().ok_or(EINVAL)?;
-    process::with_current_linux_address_space(|space| space.linux_memfd_resize(memory, length))
+    process::linux_memfd_resize(memory, length)
 }
 #[cfg(feature = "art-runtime")]
 #[inline(never)]
@@ -303,9 +303,7 @@ fn write_memory(file: &FileRef, address: u64, count: u64, offset: Option<u64>) -
             .and_then(|_| {
                 let end = position + total + length as u64;
                 if end > memory.len() {
-                    process::with_current_linux_address_space(|space| {
-                        space.linux_memfd_resize(memory, end)
-                    })?;
+                    process::linux_memfd_resize(memory, end)?;
                 }
                 memory.write(position + total, &bytes[..length])
             });
@@ -511,9 +509,7 @@ fn fcntl(fd: u64, command: u64, argument: u64) -> Result<u64, i64> {
                 return Err(1);
             }
             let memory = opened.memory().ok_or(EINVAL)?;
-            process::with_current_linux_address_space(|space| {
-                space.linux_memfd_seal(memory, argument)
-            })
+            process::linux_memfd_seal(memory, argument)
         }
         #[cfg(feature = "art-runtime")]
         1034 => file(fd)?.memory().map(|m| m.seals() as u64).ok_or(EINVAL),

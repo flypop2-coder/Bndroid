@@ -72,6 +72,9 @@ pub struct FileRef(NonNull<Description>);
 unsafe impl Send for FileRef {}
 unsafe impl Sync for FileRef {}
 impl FileRef {
+    pub fn same_description(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
     pub fn try_new(target: Target, flags: u32) -> Result<Self, i64> {
         Self::create(target, flags, None, None, None, None)
     }
@@ -111,13 +114,15 @@ impl FileRef {
     ) -> Result<Self, i64> {
         let backing = Self::try_memory(b"binder-receive", 0)?;
         let id = crate::linux_binder::with(|router| router.open_in(owner, domain))?;
+        let binder = BinderFile { id, backing };
+        let poll = crate::linux_poll::with(|h| h.external(id))?;
         Self::create(
             Target::Binder(domain),
             flags,
             None,
             None,
-            Some(BinderFile { id, backing }),
-            None,
+            Some(binder),
+            Some(PollFile { id: poll }),
         )
     }
     pub fn try_eventfd(value: u32, flags: u32) -> Result<Self, i64> {
@@ -294,6 +299,54 @@ pub struct Table {
     entries: Vec<Option<Descriptor>>,
 }
 impl Table {
+    /// Reserve every destination before installing any descriptor. These are
+    /// explicit transferred capabilities with shared offsets/status flags.
+    pub fn receive_files(
+        &mut self,
+        files: &[crate::linux_binder::FileTransfer],
+    ) -> Result<Vec<u32>, i64> {
+        let mut numbers = Vec::new();
+        if files.is_empty() {
+            return Ok(numbers);
+        }
+        numbers.try_reserve_exact(files.len()).map_err(|_| ENOMEM)?;
+        self.ensure_storage()?;
+        for (i, slot) in self.entries.iter().enumerate() {
+            if slot.is_none() {
+                numbers.push(i as u32);
+            }
+            if numbers.len() == files.len() {
+                break;
+            }
+        }
+        if numbers.len() != files.len() {
+            return Err(EMFILE);
+        }
+        for (&number, transfer) in numbers.iter().zip(files) {
+            self.entries[number as usize] = Some(Descriptor {
+                file: transfer.file().clone(),
+                close_on_exec: true,
+            });
+        }
+        Ok(numbers)
+    }
+    /// User-copy failure must not close a later replacement at the same number.
+    pub fn undo_received_files(
+        &mut self,
+        numbers: &[u32],
+        files: &[crate::linux_binder::FileTransfer],
+    ) {
+        for (&number, transfer) in numbers.iter().zip(files) {
+            if self
+                .entries
+                .get(number as usize)
+                .and_then(Option::as_ref)
+                .is_some_and(|d| d.file.same_description(transfer.file()))
+            {
+                self.entries[number as usize] = None;
+            }
+        }
+    }
     pub const fn empty() -> Self {
         Self {
             entries: Vec::new(),
