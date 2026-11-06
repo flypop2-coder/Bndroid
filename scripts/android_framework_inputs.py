@@ -13,6 +13,29 @@ import xml.etree.ElementTree as ET
 from android_art_inputs import LIMIT
 
 REQUIRED_METADATA = ("/system/etc/init/netbpfload.rc",)
+# RuntimeInit installs TrafficStats through System.loadLibrary, so DT_NEEDED
+# alone cannot discover this bootstrap dependency. Keep the original APEX path.
+RUNTIME_JNI_ENTRYPOINTS = (
+    "/apex/com.android.tethering/lib64/libframework-connectivity-tiramisu-jni.so",
+)
+
+
+def framework_inputs_complete(receipt):
+    if "framework" not in receipt:
+        return False
+    files, dependencies = receipt["files"], receipt["dependencies"]
+    if not all(path in files for path in REQUIRED_METADATA):
+        return False
+    pending, visited = list(RUNTIME_JNI_ENTRYPOINTS), set()
+    while pending:
+        path = pending.pop()
+        if path in visited:
+            continue
+        if path not in files or path not in dependencies:
+            return False
+        visited.add(path)
+        pending.extend(dependencies[path])
+    return True
 
 
 def validate_inputs(output):
@@ -130,14 +153,21 @@ def extract_framework(command, output, sdk):
     search = ["/apex/com.android.runtime/lib64/bionic", "/system/lib64", "/system_ext/lib64"]
     search += [f"/apex/{module}/lib64" for module in modules]
     entrypoints = ["/system/bin/app_process64"]
-    queue = entrypoints + ["/system/lib64/libandroid_runtime.so", "/system/lib64/libandroid.so"]
+    queue = entrypoints + ["/system/lib64/libandroid_runtime.so", "/system/lib64/libandroid.so", *RUNTIME_JNI_ENTRYPOINTS]
     dependencies = receipt["dependencies"]
-    alternatives = {}
+    alternatives = dict(receipt.get("framework", {}).get("library_candidates", {}))
+    visited = set()
     while queue:
         path = queue.pop(0)
-        if path in dependencies:
+        if path in visited:
             continue
+        visited.add(path)
         target = pull(path)
+        if path in dependencies:
+            # A resumed root can already have a dependency record while a
+            # transitive input still needs acquisition. Walk the saved graph.
+            queue.extend(dependencies[path])
+            continue
         dynamic = subprocess.run([str(readelf), "--dynamic", "--wide", str(target)], check=True, capture_output=True, text=True).stdout
         names = re.findall(r"\(NEEDED\).*?\[([^\]]+)\]", dynamic)
         resolved = []
@@ -154,6 +184,7 @@ def extract_framework(command, output, sdk):
         dependencies[path] = resolved
         queue.extend(resolved)
     framework = {"entrypoints": entrypoints, "bootclasspath": bootclasspath, "core_art_files": core_files,
+                 "runtime_jni_entrypoints": list(RUNTIME_JNI_ENTRYPOINTS),
                  "dependency_search_paths": search, "library_candidates": alternatives,
                  "inventory_warnings": warnings, "total_files": len(files), "total_bytes": total,
                  "note": "Local platform Framework/runtime inputs only; no Google apps, Play services or vendor APKs."}

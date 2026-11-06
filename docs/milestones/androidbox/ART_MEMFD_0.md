@@ -2,6 +2,10 @@
 
 Date: November 6, 2026. Native ABI remains 70. Android acceptance A1–A6 remains incomplete.
 
+The raw `target/` artifacts referenced here were subsequently lost during Cargo
+cleanup. [Framework JNI-0](FRAMEWORK_JNI_0.md) records recovery, fresh regression
+evidence and the new local storage policy; the results below are historical.
+
 ## Implemented behavior
 
 The ART personality supplies anonymous memory files, real shared physical views,

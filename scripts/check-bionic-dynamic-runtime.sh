@@ -6,11 +6,11 @@ cd "$ROOT"
 source "$SCRIPT_DIR/lib/storage-evidence.sh"
 export CARGO_NET_OFFLINE=true
 TARGET_ROOT="$ROOT/target/bionic-dynamic-build"
-RUNTIME="${BNDROID_ANDROID_RUNTIME_DIR:-$ROOT/target/android-runtime-inputs/bionic}"
+RUNTIME="${BNDROID_ANDROID_RUNTIME_DIR:-$ROOT/.bndroid/runtime-inputs/bionic}"
 [[ -f "$RUNTIME/provenance.json" ]] || { echo "Supply BNDROID_ANDROID_RUNTIME_DIR; see fixtures/bionic-dynamic/README.md" >&2; exit 1; }
 RUNTIME="$(cd -- "$RUNTIME" && pwd)"
-mkdir -p "$ROOT/target/bionic-dynamic"
-ARTIFACTS="$(mktemp -d "$ROOT/target/bionic-dynamic/check.XXXXXX")"
+mkdir -p "$ROOT/.bndroid/bionic-dynamic"
+ARTIFACTS="$(mktemp -d "$ROOT/.bndroid/bionic-dynamic/check.XXXXXX")"
 export BNDROID_DYNAMIC_PROBE_DIR="$ARTIFACTS"
 "$ROOT/fixtures/bionic-dynamic/build.sh" >"$ARTIFACTS/native-build.log" 2>&1 || {
   cat "$ARTIFACTS/native-build.log" >&2; exit 1;

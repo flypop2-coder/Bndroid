@@ -9,7 +9,7 @@ From the repository root, extract the four runtime files into a **new** output d
 ```sh
 python3 scripts/extract-bionic-runtime.py \
   --system-image "$HOME/Library/Android/sdk/system-images/android-36.1/google_apis_playstore/arm64-v8a" \
-  --output target/android-runtime-inputs/bionic
+  --output .bndroid/runtime-inputs/bionic
 ./scripts/check-bionic-dynamic-runtime.sh
 ```
 
@@ -22,7 +22,13 @@ BNDROID_ANDROID_RUNTIME_DIR=/absolute/path/to/runtime \
   ./scripts/check-bionic-dynamic-runtime.sh
 ```
 
-The gate builds the PIE and plugin, validates extracted input hashes, packages an immutable USTAR root, boots Bndroid using temporary disk storage and fresh host entropy, and verifies two successful process generations with no remaining dynamic page/table owners or open file descriptions. Output goes to `target/bionic-dynamic/check.*/`: `summary.json`, UART logs, rootfs input receipts, compiler metadata, ELF metadata, and generated binaries. No upstream binary is checked into Git.
+The gate builds the PIE and plugin, validates extracted input hashes, packages an immutable USTAR root, boots Bndroid using temporary disk storage and fresh host entropy, and verifies two successful process generations with no remaining dynamic page/table owners or open file descriptions. Output goes to `.bndroid/bionic-dynamic/check.*/`: `summary.json`, UART logs, rootfs input receipts, compiler metadata, ELF metadata, and generated binaries. No upstream binary is checked into Git.
+
+Inputs and evidence now live outside Cargo's `target/`, so rebuilding or clearing
+compiler caches does not remove them. The compiler cache remains
+`target/bionic-dynamic-build`. Existing caches can still be used by setting
+`BNDROID_ANDROID_RUNTIME_DIR` to their absolute directory; no automatic move or
+deletion is performed.
 
 An intentional access to a complete page beyond file EOF must fault and release all child resources:
 

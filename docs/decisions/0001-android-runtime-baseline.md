@@ -33,4 +33,11 @@ with all previous file records unchanged. It does not start Android init or a BP
 service. The version properties describe this frozen library set, while the
 application acceptance matrix remains incomplete.
 
+The subsequent dynamic-JNI extension adds the same source's 35,696-byte
+Tethering `libframework-connectivity-tiramisu-jni.so`, required by TrafficStats
+during RuntimeInit. Its existing native dependencies are inventoried recursively;
+the set is now 349 files / 265,085,778 bytes. The source namespace policy is
+unchanged. New runtime inputs and ART/Bionic evidence reside under ignored
+`.bndroid/`, outside Cargo's removable build tree.
+
 This provides a concrete, reproducible source for testing the custom kernel against real Android runtime behavior without a large source acquisition. Android's namespace, property, signal, memory, filesystem, Binder, and service semantics still have to be implemented and verified. Booting an SDK emulator to read files is never evidence that Bndroid runs Android applications. The acceptance levels in `TODO.md` remain unchanged and incomplete until their full requirements pass on Bndroid.

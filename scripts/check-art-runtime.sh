@@ -6,11 +6,11 @@ source "$ROOT/scripts/lib/storage-evidence.sh"
 export BNDROID_ART_MODE="${BNDROID_ART_MODE:-java}"
 INPUT_SET=art
 [[ "$BNDROID_ART_MODE" != framework* ]] || INPUT_SET=framework
-RUNTIME="${BNDROID_ART_RUNTIME_DIR:-$ROOT/target/android-runtime-inputs/$INPUT_SET}"
+RUNTIME="${BNDROID_ART_RUNTIME_DIR:-$ROOT/.bndroid/runtime-inputs/$INPUT_SET}"
 [[ -f "$RUNTIME/art-provenance.json" ]] || { echo "Extract local inputs with --include-$INPUT_SET first" >&2; exit 1; }
 RUNTIME="$(cd -- "$RUNTIME" && pwd)"
-mkdir -p "$ROOT/target/art-runtime"
-ARTIFACTS="$(mktemp -d "$ROOT/target/art-runtime/check.XXXXXX")"
+mkdir -p "$ROOT/.bndroid/art-runtime"
+ARTIFACTS="$(mktemp -d "$ROOT/.bndroid/art-runtime/check.XXXXXX")"
 export BNDROID_ART_PROBE_DIR="$ARTIFACTS"
 "$ROOT/fixtures/art-runtime/build.sh" >"$ARTIFACTS/dex-build.log" 2>&1
 python3 "$ROOT/scripts/build-art-rootfs.py" --runtime "$RUNTIME" --dex "$ARTIFACTS/probe.dex" --mode "$BNDROID_ART_MODE" --output "$ARTIFACTS/rootfs.tar" >"$ARTIFACTS/rootfs-build.log"

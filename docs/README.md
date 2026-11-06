@@ -24,6 +24,7 @@ Public Markdown documentation is maintained in English. Paths already establishe
 | `docs/archive/originals/` | Verbatim original-language historical records in text format |
 | `crates/bndr-ui/assets/` | UI font binary asset |
 | `target/` (ignored) | Local build outputs, logs, and generated evidence |
+| `.bndroid/` (ignored) | Acquired runtime inputs and new ART/Bionic evidence, independent of Cargo cleanup |
 
 ## Current UI and compatibility work
 
@@ -38,5 +39,7 @@ Public Markdown documentation is maintained in English. Paths already establishe
 - [ART process metadata, runtime files and native initialization](milestones/androidbox/ART_PROCESS_0.md)
 - [ART signals, synchronization and first managed Java execution](milestones/androidbox/ART_SIGNALS_0.md)
 - [ART managed threads, garbage collection and JNI from an APK](milestones/androidbox/ART_MANAGED_0.md)
+- [ART shared code-cache backing and boot metadata](milestones/androidbox/ART_MEMFD_0.md)
+- [Framework runtime JNI dependencies and current Binder boundary](milestones/androidbox/FRAMEWORK_JNI_0.md)
 
 Historical pages report their original profile and validation date, not universal compatibility or a fresh test run. See [the archive policy](archive/README.md) for source preservation.

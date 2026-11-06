@@ -2,6 +2,12 @@
 
 This page records implemented behavior and validation, with a September 9, 2026 platform baseline and dated updates below. Historical test counts belong to the indicated development runs; they are not a claim that every historical gate was rerun during publication. The [complete original status log](docs/archive/originals/IMPLEMENTATION_STATUS.txt) preserves detailed evidence and earlier milestones. Future tasks belong only in [TODO.md](TODO.md).
 
+## Framework dynamic JNI update — November 6, 2026
+
+TrafficStats's runtime JNI dependency is now included with its complete ELF dependency graph. The original Framework loads it through the unchanged Tethering namespace and reaches `RuntimeInit.nativeFinishInit`; startup then fails directly at the absent `/dev/binder`. The failed process and all six workers are completely reclaimed. Parcel/Looper, ActivityThread and A1–A6 remain incomplete. The local input set contains 349 files / 265,085,778 bytes. See [Framework JNI-0](docs/milestones/androidbox/FRAMEWORK_JNI_0.md) for current evidence and limits.
+
+An erroneous Cargo cleanup removed the old local `target/` inputs/evidence during this work. Source, Git and SDK files were unaffected; inputs were re-extracted and current regressions rerun. New ART/Bionic inputs and evidence now live under ignored `.bndroid/`, independent of Cargo cleanup. Historical `target/` paths in earlier updates are no longer available locally. The interactive temporary-disk demo has been restored. Fresh validation passes shared code-cache, boot-property, memory, APK/GC/JNI, Framework frontend, dynamic Bionic/thread/EOF, native boot/mobile UI, 1,128 workspace host tests, 395 Framework library tests, 22 Python checks and host/AArch64 library lint gates.
+
 ## Shared ART code-cache backing update — November 6, 2026
 
 Real memfd objects now supply shared physical mappings, truncation/EOF faults, seals, descriptor I/O and lifetime across close/reuse. ART's 64 MiB code-cache layout uses separate RW/NX and R/X views; single RWX mappings remain forbidden. The original physical/heap bounds remain, with compact page ownership and corrected reservation for fixed replacements. [ART Memfd-0](docs/milestones/androidbox/ART_MEMFD_0.md) records the behavior and [ADR 0002](docs/decisions/0002-linux-abi-release-and-code-cache.md) explains the partial Linux ABI release value and protection model.

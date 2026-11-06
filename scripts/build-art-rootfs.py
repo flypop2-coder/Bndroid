@@ -9,7 +9,7 @@ import tarfile
 import zipfile
 
 from android_properties import encode_properties, runtime_properties
-from android_framework_inputs import REQUIRED_METADATA
+from android_framework_inputs import framework_inputs_complete
 
 
 def main():
@@ -23,8 +23,8 @@ def main():
     framework = args.mode.startswith("framework")
     if framework and "framework" not in provenance:
         raise SystemExit("Framework mode requires inputs extracted with --include-framework")
-    if framework and not all(path in provenance["files"] for path in REQUIRED_METADATA):
-        raise SystemExit("Framework metadata is incomplete; re-run extraction with --resume-framework --include-framework")
+    if framework and not framework_inputs_complete(provenance):
+        raise SystemExit("Framework metadata/JNI inputs are incomplete; re-run extraction with --resume-framework --include-framework")
     inputs = {}
     for name, receipt in provenance["files"].items():
         path = PurePosixPath(name)
